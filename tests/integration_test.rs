@@ -10,8 +10,8 @@ use lemma::engine::{
     ConformalEngine, ConsensusEngine, ConsensusStatus, DecisionCache, DriftEngine, Evaluator,
     ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy, HierarchicalRouter,
     LayaClassifier, OodDetector, PolicyRule, ReviewQueueItem, RlcdSample,
-    SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StreamPipeline,
-    StreamPipelineConfig, SystemTier, UncertaintyStrategy,
+    SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine,
+    StreamPipeline, StreamPipelineConfig, SystemStatsReport, SystemTier, UncertaintyStrategy,
 };
 use lemma::model::{
     Checkpoint, DecisionResult, HierarchicalSchema, Question, QuestionType, inspect_safetensors,
@@ -1189,3 +1189,161 @@ fn test_active_distill_rlcd_dataset_generation() {
     assert_eq!(val_count, report.val_samples);
 }
 
+#[test]
+fn test_stats_engine_speed_performance_accuracy() {
+    let source = lemma::resolve_data_source(
+        Path::new("data"),
+        Some(Path::new("data/customer_support.jsonl")),
+        false,
+        None,
+    )
+    .unwrap();
+    let items = source.read_items().unwrap();
+    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+
+    let stats_engine = StatsEngine::new(classifier)
+        .with_iterations(3)
+        .with_warmup(2);
+
+    let report: SystemStatsReport = stats_engine.evaluate(&items, &questions).unwrap();
+
+    // 1. Metadata Verification
+    assert_eq!(report.dataset_items, items.len());
+    assert_eq!(report.benchmark_iterations, 3);
+    assert_eq!(report.warmup_runs, 2);
+    assert_eq!(report.questions.len(), questions.len());
+    assert_eq!(report.head_budget, 192);
+
+    // 2. Speed & Latency Verification
+    assert!(report.speed.total_elapsed_secs > 0.0);
+    assert!(report.speed.latency_avg_ms > 0.0);
+    assert!(report.speed.latency_min_ms > 0.0);
+    assert!(report.speed.latency_max_ms >= report.speed.latency_min_ms);
+    assert!(report.speed.latency_p50_ms >= report.speed.latency_min_ms);
+    assert!(report.speed.latency_p90_ms >= report.speed.latency_p50_ms - 1e-6);
+    assert!(report.speed.latency_p95_ms >= report.speed.latency_p90_ms - 1e-6);
+    assert!(report.speed.latency_p99_ms >= report.speed.latency_p95_ms - 1e-6);
+    assert!(report.speed.latency_max_ms >= report.speed.latency_p99_ms - 1e-6);
+
+    // 3. Performance & Throughput Verification
+    assert!(report.performance.throughput_items_per_sec > 0.0);
+    assert!(report.performance.throughput_decisions_per_sec > 0.0);
+    assert_eq!(report.performance.total_items_processed, items.len() * 3);
+    assert_eq!(
+        report.performance.total_decisions_evaluated,
+        items.len() * 3 * questions.len()
+    );
+    assert!(report.performance.avg_head_token_utilization_pct > 0.0);
+    assert!(report.performance.avg_head_token_utilization_pct < 100.0);
+
+    // 4. Accuracy & Calibration Verification
+    assert!(report.accuracy.is_some());
+    let acc = report.accuracy.as_ref().unwrap();
+    assert!(acc.overall_accuracy >= 0.0 && acc.overall_accuracy <= 1.0);
+    assert!(acc.soft_accuracy >= 0.0 && acc.soft_accuracy <= 1.0);
+    assert!(acc.expected_calibration_error >= 0.0 && acc.expected_calibration_error <= 1.0);
+    assert!(acc.brier_score >= 0.0);
+    assert!(acc.labeled_sample_count > 0);
+
+    // 5. Per-Question Breakdown Verification
+    for (qid, q_stat) in &report.questions {
+        assert!(questions.contains_key(qid));
+        assert!(q_stat.evaluated_samples > 0);
+        assert!(q_stat.mean_confidence >= 0.0 && q_stat.mean_confidence <= 1.0);
+        assert!(q_stat.mean_top2_margin >= 0.0 && q_stat.mean_top2_margin <= 1.0);
+        assert!(q_stat.mean_entropy >= 0.0 && q_stat.mean_entropy <= 1.0);
+        assert!(q_stat.act_escalate_rate >= 0.0 && q_stat.act_escalate_rate <= 1.0);
+        assert!(q_stat.accuracy.is_some());
+    }
+
+    // 6. Formatters Verification
+    let table_str = StatsEngine::format_table(&report);
+    assert!(table_str.contains("Speed & Latency Distribution"));
+    assert!(table_str.contains("System Throughput & Efficiency"));
+    assert!(table_str.contains("Decision Accuracy, Calibration & Safety"));
+    assert!(table_str.contains("Per-Question Schema Breakdown"));
+
+    let compact_str = StatsEngine::format_compact(&report);
+    assert!(compact_str.contains("SPEED:"));
+    assert!(compact_str.contains("PERF:"));
+    assert!(compact_str.contains("ACC:"));
+
+    let json_str = StatsEngine::format_json(&report).unwrap();
+    let deserialized: SystemStatsReport = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(deserialized.checkpoint, report.checkpoint);
+
+    let csv_str = StatsEngine::format_csv(&report);
+    assert!(csv_str.contains("latency_p50"));
+    assert!(csv_str.contains("throughput_items"));
+    assert!(csv_str.contains("overall_accuracy"));
+}
+
+#[test]
+fn test_stats_engine_with_semantic_cache() {
+    let source = lemma::resolve_data_source(
+        Path::new("data"),
+        Some(Path::new("data/customer_support.jsonl")),
+        false,
+        None,
+    )
+    .unwrap();
+    let items = source.read_items().unwrap();
+    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+
+    let stats_engine = StatsEngine::new(classifier)
+        .with_iterations(3)
+        .with_warmup(1)
+        .with_cache(true, 0.90);
+
+    let report = stats_engine.evaluate(&items, &questions).unwrap();
+
+    assert!(report.performance.cache_summary.is_some());
+    let cache = report.performance.cache_summary.as_ref().unwrap();
+    assert!(cache.enabled);
+    assert!(cache.total_lookups > 0);
+    // Across 3 iterations, iterations 2 & 3 should hit cache!
+    assert!(cache.hit_rate_pct > 30.0);
+    assert!(cache.exact_hits > 0);
+    assert!(cache.speedup_ratio >= 1.0);
+}
+
+#[test]
+fn test_stats_engine_export_file() {
+    let source = lemma::resolve_data_source(
+        Path::new("data"),
+        Some(Path::new("data/customer_support.jsonl")),
+        false,
+        None,
+    )
+    .unwrap();
+    let items = source.read_items().unwrap();
+    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+
+    let stats_engine = StatsEngine::new(classifier)
+        .with_iterations(2)
+        .with_warmup(1);
+
+    let report = stats_engine.evaluate(&items, &questions).unwrap();
+
+    let json_path = Path::new("target/integration_stats_export.json");
+    if json_path.exists() {
+        let _ = std::fs::remove_file(json_path);
+    }
+    StatsEngine::export_report(&report, json_path).unwrap();
+    assert!(json_path.exists());
+    let json_content = std::fs::read_to_string(json_path).unwrap();
+    let decoded: SystemStatsReport = serde_json::from_str(&json_content).unwrap();
+    assert_eq!(decoded.dataset_items, items.len());
+
+    let csv_path = Path::new("target/integration_stats_export.csv");
+    if csv_path.exists() {
+        let _ = std::fs::remove_file(csv_path);
+    }
+    StatsEngine::export_report(&report, csv_path).unwrap();
+    assert!(csv_path.exists());
+    let csv_content = std::fs::read_to_string(csv_path).unwrap();
+    assert!(csv_content.contains("latency_p50"));
+}

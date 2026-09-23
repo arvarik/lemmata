@@ -11,6 +11,12 @@ pub struct SemanticCacheConfig {
     pub similarity_threshold: f64,
     pub min_confidence: f64,
     pub ttl_seconds: u64,
+    #[serde(default = "default_max_escalate")]
+    pub max_escalate_probability: f64,
+}
+
+fn default_max_escalate() -> f64 {
+    0.50
 }
 
 impl Default for SemanticCacheConfig {
@@ -20,6 +26,7 @@ impl Default for SemanticCacheConfig {
             similarity_threshold: 0.92,
             min_confidence: 0.70,
             ttl_seconds: 86_400, // 24 hours
+            max_escalate_probability: 0.50,
         }
     }
 }
@@ -180,7 +187,7 @@ impl DecisionCache {
             .fold(0.0, f64::max);
 
         // Reject caching if confidence is too low or supervisor escalation is indicated
-        if avg_confidence < self.config.min_confidence || max_act_prob > 0.50 {
+        if avg_confidence < self.config.min_confidence || max_act_prob > self.config.max_escalate_probability {
             return false;
         }
 
