@@ -19,7 +19,14 @@ pub enum Commands {
     Download(DownloadArgs),
 
     /// Classify data ingested from data/ folder, files, stdin, or inline text
+    #[command(alias = "run")]
     Classify(ClassifyArgs),
+
+    /// Fetch public datasets or live discussions from Hugging Face, Hacker News, Reddit, or Wikipedia
+    Fetch(FetchArgs),
+
+    /// Scrape web pages or articles into clean LLM-ready markdown or text
+    Scrape(ScrapeArgs),
 
     /// Run robustness and calibration experiments (order invariance, temperature sweeps)
     Experiment(ExperimentArgs),
@@ -118,6 +125,10 @@ pub struct ClassifyArgs {
     /// Classify inline text snippet directly from command line
     #[arg(short, long)]
     pub text: Option<String>,
+
+    /// Target web URL to scrape, extract, and classify directly
+    #[arg(short = 'u', long)]
+    pub url: Option<String>,
 
     /// Path to a JSON schema file defining questions (Jev/Laya format)
     #[arg(short, long)]
@@ -1215,5 +1226,96 @@ pub enum ExperimentMode {
     Order,
     Temp,
     Checkpoints,
+}
+
+#[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("source")
+        .required(true)
+        .args(["hf", "hn", "reddit", "wikipedia"])
+))]
+pub struct FetchArgs {
+    /// Hugging Face dataset identifier (e.g. "ag_news", "fancyzhx/ag_news", "PolyAI/banking77", "imdb")
+    #[arg(long, group = "source", value_name = "DATASET")]
+    pub hf: Option<String>,
+
+    /// Hacker News feed ("top", "new", "best", "ask", "show")
+    #[arg(long, group = "source", value_name = "CATEGORY")]
+    pub hn: Option<String>,
+
+    /// Reddit subreddit name to fetch from (e.g. "rust", "machinelearning", "localllama")
+    #[arg(long, group = "source", value_name = "SUBREDDIT")]
+    pub reddit: Option<String>,
+
+    /// Wikipedia article title or search term (e.g. "Rust_(programming_language)", "Artificial_intelligence")
+    #[arg(long, group = "source", value_name = "ARTICLE")]
+    pub wikipedia: Option<String>,
+
+    /// Dataset configuration / subset (for multi-subset Hugging Face datasets, default: "default")
+    #[arg(long, default_value = "default")]
+    pub config: String,
+
+    /// Dataset split to retrieve (default: "train" for Hugging Face)
+    #[arg(short, long, default_value = "train")]
+    pub split: String,
+
+    /// Maximum number of records or stories to fetch (default: 50)
+    #[arg(short = 'n', long, default_value_t = 50)]
+    pub limit: usize,
+
+    /// Record or pagination offset (default: 0)
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+
+    /// Custom text column override
+    #[arg(long)]
+    pub text_col: Option<String>,
+
+    /// Custom label column override
+    #[arg(long)]
+    pub label_col: Option<String>,
+
+    /// Automatically infer and generate an aligned Laya question schema from dataset features
+    #[arg(long)]
+    pub auto_schema: bool,
+
+    /// Optional file destination to save inferred schema JSON (when --auto-schema is set)
+    #[arg(long, value_name = "PATH")]
+    pub schema_output: Option<PathBuf>,
+
+    /// Write output to file instead of standard output (stdout)
+    #[arg(short = 'o', long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Output presentation format (jsonl, json, csv, table; default: jsonl for piping)
+    #[arg(long, default_value = "jsonl")]
+    pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct ScrapeArgs {
+    /// Target web page URL to scrape (e.g. "https://news.ycombinator.com")
+    #[arg(short = 'u', long, value_name = "URL")]
+    pub url: String,
+
+    /// Maximum Unicode character count for scraped content (default: 4000)
+    #[arg(long, default_value_t = 4000)]
+    pub max_chars: usize,
+
+    /// Request timeout in seconds (default: 15)
+    #[arg(long, default_value_t = 15)]
+    pub timeout: u64,
+
+    /// Route through Jina Reader (https://r.jina.ai/<url>) for headless dynamic markdown rendering
+    #[arg(long)]
+    pub jina: bool,
+
+    /// Write output to file instead of standard output (stdout)
+    #[arg(short = 'o', long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Output presentation format (jsonl, json, table; default: jsonl)
+    #[arg(long, default_value = "jsonl")]
+    pub format: OutputFormat,
 }
 

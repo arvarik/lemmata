@@ -1347,3 +1347,105 @@ fn test_stats_engine_export_file() {
     let csv_content = std::fs::read_to_string(csv_path).unwrap();
     assert!(csv_content.contains("latency_p50"));
 }
+
+#[test]
+fn test_huggingface_ingest_and_auto_schema() {
+    unsafe {
+        std::env::set_var("LEMMA_OFFLINE", "1");
+    }
+
+    let source = lemma::datasource::HuggingFaceSource::new("fancyzhx/ag_news").with_limit(4);
+    let (items, schema) = source.read_items_with_schema().unwrap();
+
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].id, "fancyzhx/ag_news:train:0");
+    assert!(items[0].ground_truth.is_some());
+    let gt = items[0].ground_truth.as_ref().unwrap();
+    assert_eq!(gt.get("classification").unwrap(), "Business");
+    assert_eq!(items[1].ground_truth.as_ref().unwrap().get("classification").unwrap(), "Sci/Tech");
+
+    assert!(schema.contains_key("classification"));
+    let q = &schema["classification"];
+    let mut opts = q.render_options();
+    opts.sort();
+    assert_eq!(opts, vec!["Business", "Sci/Tech", "Sports", "World"]);
+
+    // Feed directly into StatsEngine
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let stats_engine = StatsEngine::new(classifier).with_iterations(2).with_warmup(1);
+    let report = stats_engine.evaluate(&items, &schema).unwrap();
+
+    assert_eq!(report.dataset_items, 4);
+    assert!(report.questions.contains_key("classification"));
+    assert!(report.speed.latency_p50_ms >= 0.0);
+}
+
+#[test]
+fn test_web_scraper_html_extraction_and_classification() {
+    unsafe {
+        std::env::set_var("LEMMA_OFFLINE", "1");
+    }
+
+    let scraper = lemma::datasource::WebScraper::new(lemma::datasource::ScrapeOptions::default());
+    let doc = scraper.scrape("https://example.com/ai-article").unwrap();
+
+    assert_eq!(doc.title, "Fast Non-Autoregressive Decision Encoders");
+    assert!(doc.word_count > 20);
+    assert!(!doc.is_likely_spa);
+    assert!(doc.markdown.contains("# Fast Non-Autoregressive Decision Encoders"));
+    assert!(!doc.markdown.contains("analytics tracking code"));
+
+    // Classify using Laya
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let mut criteria = serde_json::Map::new();
+    criteria.insert("encoders".into(), serde_json::json!("ModernBERT, non-autoregressive, classification models"));
+    criteria.insert("cooking".into(), serde_json::json!("culinary, kitchen, recipes, ingredients"));
+    let q = Question {
+        qtype: QuestionType::Choice,
+        instructions: "Is this article about machine learning encoders or culinary cooking?".into(),
+        criteria: Some(serde_json::Value::Object(criteria)),
+    };
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert("topic".to_string(), q);
+
+    let res = classifier.classify(&serde_json::json!({ "text": doc.markdown }), &questions).unwrap();
+    let ans = res.answers.get("topic").unwrap();
+    assert_eq!(ans.choice.as_deref(), Some("encoders"));
+    assert!(ans.confidence > 0.5);
+}
+
+#[test]
+fn test_hacker_news_and_wikipedia_ingestion() {
+    unsafe {
+        std::env::set_var("LEMMA_OFFLINE", "1");
+    }
+
+    let hn_source = lemma::datasource::HackerNewsSource::new("top", 1);
+    let hn_items = hn_source.read_items().unwrap();
+    assert_eq!(hn_items.len(), 1);
+    assert_eq!(hn_items[0].id, "hn:39000000");
+    assert!(hn_items[0].preview_text(200).contains("AWS terms"));
+
+    let wiki_source = lemma::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
+    let wiki_items = wiki_source.read_items().unwrap();
+    assert_eq!(wiki_items.len(), 1);
+    assert_eq!(wiki_items[0].id, "wiki:29414838");
+    assert!(wiki_items[0].preview_text(200).contains("Rust"));
+}
+
+#[test]
+fn test_web_source_parallel_read_items() {
+    unsafe {
+        std::env::set_var("LEMMA_OFFLINE", "1");
+    }
+
+    let urls = vec![
+        "https://example.com/page1".to_string(),
+        "https://example.com/page2".to_string(),
+    ];
+    let web_source = lemma::datasource::WebSource::new(urls, lemma::datasource::ScrapeOptions::default());
+    let items = web_source.read_items().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id, "https://example.com/page1");
+    assert!(items[0].state.get("title").is_some());
+}

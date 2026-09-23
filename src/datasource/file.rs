@@ -163,7 +163,7 @@ impl FileSource {
         Ok(vec![DataItem::new(id, state, path_str)])
     }
 
-    fn json_value_to_item(default_id: String, val: serde_json::Value, source_uri: &str) -> DataItem {
+    pub fn json_value_to_item(default_id: String, val: serde_json::Value, source_uri: &str) -> DataItem {
         match val {
             serde_json::Value::Object(mut map) => {
                 let id = map
