@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::datasource::{DataItem, StreamSink, StreamingDataSource};
 use crate::engine::attest::AttestationEngine;
-use crate::engine::cache::{DecisionCache, SemanticCacheConfig};
+use crate::engine::cache::{DecisionCache, SemanticCacheConfig, compute_schema_hash};
 use crate::engine::classifier::LayaClassifier;
 use crate::engine::guardrail::GuardAction;
 use crate::model::{DecisionResult, Question};
@@ -151,7 +151,7 @@ impl StreamPipeline {
     /// Executes the streaming pipeline against a `StreamingDataSource`.
     pub fn run(&mut self, source: &mut dyn StreamingDataSource) -> Result<StreamMetrics> {
         let start_time = Instant::now();
-        let schema_hash = format!("{:x}", self.questions.len());
+        let schema_hash = compute_schema_hash(&self.questions);
 
         let mut total_ingested = 0;
         let mut total_classified = 0;
@@ -272,11 +272,11 @@ impl StreamPipeline {
                 total_classified += 1;
             }
 
-            // Flush sinks
-            self.primary_sink.flush()?;
-            if let Some(esc_sink) = &mut self.escalate_sink {
-                esc_sink.flush()?;
-            }
+            // Flush sinks with error isolation
+            let primary_flush_res = self.primary_sink.flush();
+            let esc_flush_res = self.escalate_sink.as_mut().map(|s| s.flush()).unwrap_or(Ok(()));
+            primary_flush_res?;
+            esc_flush_res?;
 
             // Commit stream offset for the processed batch
             source.commit_offset(batch.len())?;

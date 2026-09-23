@@ -23,7 +23,7 @@ pub use active::{
     ReviewQueueItem, ReviewQueuePrediction, RlcdSample, UncertaintyStrategy,
 };
 pub use attest::{AttestationEngine, AttestationVerificationReport, DecisionReceipt};
-pub use cache::{CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig};
+pub use cache::{CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig, compute_schema_hash};
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
     CalibrationReport, CalibrationTuner, QatsProfile,

@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
-use crate::model::DecisionResult;
+use crate::model::{DecisionResult, Question};
 
 /// Configuration for the sub-millisecond semantic decision cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,11 +117,12 @@ impl DecisionCache {
         self.entries.clear();
     }
 
-    /// Generate an exact cache key for text and questions schema.
+    /// Generate an exact cache key for text and questions schema with length-prefixed isolation.
     pub fn make_exact_key(text: &str, schema_hash: &str) -> String {
         let canonical: String = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-        format!("{schema_hash}::{canonical}")
+        format!("{}:{}:{}", schema_hash.len(), schema_hash, canonical)
     }
+
 
     /// Query the cache for a given input state.
     pub fn lookup(&mut self, text: &str, schema_hash: &str) -> CacheLookupResult {
@@ -261,6 +264,19 @@ impl DecisionCache {
     }
 }
 
+/// Computes a deterministic 64-bit hex hash isolating schemas by question IDs, instructions, and options.
+pub fn compute_schema_hash(questions: &BTreeMap<String, Question>) -> String {
+    let mut hasher = DefaultHasher::new();
+    for (qid, q) in questions {
+        qid.hash(&mut hasher);
+        q.instructions.hash(&mut hasher);
+        for opt in q.render_options() {
+            opt.hash(&mut hasher);
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 /// Compute cosine similarity between two vectors with norm-safe calculation.
 pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
@@ -269,10 +285,12 @@ pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a = a.iter().map(|x| x * x).sum::<f64>().sqrt();
     let norm_b = b.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if norm_a <= 1e-12 || norm_b <= 1e-12 {
+    let denom = norm_a * norm_b;
+    if !denom.is_finite() || denom <= 1e-12 {
         return 0.0;
     }
-    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+    let sim = (dot / denom).clamp(-1.0, 1.0);
+    if sim.is_nan() { 0.0 } else { sim }
 }
 
 /// Convert input text into a normalized 128-dimensional dense feature representation.

@@ -19,9 +19,9 @@ use lemma::engine::{
     DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy,
     HierarchicalRouter, LayaClassifier, OodDetector, OodProfile, SchemaKnapsackOptimizer,
     SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
-    UncertaintyStrategy,
+    UncertaintyStrategy, compute_schema_hash,
 };
-use lemma::datasource::{DataSource, StreamSink};
+use lemma::datasource::{DataItem, DataSource, StreamSink};
 use lemma::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
 use lemma::{
     create_inline_question, load_questions_from_file, resolve_data_source,
@@ -30,7 +30,18 @@ use lemma::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Err(e) = run(cli) {
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+        }
+        return Err(e);
+    }
+    Ok(())
+}
 
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Download(args) => handle_download(args),
         Commands::Classify(args) => handle_classify(args),
@@ -181,7 +192,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         None
     };
 
-    let schema_hash = format!("{:x}", questions.len());
+    let schema_hash = compute_schema_hash(&questions);
     let mut raw_results = Vec::new();
 
     for item in &items {
@@ -346,8 +357,11 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
                 Cell::new("Latency").fg(Color::DarkGrey),
             ]);
 
-            for (idx, (id, res)) in results.iter().enumerate() {
-                let snippet = items.get(idx).map(|it| it.preview_text(40)).unwrap_or_default();
+            let item_map: std::collections::HashMap<&str, &DataItem> =
+                items.iter().map(|it| (it.id.as_str(), it)).collect();
+
+            for (_idx, (id, res)) in results.iter().enumerate() {
+                let snippet = item_map.get(id.as_str()).map(|it| it.preview_text(40)).unwrap_or_default();
 
                 for (qid, ans) in &res.answers {
                     let pred_str = if let Some(labels) = &ans.selected_labels {
@@ -1184,7 +1198,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let mut cache = DecisionCache::new(cfg);
 
             println!("\n⚡ Benchmarking Semantic Decision Cache on {} items...", items.len());
-            let schema_hash = format!("{:x}", schema.len());
+            let schema_hash = compute_schema_hash(&schema);
 
             // Run Pass 1: Cold cache (inference)
             let start_cold = std::time::Instant::now();

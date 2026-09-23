@@ -509,11 +509,14 @@ fn compute_bucket_loss(
         CalibrationLoss::Nll => {
             let mut total_nll = 0.0;
             for s in samples {
+                if s.raw_logits.is_empty() {
+                    continue;
+                }
                 let max_z = s.raw_logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let exp_sum: f64 = s.raw_logits.iter().map(|&z| ((z - max_z) / t_safe).exp()).sum();
+                let lse = max_z + t_safe * exp_sum.max(1e-12).ln();
                 let target_logit = s.raw_logits.get(s.target_index).copied().unwrap_or(0.0);
-                let prob = ((target_logit - max_z) / t_safe).exp() / exp_sum.max(1e-12);
-                total_nll -= prob.max(1e-12).ln();
+                total_nll += (lse - target_logit) / t_safe;
             }
             total_nll / samples.len().max(1) as f64
         }
@@ -566,14 +569,7 @@ fn compute_bucket_metrics(samples: &[ValidationSample], t: f64, bins: usize) -> 
             }
         }
 
-        let k = probs.len();
-        let conf = if k > 1 {
-            ((max_p - (1.0 - max_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round() / 10000.0
-        } else {
-            max_p
-        };
-
-        confs.push(conf);
+        confs.push(max_p);
         corr.push(best_idx == s.target_index);
 
         let target_p = probs.get(s.target_index).copied().unwrap_or(1e-12);
