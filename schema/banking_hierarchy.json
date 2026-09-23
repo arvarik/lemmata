@@ -1,0 +1,31 @@
+{
+  "coarse": {
+    "type": "choice",
+    "instructions": "Determine the high-level banking domain",
+    "criteria": {
+      "cards": "Credit card, debit card, lost card, PIN issues",
+      "transfers": "Wire transfers, ACH, international remittances, pending deposits",
+      "security": "Compromised account, suspicious login, password resets"
+    }
+  },
+  "branches": {
+    "cards": {
+      "type": "choice",
+      "instructions": "Select specific card inquiry",
+      "criteria": {
+        "card_activation": "activating a new physical card",
+        "lost_or_stolen": "reporting card lost or stolen",
+        "pin_change": "updating ATM PIN"
+      }
+    },
+    "transfers": {
+      "type": "choice",
+      "instructions": "Select transfer inquiry",
+      "criteria": {
+        "wire_delay": "funds not arrived after 48h",
+        "transfer_limit": "increasing daily transfer limits",
+        "beneficiary": "adding international IBAN"
+      }
+    }
+  }
+}

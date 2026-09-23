@@ -77,6 +77,18 @@ pub fn resolve_data_source(
     is_stdin: bool,
     inline_text: Option<&str>,
 ) -> Result<Box<dyn DataSource>> {
+    resolve_data_source_filtered(data_dir, file, is_stdin, inline_text, None, false)
+}
+
+/// Resolve the appropriate DataSource based on CLI arguments with optional directory filtering.
+pub fn resolve_data_source_filtered(
+    data_dir: &Path,
+    file: Option<&Path>,
+    is_stdin: bool,
+    inline_text: Option<&str>,
+    extensions: Option<&str>,
+    no_recursive: bool,
+) -> Result<Box<dyn DataSource>> {
     if let Some(text) = inline_text {
         let item = DataItem::new("cli_input", serde_json::json!({ "text": text }), "cli_arg");
         return Ok(Box::new(MemorySource::new("InlineTextSource", vec![item])));
@@ -90,6 +102,72 @@ pub fn resolve_data_source(
         return Ok(Box::new(FileSource::new(f)));
     }
 
-    // Default: ingest from data directory
-    Ok(Box::new(DirectorySource::new(data_dir)))
+    // Default: ingest from data directory with optional filtering
+    let mut dir_source = DirectorySource::new(data_dir);
+    if no_recursive {
+        dir_source = dir_source.with_recursive(false);
+    }
+    if let Some(exts_str) = extensions {
+        let exts: Vec<String> = exts_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        dir_source = dir_source.with_extensions(exts);
+    }
+    Ok(Box::new(dir_source))
 }
+
+/// Resolve a StreamingDataSource based on a source URI or file path.
+/// Supported schemes:
+/// - `kafka://broker/topic?group_id=...&file=...`
+/// - `s3://bucket/key` / `gcs://bucket/key` / `blob://bucket/key`
+/// - `lakehouse://path?columns=...`
+/// - `-` or `stdin`
+/// - local file path (e.g. `data/customer_support.jsonl`)
+pub fn resolve_streaming_source(
+    source_uri: &str,
+    columns: Option<&str>,
+) -> Result<Box<dyn datasource::StreamingDataSource>> {
+    let kind = datasource::StreamSourceKind::from_uri(source_uri, columns)?;
+    match kind {
+        datasource::StreamSourceKind::Kafka {
+            broker,
+            topic,
+            group_id,
+            payload_path,
+        } => {
+            let mut kafka = datasource::KafkaSource::new(broker, topic, group_id);
+            if let Some(p) = payload_path {
+                kafka.load_payload_file(&p)?;
+            }
+            Ok(Box::new(kafka))
+        }
+        datasource::StreamSourceKind::Lakehouse { path, columns } => {
+            let source = datasource::LakehouseColumnarSource::new(path, columns)?;
+            Ok(Box::new(source))
+        }
+        datasource::StreamSourceKind::ObjectStore {
+            provider,
+            bucket,
+            key,
+        } => {
+            let source = datasource::ObjectStoreSource::new(provider, bucket, key)?;
+            Ok(Box::new(source))
+        }
+        datasource::StreamSourceKind::LineStream { path } => {
+            if let Some(p) = path {
+                let source = datasource::LineStreamSource::from_file(&p)?;
+                Ok(Box::new(source))
+            } else {
+                let source = datasource::LineStreamSource::from_stdin();
+                Ok(Box::new(source))
+            }
+        }
+        datasource::StreamSourceKind::Stdin => {
+            let source = datasource::LineStreamSource::from_stdin();
+            Ok(Box::new(source))
+        }
+    }
+}
+

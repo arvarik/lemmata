@@ -140,6 +140,9 @@ pub struct DecisionAnswer {
     pub choice: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_labels: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,3 +164,240 @@ pub struct DecisionResult {
     pub input_tokens: usize,
     pub latency_ms: f64,
 }
+
+/// A node in a hierarchical decision tree: either a recursive subtree or a terminal leaf question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HierarchicalNode {
+    Subtree(Box<HierarchicalSchema>),
+    Leaf(Question),
+}
+
+impl HierarchicalNode {
+    pub fn question(&self) -> &Question {
+        match self {
+            HierarchicalNode::Subtree(sub) => &sub.coarse,
+            HierarchicalNode::Leaf(q) => q,
+        }
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        match self {
+            HierarchicalNode::Subtree(sub) => sub.branches.is_empty(),
+            HierarchicalNode::Leaf(_) => true,
+        }
+    }
+}
+
+/// Validation report for a hierarchical schema against head token budgets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalValidationReport {
+    pub root_tokens: usize,
+    pub max_branch_tokens: usize,
+    pub total_leaf_classes: usize,
+    pub branch_count: usize,
+    pub warnings: Vec<String>,
+    pub valid: bool,
+}
+
+/// A hierarchical decision schema structuring high-cardinality classification into coarse-to-fine stages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalSchema {
+    /// The coarse / root question (supports "coarse" or "root" in JSON)
+    #[serde(alias = "root")]
+    pub coarse: Question,
+
+    /// Sub-branches mapping candidate option keys to child questions or subtrees
+    #[serde(default, alias = "subtrees")]
+    pub branches: BTreeMap<String, HierarchicalNode>,
+}
+
+impl HierarchicalSchema {
+    /// Load a hierarchical schema from a JSON file.
+    pub fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        Self::from_json_str(&content)
+    }
+
+    /// Parse a hierarchical schema from a JSON string (supports single schema or map wrapper).
+    pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
+        if let Ok(schema) = serde_json::from_str::<HierarchicalSchema>(content) {
+            return Ok(schema);
+        }
+        if let Ok(map) = serde_json::from_str::<BTreeMap<String, HierarchicalSchema>>(content) {
+            if let Some((_name, schema)) = map.into_iter().next() {
+                return Ok(schema);
+            }
+        }
+        anyhow::bail!("Failed to parse JSON as HierarchicalSchema (requires 'coarse'/'root' question and optional 'branches'/'subtrees')")
+    }
+
+    /// Calculate total leaf classes in this hierarchy
+    pub fn total_leaf_count(&self) -> usize {
+        let mut count = 0;
+        let coarse_options = self.coarse.render_options();
+        for opt in &coarse_options {
+            let key = opt.split(':').next().unwrap_or(opt).trim();
+            if let Some(node) = self.branches.get(key) {
+                match node {
+                    HierarchicalNode::Leaf(q) => count += q.render_options().len(),
+                    HierarchicalNode::Subtree(sub) => count += sub.total_leaf_count(),
+                }
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Calculate maximum tree depth (1 for single coarse, 2 for coarse + branch, etc.)
+    pub fn max_depth(&self) -> usize {
+        if self.branches.is_empty() {
+            return 1;
+        }
+        let branch_depth = self
+            .branches
+            .values()
+            .map(|node| match node {
+                HierarchicalNode::Leaf(_) => 1,
+                HierarchicalNode::Subtree(sub) => sub.max_depth(),
+            })
+            .max()
+            .unwrap_or(0);
+        1 + branch_depth
+    }
+
+    /// Validate the entire hierarchy against a model checkpoint head token budget.
+    pub fn validate(&self, head_budget: usize) -> Result<HierarchicalValidationReport, String> {
+        let mut warnings = Vec::new();
+
+        // 1. Validate coarse question
+        let coarse_warnings = self.coarse.validate("coarse_root", head_budget)?;
+        warnings.extend(coarse_warnings);
+
+        let root_tokens: usize = self
+            .coarse
+            .render_options()
+            .iter()
+            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+            .sum();
+
+        let mut max_branch_tokens = 0;
+
+        // 2. Validate all branch questions
+        for (branch_key, node) in &self.branches {
+            match node {
+                HierarchicalNode::Leaf(q) => {
+                    let branch_warnings = q.validate(&format!("branch:{}", branch_key), head_budget)?;
+                    warnings.extend(branch_warnings);
+                    let b_tokens: usize = q
+                        .render_options()
+                        .iter()
+                        .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                        .sum();
+                    if b_tokens > max_branch_tokens {
+                        max_branch_tokens = b_tokens;
+                    }
+                }
+                HierarchicalNode::Subtree(sub) => {
+                    let sub_report = sub.validate(head_budget)?;
+                    warnings.extend(sub_report.warnings);
+                    if sub_report.root_tokens > max_branch_tokens {
+                        max_branch_tokens = sub_report.root_tokens;
+                    }
+                    if sub_report.max_branch_tokens > max_branch_tokens {
+                        max_branch_tokens = sub_report.max_branch_tokens;
+                    }
+                }
+            }
+        }
+
+        let total_leaves = self.total_leaf_count();
+        let branch_count = self.branches.len();
+
+        Ok(HierarchicalValidationReport {
+            root_tokens,
+            max_branch_tokens,
+            total_leaf_classes: total_leaves,
+            branch_count,
+            warnings,
+            valid: true,
+        })
+    }
+
+    /// Render visual ASCII tree diagram of the hierarchy
+    pub fn render_ascii_tree(&self, head_budget: usize) -> String {
+        let mut out = String::new();
+        let coarse_options = self.coarse.render_options();
+        let root_tokens: usize = coarse_options
+            .iter()
+            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+            .sum();
+
+        out.push_str(&format!(
+            "Root: {} ({} options, ~{} tokens / budget {})\n",
+            self.coarse.instructions,
+            coarse_options.len(),
+            root_tokens,
+            head_budget
+        ));
+
+        let total_coarse = coarse_options.len();
+        for (i, opt) in coarse_options.iter().enumerate() {
+            let is_last_coarse = i + 1 == total_coarse;
+            let prefix = if is_last_coarse { "└── " } else { "├── " };
+            let child_indent = if is_last_coarse { "    " } else { "│   " };
+
+            let key = opt.split(':').next().unwrap_or(opt).trim();
+            if let Some(node) = self.branches.get(key) {
+                match node {
+                    HierarchicalNode::Leaf(q) => {
+                        let sub_opts = q.render_options();
+                        let sub_tokens: usize = sub_opts
+                            .iter()
+                            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                            .sum();
+                        out.push_str(&format!(
+                            "{}{}: {} ({} sub-options, ~{} tokens)\n",
+                            prefix, key, q.instructions, sub_opts.len(), sub_tokens
+                        ));
+                        let sub_total = sub_opts.len();
+                        for (si, sopt) in sub_opts.iter().enumerate() {
+                            let is_last_sub = si + 1 == sub_total;
+                            let sub_prefix = if is_last_sub { "└── " } else { "├── " };
+                            out.push_str(&format!("{}{}{}\n", child_indent, sub_prefix, sopt));
+                        }
+                    }
+                    HierarchicalNode::Subtree(sub) => {
+                        out.push_str(&format!(
+                            "{}{}: [Subtree: {}]\n",
+                            prefix, key, sub.coarse.instructions
+                        ));
+                    }
+                }
+            } else {
+                out.push_str(&format!("{}{}: (Leaf at root level)\n", prefix, opt));
+            }
+        }
+
+        let leaves = self.total_leaf_count();
+        let max_b = self
+            .branches
+            .values()
+            .map(|n| match n {
+                HierarchicalNode::Leaf(q) => q.render_options().iter().map(|o| o.split_whitespace().count() * 4 / 3 + 1).sum(),
+                HierarchicalNode::Subtree(s) => s.total_leaf_count() * 10,
+            })
+            .max()
+            .unwrap_or(0);
+        let max_stage = root_tokens.max(max_b);
+        out.push_str("\nSummary:\n");
+        out.push_str(&format!("- Total Leaf Classes: {}\n", leaves));
+        out.push_str(&format!("- Coarse Branches: {}\n", self.branches.len()));
+        out.push_str(&format!("- Max Tokens per Stage: {} / {}\n", max_stage, head_budget));
+        out.push_str(&format!("- Tree Depth: {} levels\n", self.max_depth()));
+
+        out
+    }
+}
+
