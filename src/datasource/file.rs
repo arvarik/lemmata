@@ -21,6 +21,12 @@ impl FileSource {
             bail!("Input file does not exist: {}", path.display());
         }
 
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() == 0 {
+                return Ok(vec![]);
+            }
+        }
+
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -85,13 +91,23 @@ impl FileSource {
             if trimmed.is_empty() {
                 continue;
             }
-            let val: serde_json::Value = serde_json::from_str(trimmed)
-                .with_context(|| format!("Malformed JSON on line {}", idx + 1))?;
-            items.push(Self::json_value_to_item(
-                format!("{stem}:{idx}"),
-                val,
-                &path_str,
-            ));
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(val) => {
+                    items.push(Self::json_value_to_item(
+                        format!("{stem}:{idx}"),
+                        val,
+                        &path_str,
+                    ));
+                }
+                Err(err) => {
+                    eprintln!(
+                        "⚠️  [line {}] Skipping malformed JSONL in {}: {}",
+                        idx + 1,
+                        path_str,
+                        err
+                    );
+                }
+            }
         }
         Ok(items)
     }

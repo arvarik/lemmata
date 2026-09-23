@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use lemma::benchmark::BenchmarkRunner;
 use lemma::datasource::{DataItem, DataSource, MemorySource};
-use lemma::engine::{Evaluator, ExperimentRunner, LayaClassifier};
-use lemma::model::{Checkpoint, Question, QuestionType};
+use lemma::engine::{
+    AttributionEngine, ConformalEngine, Evaluator, ExperimentRunner, LayaClassifier,
+};
+use lemma::model::{Checkpoint, Question, QuestionType, inspect_safetensors};
 
 #[test]
 fn test_laya_question_schemas() {
@@ -20,6 +23,17 @@ fn test_laya_question_schemas() {
     let q_noul = Question::new_noul("Is customer churning?");
     assert_eq!(q_noul.qtype, QuestionType::Noul);
     assert_eq!(q_noul.render_options().len(), 2);
+}
+
+#[test]
+fn test_schema_validation() {
+    let q_valid = Question::new_choice("Department", vec!["billing".into(), "technical".into()]);
+    let res = q_valid.validate("dept", 192);
+    assert!(res.is_ok());
+
+    let q_invalid = Question::new_choice("Single", vec!["only_one".into()]);
+    let err = q_invalid.validate("single", 192);
+    assert!(err.is_err());
 }
 
 #[test]
@@ -144,4 +158,53 @@ fn test_benchmark_runner() {
     assert_eq!(report.total_items, 4);
     assert!(report.throughput_items_per_sec > 0.0);
     assert!(report.latency_p50_ms >= 0.0);
+}
+
+#[test]
+fn test_conformal_prediction_engine() {
+    let mut questions: BTreeMap<String, Question> = BTreeMap::new();
+    let q = Question::new_choice("Dept", vec!["billing".into(), "technical".into()]);
+    questions.insert("dept".to_string(), q.clone());
+
+    let mut gt1 = BTreeMap::new();
+    gt1.insert("dept".into(), serde_json::Value::String("billing".into()));
+
+    let items = vec![
+        DataItem::new("c1", serde_json::json!({ "text": "payment billing invoice" }), "test")
+            .with_ground_truth(gt1),
+    ];
+
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let (report, prediction_items) = ConformalEngine::evaluate(&classifier, &items, "dept", &q, 0.10).unwrap();
+
+    assert_eq!(report.total_evaluated, 1);
+    assert!(!prediction_items.is_empty());
+    assert!(!prediction_items[0].prediction_set.is_empty());
+}
+
+#[test]
+fn test_attribution_explain_engine() {
+    let q = Question::new_choice("Dept", vec!["billing".into(), "technical".into()]);
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let engine = AttributionEngine::new(&classifier);
+
+    let report = engine
+        .explain("We need a refund on invoice charges", "dept", &q, "billing", "technical")
+        .unwrap();
+
+    assert_eq!(report.target_choice, "billing");
+    assert_eq!(report.contrast_choice, "technical");
+    assert!(!report.attributions.is_empty());
+}
+
+#[test]
+fn test_safetensors_inspector_on_local_weights() {
+    let path = Path::new("models/laya/model.safetensors");
+    if path.exists() {
+        let rep = inspect_safetensors(path).unwrap();
+        assert!(rep.total_tensors > 100);
+        assert!(rep.total_parameters > 300_000_000);
+        assert!(rep.is_laya_compatible);
+        assert!(rep.has_act_head);
+    }
 }

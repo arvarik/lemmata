@@ -94,6 +94,40 @@ impl Question {
             ],
         }
     }
+
+    /// Validate that the question has sufficient options and fits within the Laya head token budget.
+    pub fn validate(&self, qid: &str, head_budget: usize) -> Result<Vec<String>, String> {
+        let mut warnings = Vec::new();
+        let options = self.render_options();
+
+        match self.qtype {
+            QuestionType::Choice => {
+                if options.len() < 2 {
+                    return Err(format!("Choice question '{}' must specify at least 2 candidate options", qid));
+                }
+            }
+            QuestionType::Score => {
+                if options.len() < 2 {
+                    return Err(format!("Score question '{}' requires at least 2 rubric levels", qid));
+                }
+            }
+            QuestionType::Noul => {}
+        }
+
+        let est_tokens: usize = options
+            .iter()
+            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+            .sum();
+
+        if est_tokens > head_budget {
+            warnings.push(format!(
+                "Question '{}' options (~{} tokens) exceed head budget ({} tokens). Truncation will degrade accuracy.",
+                qid, est_tokens, head_budget
+            ));
+        }
+
+        Ok(warnings)
+    }
 }
 
 /// The answer returned by Laya for a single question.
