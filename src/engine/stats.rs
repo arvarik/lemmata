@@ -670,7 +670,7 @@ impl StatsEngine {
         out.push_str("⚡ Speed & Latency Distribution\n");
         let mut speed_table = Table::new();
         speed_table
-            .load_preset(comfy_table::presets::UTF8_FULL)
+            .load_style(comfy_table::presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
 
         speed_table.set_header(vec![
@@ -723,7 +723,7 @@ impl StatsEngine {
         out.push_str("🚀 System Throughput & Efficiency\n");
         let mut perf_table = Table::new();
         perf_table
-            .load_preset(comfy_table::presets::UTF8_FULL)
+            .load_style(comfy_table::presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
 
         perf_table.set_header(vec![
@@ -798,7 +798,7 @@ impl StatsEngine {
         out.push_str("🎯 Decision Accuracy, Calibration & Safety\n");
         let mut acc_table = Table::new();
         acc_table
-            .load_preset(comfy_table::presets::UTF8_FULL)
+            .load_style(comfy_table::presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
 
         acc_table.set_header(vec![
@@ -884,7 +884,7 @@ impl StatsEngine {
         out.push_str("📋 Per-Question Schema Breakdown\n");
         let mut q_table = Table::new();
         q_table
-            .load_preset(comfy_table::presets::UTF8_FULL)
+            .load_style(comfy_table::presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
 
         q_table.set_header(vec![

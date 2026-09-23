@@ -451,7 +451,7 @@ impl StreamPipeline {
     /// Formats streaming performance metrics as a clean terminal table.
     pub fn format_table(metrics: &StreamMetrics) -> String {
         let mut table = Table::new();
-        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.load_style(comfy_table::presets::UTF8_FULL);
         table.set_header(vec![
             Cell::new("Stream Pipeline Metric").fg(Color::Cyan),
             Cell::new("Value").fg(Color::Yellow),

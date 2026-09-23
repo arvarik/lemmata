@@ -31,7 +31,7 @@ impl ExperimentRunner {
             bail!("Option order invariance requires at least 2 options");
         }
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut flip_count = 0;
         let mut total_checks = 0;
         let mut conf_deltas = Vec::new();
