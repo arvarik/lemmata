@@ -10,6 +10,7 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # Maintain GitHub Actions dependencies
   - package-ecosystem: "github-actions"

@@ -23,11 +23,11 @@ models/
 *.tflite
 *.msgpack
 
-# ==============================================================================
-# Datasets & Lakehouse Columnar Files
-# ==============================================================================
-/data/
-data/
+# Datasets & Lakehouse Columnar Files (preserve committed test fixtures)
+/data/*
+!/data/customer_support.jsonl
+!/data/banking_tickets.jsonl
+!/data/feedback_dataset.csv
 *.parquet
 *.arrow
 *.feather
