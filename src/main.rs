@@ -2367,7 +2367,7 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
         }
         OutputFormat::Table | OutputFormat::Compact => {
             let mut table = comfy_table::Table::new();
-            table.load_preset(comfy_table::presets::UTF8_FULL);
+            table.load_style(comfy_table::presets::UTF8_FULL);
             table.set_header(vec!["ID", "Origin", "Ground Truth", "Preview Text"]);
             for item in &items {
                 let gt_str = item
@@ -2464,7 +2464,7 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
         }
         OutputFormat::Table | OutputFormat::Compact => {
             let mut table = comfy_table::Table::new();
-            table.load_preset(comfy_table::presets::UTF8_FULL);
+            table.load_style(comfy_table::presets::UTF8_FULL);
             table.set_header(vec!["Field", "Value"]);
             table.add_row(vec!["URL", &doc.url]);
             table.add_row(vec!["Title", &doc.title]);

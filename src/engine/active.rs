@@ -624,7 +624,7 @@ impl ActiveLearningEngine {
         export_path: Option<&Path>,
     ) -> String {
         let mut table = Table::new();
-        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.load_style(comfy_table::presets::UTF8_FULL);
         table.set_header(vec![
             Cell::new("#").fg(Color::Cyan),
             Cell::new("Item ID").fg(Color::Cyan),
@@ -685,7 +685,7 @@ impl ActiveLearningEngine {
     /// Formats RLCD distillation report as a terminal table.
     pub fn format_distill_table(report: &ActiveDistillReport) -> String {
         let mut table = Table::new();
-        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.load_style(comfy_table::presets::UTF8_FULL);
         table.set_header(vec![
             Cell::new("RLCD Distillation Metric").fg(Color::Cyan),
             Cell::new("Value").fg(Color::Yellow),
