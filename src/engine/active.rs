@@ -259,7 +259,7 @@ impl ActiveLearningEngine {
                             .map(|res| res.is_ood)
                             .unwrap_or(false)
                     } else {
-                        free_energy > -0.5
+                        free_energy > 1.2
                     };
 
                     if is_ood {
@@ -450,16 +450,22 @@ impl ActiveLearningEngine {
                         "unknown".into()
                     };
 
+                    let clean_target = target_label.split(':').next().unwrap_or(&target_label).trim().to_lowercase();
+                    let clean_chosen = chosen_opt.split(':').next().unwrap_or(&chosen_opt).trim().to_lowercase();
+
                     // Determine negative label:
                     // If model chose wrong option, negative is chosen_opt.
                     // If model chose correctly, pick candidate with highest probability among negatives.
-                    let negative_label = if chosen_opt != target_label && !chosen_opt.is_empty() {
+                    let negative_label = if clean_chosen != clean_target && !chosen_opt.is_empty() {
                         chosen_opt
                     } else {
                         let mut alt_candidates: Vec<(&String, &f64)> = ans
                             .probabilities
                             .iter()
-                            .filter(|(label, _)| *label != &target_label)
+                            .filter(|(label, _)| {
+                                let clean_l = label.split(':').next().unwrap_or(label).trim().to_lowercase();
+                                clean_l != clean_target
+                            })
                             .collect();
                         alt_candidates.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
                         alt_candidates
@@ -468,7 +474,10 @@ impl ActiveLearningEngine {
                             .unwrap_or_else(|| {
                                 candidate_options
                                     .iter()
-                                    .find(|&c| c != &target_label)
+                                    .find(|&c| {
+                                        let clean_c = c.split(':').next().unwrap_or(c).trim().to_lowercase();
+                                        clean_c != clean_target
+                                    })
                                     .cloned()
                                     .unwrap_or_else(|| "other".into())
                             })
@@ -481,21 +490,21 @@ impl ActiveLearningEngine {
                         .filter(|&&p| p > 1e-9)
                         .map(|&p| p * p.ln())
                         .sum::<f64>()
-                        / (candidate_options.len() as f64).ln().max(1e-9);
+                        / (candidate_options.len().max(2) as f64).ln().max(1e-9);
 
                     let p_target = ans.probabilities.get(&target_label).copied().unwrap_or(0.0);
                     let p_neg = ans.probabilities.get(&negative_label).copied().unwrap_or(0.0);
-                    let margin_gap = (p_target - p_neg).abs();
+                    let margin_gap = p_target - p_neg;
 
-                    // Contrastive weight: high uncertainty and close margin yields higher weight
-                    let margin_weight = ((1.0 + entropy + (1.0 - margin_gap)) * 100.0).round() / 100.0;
+                    // Contrastive weight: high uncertainty and close/inverted margin yields higher weight
+                    let margin_weight = ((1.0 + entropy + (1.0 - margin_gap).max(0.0)) * 100.0).round() / 100.0;
                     total_weight += margin_weight;
                     if margin_weight > max_weight {
                         max_weight = margin_weight;
                     }
 
                     // Deterministic pseudo-random split
-                    let split = if ((idx * 7 + 13) % 100) as f64 / 100.0 < val_split {
+                    let split = if ((idx * 17) % 100) as f64 / 100.0 < val_split {
                         "val".to_string()
                     } else {
                         "train".to_string()

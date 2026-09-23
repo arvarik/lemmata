@@ -132,10 +132,16 @@ impl GuardrailEngine {
         let input_hash = simple_hash_hex(&state_str);
         let audit_id = format!("aud_{}", &input_hash[..12]);
 
+        let input_preview = if final_action == GuardAction::Redact {
+            "[REDACTED]".to_string()
+        } else {
+            item.preview_text(45)
+        };
+
         AuditRecord {
             audit_id,
             item_id: item.id.clone(),
-            input_preview: item.preview_text(45),
+            input_preview,
             input_hash,
             policy_name: self.policy.name.clone(),
             matched_rule,

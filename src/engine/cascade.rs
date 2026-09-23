@@ -163,11 +163,16 @@ impl CascadeRouter {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other)?,
             };
+            let avg_conf: f64 = if !res.answers.is_empty() {
+                res.answers.values().map(|a| a.confidence).sum::<f64>() / res.answers.len() as f64
+            } else {
+                1.0 - risk
+            };
             Some(format!(
                 "Input context:\n{}\n\nSystem 1 Priors:\n{}\nSystem 1 Confidence: {:.1}%\nAct/Escalate Signal: {:.1}%\n\nPlease deliberate and provide final structured classification.",
                 state_str,
                 format_priors(&res),
-                (1.0 - risk) * 100.0,
+                avg_conf * 100.0,
                 act_prob * 100.0
             ))
         } else {
@@ -187,7 +192,7 @@ impl CascadeRouter {
         })
     }
 
-    /// Tune the Pareto-optimal threshold tau* to satisfy target accuracy with minimal cost.
+    /// Tune the Pareto-optimal threshold tau* to satisfy target accuracy with minimal cost using default config.
     pub fn tune_pareto(
         items: &[DataItem],
         questions: &BTreeMap<String, Question>,
@@ -195,34 +200,94 @@ impl CascadeRouter {
         target_accuracy: f64,
         system2_cost: f64,
     ) -> Result<CascadePolicy> {
+        Self::tune_pareto_with_config(
+            items,
+            questions,
+            classifier,
+            target_accuracy,
+            system2_cost,
+            &CascadeConfig::default(),
+        )
+    }
+
+    /// Tune the Pareto-optimal threshold tau* with custom router config weights.
+    pub fn tune_pareto_with_config(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        classifier: &LayaClassifier,
+        target_accuracy: f64,
+        system2_cost: f64,
+        config: &CascadeConfig,
+    ) -> Result<CascadePolicy> {
         if items.is_empty() {
             bail!("Cannot tune cascade on empty dataset");
         }
 
-        // Compute System 1 accuracy and risks for labeled items
+        let router = Self::new(config.clone());
         let mut sample_evals: Vec<(f64, bool)> = Vec::new(); // (risk, is_s1_correct)
 
         for item in items {
-            let res = classifier.classify(&item.state, questions)?;
-            let (risk, _, _, _) = Self::new(CascadeConfig::default()).compute_risk(&res);
+            let gt = match &item.ground_truth {
+                Some(g) if !g.is_empty() => g,
+                _ => continue, // Skip unlabeled items for accuracy tuning
+            };
 
-            // Determine if System 1 prediction matches ground truth
+            let res = classifier.classify(&item.state, questions)?;
+            let (risk, _, _, _) = router.compute_risk(&res);
+
+            // Determine if System 1 prediction matches ground truth across all questions
             let mut correct = true;
-            if let Some(gt) = &item.ground_truth {
-                for (qid, val) in gt {
-                    if let Some(ans) = res.answers.get(qid) {
-                        let expected = match val {
-                            serde_json::Value::String(s) => s.as_str(),
-                            _ => "",
-                        };
-                        if ans.choice.as_deref() != Some(expected) {
-                            correct = false;
-                            break;
+            for (qid, val) in gt {
+                if let Some(ans) = res.answers.get(qid) {
+                    let matches = match &ans.qtype {
+                        crate::model::QuestionType::Choice => {
+                            let expected = match val {
+                                serde_json::Value::String(s) => s.as_str(),
+                                _ => "",
+                            };
+                            ans.choice.as_deref() == Some(expected)
+                                || ans
+                                    .selected_labels
+                                    .as_ref()
+                                    .map(|v| v.iter().any(|s| s == expected))
+                                    .unwrap_or(false)
                         }
+                        crate::model::QuestionType::Score => {
+                            let expected = match val {
+                                serde_json::Value::Number(n) => n.as_f64(),
+                                serde_json::Value::String(s) => s.parse::<f64>().ok(),
+                                _ => None,
+                            };
+                            match (expected, ans.score) {
+                                (Some(e), Some(s)) => (e - s).abs() < 0.5,
+                                _ => false,
+                            }
+                        }
+                        crate::model::QuestionType::Noul => {
+                            let expected = match val {
+                                serde_json::Value::Bool(b) => Some(*b),
+                                serde_json::Value::String(s) => s.parse::<bool>().ok(),
+                                serde_json::Value::Number(n) => Some(n.as_i64().unwrap_or(0) != 0),
+                                _ => None,
+                            };
+                            let pred_bool = ans.noul.map(|n| n > 0.5);
+                            expected.is_some() && expected == pred_bool
+                        }
+                    };
+                    if !matches {
+                        correct = false;
+                        break;
                     }
+                } else {
+                    correct = false;
+                    break;
                 }
             }
             sample_evals.push((risk, correct));
+        }
+
+        if sample_evals.is_empty() {
+            bail!("No labeled items with ground truth found for Pareto tuning");
         }
 
         // Sweep candidate thresholds tau in [0.10, 0.90]
@@ -354,5 +419,58 @@ mod tests {
         assert_eq!(decision.tier, SystemTier::System2Deliberative);
         assert!(decision.cost_usd > 0.0);
         assert!(decision.prompt_seed.is_some());
+    }
+
+    #[test]
+    fn test_tune_pareto_unlabeled_items_rejected() {
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "dept".into(),
+            Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
+        );
+        let item = DataItem::new(
+            "c3",
+            serde_json::json!({ "text": "Invoice payment billing refund" }),
+            "test",
+        ); // Ground truth is None
+        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+        assert!(CascadeRouter::tune_pareto(&[item], &questions, &classifier, 0.95, 0.005).is_err());
+    }
+
+    #[test]
+    fn test_tune_pareto_with_custom_config() {
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "dept".into(),
+            Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
+        );
+        let mut gt = BTreeMap::new();
+        gt.insert("dept".into(), serde_json::Value::String("billing".into()));
+
+        let item = DataItem::new(
+            "c4",
+            serde_json::json!({ "text": "Invoice payment billing refund immediate" }),
+            "test",
+        ).with_ground_truth(gt);
+
+        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+        let custom_cfg = CascadeConfig {
+            entropy_weight: 0.50,
+            margin_weight: 0.30,
+            act_weight: 0.20,
+            risk_threshold: 0.50,
+            system2_cost_per_call: 0.01,
+        };
+        let policy = CascadeRouter::tune_pareto_with_config(
+            &[item],
+            &questions,
+            &classifier,
+            0.90,
+            0.01,
+            &custom_cfg,
+        ).unwrap();
+
+        assert!(policy.optimal_threshold > 0.0);
+        assert!(policy.expected_accuracy >= 0.90);
     }
 }

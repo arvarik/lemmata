@@ -51,23 +51,15 @@ impl<'a> AttributionEngine<'a> {
         q_map.insert(qid.to_string(), question.clone());
 
         // Baseline classification
-        let state_val = serde_json::json!({ "text": text });
+        let state_val = serde_json::Value::String(text.to_string());
         let baseline = self.classifier.classify(&state_val, &q_map)?;
         let base_ans = baseline
             .answers
             .get(qid)
             .ok_or_else(|| anyhow::anyhow!("Question '{}' missing in results", qid))?;
 
-        let p_target = base_ans
-            .probabilities
-            .get(target_choice)
-            .copied()
-            .unwrap_or(1e-6);
-        let p_contrast = base_ans
-            .probabilities
-            .get(contrast_choice)
-            .copied()
-            .unwrap_or(1e-6);
+        let p_target = get_prob_ci(&base_ans.probabilities, target_choice);
+        let p_contrast = get_prob_ci(&base_ans.probabilities, contrast_choice);
 
         let baseline_margin = (p_target + 1e-9).ln() - (p_contrast + 1e-9).ln();
 
@@ -80,20 +72,12 @@ impl<'a> AttributionEngine<'a> {
                 perturbed_words.remove(idx);
                 let perturbed_text = perturbed_words.join(" ");
 
-                let pert_state = serde_json::json!({ "text": perturbed_text });
+                let pert_state = serde_json::Value::String(perturbed_text);
                 let pert_res = self.classifier.classify(&pert_state, &q_map).unwrap();
                 let pert_ans = &pert_res.answers[qid];
 
-                let pert_p_target = pert_ans
-                    .probabilities
-                    .get(target_choice)
-                    .copied()
-                    .unwrap_or(1e-6);
-                let pert_p_contrast = pert_ans
-                    .probabilities
-                    .get(contrast_choice)
-                    .copied()
-                    .unwrap_or(1e-6);
+                let pert_p_target = get_prob_ci(&pert_ans.probabilities, target_choice);
+                let pert_p_contrast = get_prob_ci(&pert_ans.probabilities, contrast_choice);
 
                 let pert_margin = (pert_p_target + 1e-9).ln() - (pert_p_contrast + 1e-9).ln();
                 let delta = baseline_margin - pert_margin;
@@ -140,7 +124,7 @@ impl<'a> AttributionEngine<'a> {
         println!("Question: '{}'", report.question_id);
 
         let mut sorted = report.attributions.clone();
-        sorted.sort_by(|a, b| b.delta_margin.partial_cmp(&a.delta_margin).unwrap());
+        sorted.sort_by(|a, b| b.delta_margin.total_cmp(&a.delta_margin));
 
         let mut table = Table::new();
         table.set_header(vec![
@@ -166,4 +150,16 @@ impl<'a> AttributionEngine<'a> {
 
         println!("\n{table}\n");
     }
+}
+
+fn get_prob_ci(map: &BTreeMap<String, f64>, target: &str) -> f64 {
+    if let Some(&p) = map.get(target) {
+        return p;
+    }
+    for (k, &p) in map {
+        if k.eq_ignore_ascii_case(target) {
+            return p;
+        }
+    }
+    1e-6
 }

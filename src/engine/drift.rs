@@ -190,18 +190,21 @@ impl<'a> DriftEngine<'a> {
             }
 
             // Determine status
-            let mut status = DriftSeverity::Stable;
-            if conf_psi >= self.psi_threshold || conf_wasserstein >= self.wasserstein_threshold {
-                status = DriftSeverity::Severe;
-            } else if let Some(psi) = class_prior_psi {
-                if psi >= self.psi_threshold {
-                    status = DriftSeverity::Severe;
-                } else if psi >= self.psi_threshold * 0.5 {
-                    status = DriftSeverity::Moderate;
-                }
-            } else if conf_psi >= self.psi_threshold * 0.5 || conf_wasserstein >= self.wasserstein_threshold * 0.6 {
-                status = DriftSeverity::Moderate;
-            }
+            let is_severe = conf_psi >= self.psi_threshold
+                || conf_wasserstein >= self.wasserstein_threshold
+                || class_prior_psi.map(|p| p >= self.psi_threshold).unwrap_or(false);
+
+            let is_moderate = conf_psi >= self.psi_threshold * 0.5
+                || conf_wasserstein >= self.wasserstein_threshold * 0.6
+                || class_prior_psi.map(|p| p >= self.psi_threshold * 0.5).unwrap_or(false);
+
+            let status = if is_severe {
+                DriftSeverity::Severe
+            } else if is_moderate {
+                DriftSeverity::Moderate
+            } else {
+                DriftSeverity::Stable
+            };
 
             if status == DriftSeverity::Severe {
                 has_critical_drift = true;
@@ -312,18 +315,58 @@ impl<'a> DriftEngine<'a> {
 /// PSI = sum( (P_curr - P_base) * ln( (P_curr + eps) / (P_base + eps) ) )
 pub fn calculate_psi(baseline_probs: &[f64], current_probs: &[f64]) -> f64 {
     let eps = 1e-6;
-    let n = baseline_probs.len().min(current_probs.len());
+    let max_len = baseline_probs.len().max(current_probs.len());
     let mut psi = 0.0;
 
-    for i in 0..n {
-        let p_base = baseline_probs[i];
-        let p_curr = current_probs[i];
+    for i in 0..max_len {
+        let p_base = baseline_probs.get(i).copied().unwrap_or(0.0);
+        let p_curr = current_probs.get(i).copied().unwrap_or(0.0);
         let diff = p_curr - p_base;
         let ratio = (p_curr + eps) / (p_base + eps);
         psi += diff * ratio.ln();
     }
 
     psi.max(0.0)
+}
+
+/// Two-sample Kolmogorov-Smirnov (KS) test statistic D = sup_x |F_1(x) - F_2(x)|
+pub fn calculate_ks_statistic(sample_a: &[f64], sample_b: &[f64]) -> f64 {
+    if sample_a.is_empty() || sample_b.is_empty() {
+        return 0.0;
+    }
+    let mut a = sample_a.to_vec();
+    let mut b = sample_b.to_vec();
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    b.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n_a = a.len() as f64;
+    let n_b = b.len() as f64;
+    let mut i = 0;
+    let mut j = 0;
+    let mut max_diff = 0.0f64;
+
+    while i < a.len() && j < b.len() {
+        let val_a = a[i];
+        let val_b = b[j];
+        let cdf_a = (i + 1) as f64 / n_a;
+        let cdf_b = (j + 1) as f64 / n_b;
+
+        if val_a < val_b {
+            let diff = ((i + 1) as f64 / n_a - j as f64 / n_b).abs();
+            if diff > max_diff { max_diff = diff; }
+            i += 1;
+        } else if val_b < val_a {
+            let diff = (i as f64 / n_a - (j + 1) as f64 / n_b).abs();
+            if diff > max_diff { max_diff = diff; }
+            j += 1;
+        } else {
+            let diff = (cdf_a - cdf_b).abs();
+            if diff > max_diff { max_diff = diff; }
+            i += 1;
+            j += 1;
+        }
+    }
+    max_diff.clamp(0.0, 1.0)
 }
 
 /// Calculate Wasserstein-1 Distance (Earth Mover's Distance) on 1D empirical distributions
@@ -390,4 +433,37 @@ fn bin_continuous_values(values: &[f64], num_bins: usize) -> Vec<f64> {
 
     let total = values.len() as f64;
     counts.into_iter().map(|c| c as f64 / total).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_psi_unequal_lengths() {
+        let base = vec![0.5, 0.5];
+        let curr = vec![0.4, 0.4, 0.2];
+        let psi = calculate_psi(&base, &curr);
+        assert!(psi >= 0.0);
+    }
+
+    #[test]
+    fn test_calculate_ks_statistic() {
+        let s1 = vec![0.1, 0.2, 0.3, 0.4];
+        let s2 = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(calculate_ks_statistic(&s1, &s2), 0.0);
+
+        let left = vec![0.1, 0.2, 0.3];
+        let right = vec![0.8, 0.9, 1.0];
+        assert_eq!(calculate_ks_statistic(&left, &right), 1.0);
+    }
+
+    #[test]
+    fn test_bin_continuous_values() {
+        let vals = vec![0.05, 0.15, 0.85];
+        let bins = bin_continuous_values(&vals, 10);
+        assert_eq!(bins.len(), 10);
+        let sum: f64 = bins.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+    }
 }

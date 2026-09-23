@@ -40,8 +40,10 @@ impl DataItem {
             serde_json::Value::String(text) => text.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
         };
-        if s.len() > max_chars {
-            format!("{}...", &s[..max_chars])
+        let char_count = s.chars().count();
+        if char_count > max_chars {
+            let truncated: String = s.chars().take(max_chars).collect();
+            format!("{}...", truncated)
         } else {
             s
         }

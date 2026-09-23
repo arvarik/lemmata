@@ -59,6 +59,7 @@ impl CacheStats {
 /// A single cached decision entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedDecision {
+    pub schema_hash: String,
     pub input_text: String,
     pub feature_vector: Vec<f64>,
     pub result: DecisionResult,
@@ -116,7 +117,7 @@ impl DecisionCache {
 
     /// Generate an exact cache key for text and questions schema.
     pub fn make_exact_key(text: &str, schema_hash: &str) -> String {
-        let canonical = text.trim().to_lowercase();
+        let canonical: String = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
         format!("{schema_hash}::{canonical}")
     }
 
@@ -133,15 +134,21 @@ impl DecisionCache {
                 let mut res = cached.result.clone();
                 res.latency_ms = 0.05; // sub-millisecond retrieval
                 return CacheLookupResult::ExactHit(res);
+            } else {
+                // Lazily evict expired item
+                self.exact_map.remove(&exact_key);
             }
         }
 
-        // Tier 2: Semantic lookup via normalized feature vector
+        // Tier 2: Semantic lookup via normalized feature vector (schema-isolated)
         let query_vec = vectorize_text(text);
         let mut best_sim = -1.0;
         let mut best_idx = None;
 
         for (idx, item) in self.entries.iter().enumerate() {
+            if item.schema_hash != schema_hash {
+                continue;
+            }
             if now.saturating_sub(item.created_at_secs) > self.config.ttl_seconds {
                 continue;
             }
@@ -173,11 +180,11 @@ impl DecisionCache {
 
     /// Admit a decision into the cache if it meets confidence guards.
     pub fn insert(&mut self, text: &str, schema_hash: &str, result: &DecisionResult) -> bool {
-        // Admission guard: only cache high-confidence, un-escalated decisions
-        let avg_confidence = if result.answers.is_empty() {
+        // Admission guard: only cache high-confidence, un-escalated decisions across ALL questions
+        let min_confidence = if result.answers.is_empty() {
             0.0
         } else {
-            result.answers.values().map(|a| a.confidence).sum::<f64>() / result.answers.len() as f64
+            result.answers.values().map(|a| a.confidence).fold(1.0, f64::min)
         };
 
         let max_act_prob = result
@@ -186,9 +193,14 @@ impl DecisionCache {
             .filter_map(|a| a.act_probability)
             .fold(0.0, f64::max);
 
-        // Reject caching if confidence is too low or supervisor escalation is indicated
-        if avg_confidence < self.config.min_confidence || max_act_prob > self.config.max_escalate_probability {
+        // Reject caching if minimum confidence is too low or supervisor escalation is indicated
+        if min_confidence < self.config.min_confidence || max_act_prob > self.config.max_escalate_probability {
             return false;
+        }
+
+        // Deduplicate: if an entry with the exact same text and schema exists in entries, replace it
+        if let Some(pos) = self.entries.iter().position(|e| e.schema_hash == schema_hash && e.input_text == text) {
+            self.entries.swap_remove(pos);
         }
 
         // Capacity eviction
@@ -201,6 +213,7 @@ impl DecisionCache {
         let now = now_secs();
 
         let cached = CachedDecision {
+            schema_hash: schema_hash.to_string(),
             input_text: text.to_string(),
             feature_vector,
             result: result.clone(),
@@ -228,7 +241,8 @@ impl DecisionCache {
             .unwrap_or(0);
 
         let removed = self.entries.swap_remove(min_idx);
-        self.exact_map.retain(|_, v| v.input_text != removed.input_text);
+        let exact_key = Self::make_exact_key(&removed.input_text, &removed.schema_hash);
+        self.exact_map.remove(&exact_key);
         self.stats.evictions += 1;
     }
 
@@ -247,13 +261,18 @@ impl DecisionCache {
     }
 }
 
-/// Compute cosine similarity between two unit-normalized vectors.
+/// Compute cosine similarity between two vectors with norm-safe calculation.
 pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
     let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    dot.clamp(-1.0, 1.0)
+    let norm_a = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_b = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm_a <= 1e-12 || norm_b <= 1e-12 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
 /// Convert input text into a normalized 128-dimensional dense feature representation.
