@@ -23,8 +23,8 @@ walkdir = "2.5"
 rayon = "1.10"
 anyhow = "1.0"
 thiserror = "2.0"
-comfy-table = "7.1"
-rand = "0.8"
+comfy-table = "8.0"
+rand = "0.10"
 
 [lib]
 name = "lemma"
