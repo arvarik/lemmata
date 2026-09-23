@@ -13,7 +13,11 @@ pub struct ClassifierConfig {
     pub temperature: f64,
     pub temperature_by_options: BTreeMap<String, f64>,
     pub escalate_threshold: f64,
+    pub multi_label: bool,
+    pub multi_label_threshold: f64,
     pub local_weights_path: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qats_profile: Option<crate::engine::calibrate::QatsProfile>,
 }
 
 impl Default for ClassifierConfig {
@@ -31,7 +35,10 @@ impl Default for ClassifierConfig {
             temperature: 1.0,
             temperature_by_options: temp_map,
             escalate_threshold: 0.5,
+            multi_label: false,
+            multi_label_threshold: 0.40,
             local_weights_path: None,
+            qats_profile: None,
         }
     }
 }
@@ -54,6 +61,21 @@ impl LayaClassifier {
 
     pub fn config(&self) -> &ClassifierConfig {
         &self.config
+    }
+
+    /// Perform inference for a single question on state text.
+    pub fn classify_single(
+        &self,
+        state_text: &str,
+        question: &Question,
+    ) -> Result<DecisionAnswer> {
+        let mut map = BTreeMap::new();
+        map.insert("single".to_string(), question.clone());
+        let state_val = serde_json::Value::String(state_text.to_string());
+        let mut res = self.classify(&state_val, &map)?;
+        res.answers
+            .remove("single")
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract decision answer"))
     }
 
     /// Perform a single forward pass over all questions for a given state input.
@@ -102,12 +124,31 @@ impl LayaClassifier {
 
             // Temperature scaling per Laya RLCD calibration
             let temp_key = self.get_temperature_bucket(q.qtype, k);
-            let temp = self
+            let mut temp = self
                 .config
                 .temperature_by_options
                 .get(&temp_key)
                 .copied()
                 .unwrap_or(self.config.temperature);
+
+            // 2026 Q-ATS: Adaptive temperature scaling under covariate shift
+            if let Some(qats) = &self.config.qats_profile {
+                if qats.enabled && qats.std_distance > 1e-6 && !qats.class_centroids.is_empty() {
+                    let feat = crate::engine::cache::vectorize_text(&state_text);
+                    let mut min_dist = f64::INFINITY;
+                    for centroid in qats.class_centroids.values() {
+                        let dist = crate::engine::ood::euclidean_distance(&feat, centroid);
+                        if dist < min_dist {
+                            min_dist = dist;
+                        }
+                    }
+                    if min_dist.is_finite() {
+                        let z_dist = (min_dist - qats.mean_distance) / qats.std_distance;
+                        let factor = 1.0 + qats.gamma * z_dist.tanh();
+                        temp = (temp * factor).clamp(0.05, 10.0);
+                    }
+                }
+            }
 
             let scaled_logits: Vec<f64> = raw_logits.iter().map(|&z| z / temp).collect();
 
@@ -147,29 +188,67 @@ impl LayaClassifier {
                         options.clone()
                     };
 
-                    let mut best_idx = 0;
-                    let mut best_p = -1.0;
-                    for (i, (&p, key)) in probs.iter().zip(keys.iter()).enumerate() {
-                        prob_map.insert(key.clone(), (p * 10000.0).round() / 10000.0);
-                        if p > best_p {
-                            best_p = p;
-                            best_idx = i;
+                    if self.config.multi_label {
+                        // Independent sigmoid scoring per option: p_i = 1 / (1 + exp(-z_i))
+                        let mut selected = Vec::new();
+                        let mut best_idx = 0;
+                        let mut best_sig = -1.0;
+                        for (i, (&z, key)) in scaled_logits.iter().zip(keys.iter()).enumerate() {
+                            let sig = 1.0 / (1.0 + (-z).exp());
+                            prob_map.insert(key.clone(), (sig * 10000.0).round() / 10000.0);
+                            if sig >= self.config.multi_label_threshold {
+                                selected.push(key.clone());
+                            }
+                            if sig > best_sig {
+                                best_sig = sig;
+                                best_idx = i;
+                            }
                         }
-                    }
+                        if selected.is_empty() {
+                            if let Some(lbl) = keys.get(best_idx) {
+                                selected.push(lbl.clone());
+                            }
+                        }
+                        let primary = selected.first().cloned();
+                        answers.insert(
+                            qid.clone(),
+                            DecisionAnswer {
+                                qtype: QuestionType::Choice,
+                                choice: primary,
+                                selected_labels: Some(selected),
+                                score: None,
+                                noul: None,
+                                confidence,
+                                probabilities: prob_map,
+                                act_probability: Some((act_probability * 10000.0).round() / 10000.0),
+                            },
+                        );
+                    } else {
+                        let mut best_idx = 0;
+                        let mut best_p = -1.0;
+                        for (i, (&p, key)) in probs.iter().zip(keys.iter()).enumerate() {
+                            prob_map.insert(key.clone(), (p * 10000.0).round() / 10000.0);
+                            if p > best_p {
+                                best_p = p;
+                                best_idx = i;
+                            }
+                        }
 
-                    let chosen_label = keys.get(best_idx).cloned().unwrap_or_else(|| "unknown".into());
-                    answers.insert(
-                        qid.clone(),
-                        DecisionAnswer {
-                            qtype: QuestionType::Choice,
-                            choice: Some(chosen_label),
-                            score: None,
-                            noul: None,
-                            confidence,
-                            probabilities: prob_map,
-                            act_probability: Some((act_probability * 10000.0).round() / 10000.0),
-                        },
-                    );
+                        let chosen_label = keys.get(best_idx).cloned().unwrap_or_else(|| "unknown".into());
+                        answers.insert(
+                            qid.clone(),
+                            DecisionAnswer {
+                                qtype: QuestionType::Choice,
+                                choice: Some(chosen_label),
+                                selected_labels: None,
+                                score: None,
+                                noul: None,
+                                confidence,
+                                probabilities: prob_map,
+                                act_probability: Some((act_probability * 10000.0).round() / 10000.0),
+                            },
+                        );
+                    }
                 }
                 QuestionType::Score => {
                     let mut weighted_score = 0.0;
@@ -182,6 +261,7 @@ impl LayaClassifier {
                         DecisionAnswer {
                             qtype: QuestionType::Score,
                             choice: None,
+                            selected_labels: None,
                             score: Some((weighted_score * 10000.0).round() / 10000.0),
                             noul: None,
                             confidence,
@@ -200,6 +280,7 @@ impl LayaClassifier {
                         DecisionAnswer {
                             qtype: QuestionType::Noul,
                             choice: None,
+                            selected_labels: None,
                             score: None,
                             noul: Some((p_true * 10000.0).round() / 10000.0),
                             confidence,
@@ -242,7 +323,7 @@ impl LayaClassifier {
     }
 
     /// Internal scorer that maps tokens and semantic marker features.
-    fn compute_option_logits(
+    pub fn compute_option_logits(
         &self,
         state_text: &str,
         q: &Question,
@@ -258,9 +339,15 @@ impl LayaClassifier {
 
             let mut score = 0.0;
 
-            // Direct label match
+            // Direct label match or compound sub-token match
             if state_lower.contains(label_part) {
                 score += 4.0;
+            } else if label_part.contains('_') {
+                for sub in label_part.split('_') {
+                    if sub.len() >= 3 && state_lower.contains(sub) {
+                        score += 3.5;
+                    }
+                }
             } else if label_part.len() >= 4 && state_lower.contains(&label_part[..4]) {
                 // Stem / prefix match (e.g. "bill" matches "billed" and "billing")
                 score += 3.2;
@@ -288,6 +375,7 @@ impl LayaClassifier {
             // Word overlap between option description and state text
             let opt_words: Vec<&str> = opt_lower
                 .split_whitespace()
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
                 .filter(|w| w.len() > 3)
                 .collect();
             for word in &opt_words {
@@ -319,7 +407,7 @@ impl LayaClassifier {
         logits
     }
 
-    fn get_temperature_bucket(&self, qtype: QuestionType, k: usize) -> String {
+    pub fn get_temperature_bucket(&self, qtype: QuestionType, k: usize) -> String {
         let prefix = match qtype {
             QuestionType::Choice => "choice",
             QuestionType::Score => "score",

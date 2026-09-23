@@ -1,0 +1,30 @@
+{
+  "name": "enterprise_support_guardrail",
+  "version": "2026.1",
+  "default_action": "allow",
+  "rules": [
+    {
+      "id": "RULE_OOD_QUARANTINE",
+      "description": "Quarantine inputs with high model uncertainty",
+      "condition": "act_probability > 0.85",
+      "action": "quarantine",
+      "reason": "Elevated entropy detected by Act/Escalate head"
+    },
+    {
+      "id": "RULE_VIP_CHURN_ESCALATION",
+      "description": "Escalate high churn risk or urgent billing directly to supervisors",
+      "condition": "churn_risk.noul > 0.70 OR (department.choice == \"billing\" AND urgency.score >= 1.2)",
+      "action": "escalate",
+      "target": "vip_finance_supervisors",
+      "reason": "Critical billing inquiry requiring supervisor authorization"
+    },
+    {
+      "id": "RULE_LOW_CONFIDENCE_GATE",
+      "description": "Hold decisions below 50% confidence for review",
+      "condition": "confidence < 0.50",
+      "action": "escalate",
+      "target": "human_in_the_loop_queue",
+      "reason": "Confidence below threshold"
+    }
+  ]
+}
