@@ -9,8 +9,8 @@ use lemma::cli::{
     ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
     AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
     CascadeCommands, Cli, Commands, ConformalArgs, ConsensusArgs, DownloadArgs, DriftArgs,
-    ExplainArgs, ExperimentArgs, ExperimentMode, GuardArgs, HierarchicalCommands, InfoArgs,
-    InspectArgs, OodArgs, OodCommands, OutputFormat, SchemaArgs, SchemaCommands, SchemaInferArgs,
+    ExplainArgs, ExperimentArgs, ExperimentMode, FetchArgs, GuardArgs, HierarchicalCommands, InfoArgs,
+    InspectArgs, OodArgs, OodCommands, OutputFormat, ScrapeArgs, SchemaArgs, SchemaCommands, SchemaInferArgs,
     SchemaOptimizeArgs, SchemaValidateArgs, StatsArgs, StreamArgs, TestArgs,
 };
 use lemma::engine::{
@@ -54,6 +54,8 @@ fn main() -> Result<()> {
         Commands::Stream(args) => handle_stream(args),
         Commands::Active(args) => handle_active(args),
         Commands::Stats(args) => handle_stats(args),
+        Commands::Fetch(args) => handle_fetch(args),
+        Commands::Scrape(args) => handle_scrape(args),
     }
 }
 
@@ -85,14 +87,21 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
 fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     let checkpoint = Checkpoint::from_str(&args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
 
-    let source = resolve_data_source_filtered(
-        &args.data_dir,
-        args.file.as_deref(),
-        args.stdin,
-        args.text.as_deref(),
-        args.extensions.as_deref(),
-        args.no_recursive,
-    )?;
+    let source: Box<dyn DataSource> = if let Some(url_str) = &args.url {
+        Box::new(lemma::datasource::WebSource::new(
+            vec![url_str.clone()],
+            lemma::datasource::ScrapeOptions::default(),
+        ))
+    } else {
+        resolve_data_source_filtered(
+            &args.data_dir,
+            args.file.as_deref(),
+            args.stdin,
+            args.text.as_deref(),
+            args.extensions.as_deref(),
+            args.no_recursive,
+        )?
+    };
 
     if let Some(hier_path) = &args.hierarchical {
         return run_hierarchical_classification(
@@ -2026,6 +2035,212 @@ fn handle_stats(args: StatsArgs) -> Result<()> {
         }
         OutputFormat::Csv => {
             print!("{}", StatsEngine::format_csv(&report));
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_fetch(args: FetchArgs) -> Result<()> {
+    let mut schema_generated = None;
+    let (items, source_desc) = if let Some(dataset) = &args.hf {
+        let source = lemma::datasource::HuggingFaceSource::new(dataset)
+            .with_config(args.config)
+            .with_split(args.split)
+            .with_limit(args.limit)
+            .with_offset(args.offset)
+            .with_custom_columns(args.text_col, args.label_col);
+        let (items, schema) = source.read_items_with_schema()?;
+        schema_generated = Some((dataset.clone(), schema));
+        (items, format!("Hugging Face dataset '{}'", dataset))
+    } else if let Some(category) = &args.hn {
+        let source = lemma::datasource::HackerNewsSource::new(category, args.limit);
+        let items = source.read_items()?;
+        (items, format!("Hacker News feed '{}'", category))
+    } else if let Some(sub) = &args.reddit {
+        let source = lemma::datasource::RedditSource::new(sub, args.limit);
+        let items = source.read_items()?;
+        (items, format!("r/{} on Reddit", sub))
+    } else if let Some(article) = &args.wikipedia {
+        let source = lemma::datasource::WikipediaSource::new(Some(article.clone()), args.limit);
+        let items = source.read_items()?;
+        (items, format!("Wikipedia article '{}'", article))
+    } else {
+        bail!("No source specified for fetch. Specify one of: --hf, --hn, --reddit, --wikipedia");
+    };
+
+    if args.auto_schema {
+        if let Some((name, schema)) = schema_generated {
+            if !schema.is_empty() {
+                let schema_path = if let Some(p) = &args.schema_output {
+                    p.clone()
+                } else {
+                    let slug = name.replace('/', "_");
+                    std::path::PathBuf::from(format!("schema/{}.json", slug))
+                };
+                if let Some(parent) = schema_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                let json = serde_json::to_string_pretty(&schema)?;
+                std::fs::write(&schema_path, json)?;
+                eprintln!("✨ Inferred question schema written to {}", schema_path.display());
+            }
+        }
+    }
+
+    if items.is_empty() {
+        eprintln!("⚠️  No records retrieved from {}.", source_desc);
+        return Ok(());
+    }
+
+    eprintln!("📦 Ingested {} items from {}", items.len(), source_desc);
+
+    let mut out_writer: Box<dyn Write> = match &args.output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            Box::new(std::fs::File::create(path)?)
+        }
+        None => Box::new(std::io::stdout()),
+    };
+
+    match args.format {
+        OutputFormat::Jsonl => {
+            for item in &items {
+                let line = serde_json::to_string(item)?;
+                if let Err(e) = writeln!(out_writer, "{}", line) {
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+        OutputFormat::Json | OutputFormat::Pretty => {
+            let json = serde_json::to_string_pretty(&items)?;
+            if let Err(e) = writeln!(out_writer, "{}", json) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        OutputFormat::Table | OutputFormat::Compact => {
+            let mut table = comfy_table::Table::new();
+            table.load_preset(comfy_table::presets::UTF8_FULL);
+            table.set_header(vec!["ID", "Origin", "Ground Truth", "Preview Text"]);
+            for item in &items {
+                let gt_str = item.ground_truth.as_ref()
+                    .map(|gt| serde_json::to_string(gt).unwrap_or_default())
+                    .unwrap_or_else(|| "-".to_string());
+                table.add_row(vec![
+                    comfy_table::Cell::new(&item.id),
+                    comfy_table::Cell::new(&item.source_uri),
+                    comfy_table::Cell::new(gt_str),
+                    comfy_table::Cell::new(item.preview_text(60)),
+                ]);
+            }
+            if let Err(e) = writeln!(out_writer, "{table}") {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        OutputFormat::Csv => {
+            let mut wtr = csv::Writer::from_writer(out_writer);
+            wtr.write_record(["id", "source_uri", "ground_truth", "state"])?;
+            for item in &items {
+                let gt_str = item.ground_truth.as_ref()
+                    .map(|gt| serde_json::to_string(gt).unwrap_or_default())
+                    .unwrap_or_default();
+                let state_str = serde_json::to_string(&item.state).unwrap_or_default();
+                wtr.write_record([&item.id, &item.source_uri, &gt_str, &state_str])?;
+            }
+            wtr.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_scrape(args: ScrapeArgs) -> Result<()> {
+    let options = lemma::datasource::ScrapeOptions {
+        timeout_secs: args.timeout,
+        max_chars: args.max_chars,
+        use_jina: args.jina,
+        ..Default::default()
+    };
+    let scraper = lemma::datasource::WebScraper::new(options);
+    let doc = scraper.scrape(&args.url)?;
+
+    eprintln!("🌐 Scraped '{}' ({} words, SPA: {})", doc.url, doc.word_count, doc.is_likely_spa);
+
+    let state = serde_json::json!({
+        "title": doc.title,
+        "text": doc.markdown,
+        "url": doc.url,
+        "words": doc.word_count,
+    });
+    let item = lemma::datasource::DataItem::new(format!("web:{}", doc.url), state, &doc.url);
+
+    let mut out_writer: Box<dyn Write> = match &args.output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            Box::new(std::fs::File::create(path)?)
+        }
+        None => Box::new(std::io::stdout()),
+    };
+
+    match args.format {
+        OutputFormat::Jsonl => {
+            let line = serde_json::to_string(&item)?;
+            if let Err(e) = writeln!(out_writer, "{}", line) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        OutputFormat::Json | OutputFormat::Pretty => {
+            let json = serde_json::to_string_pretty(&item)?;
+            if let Err(e) = writeln!(out_writer, "{}", json) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        OutputFormat::Table | OutputFormat::Compact => {
+            let mut table = comfy_table::Table::new();
+            table.load_preset(comfy_table::presets::UTF8_FULL);
+            table.set_header(vec!["Field", "Value"]);
+            table.add_row(vec!["URL", &doc.url]);
+            table.add_row(vec!["Title", &doc.title]);
+            table.add_row(vec!["Word Count", &doc.word_count.to_string()]);
+            table.add_row(vec!["SPA Shell", if doc.is_likely_spa { "true" } else { "false" }]);
+            table.add_row(vec!["Content Preview", &item.preview_text(160)]);
+            if let Err(e) = writeln!(out_writer, "{table}") {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        OutputFormat::Csv => {
+            let mut wtr = csv::Writer::from_writer(out_writer);
+            wtr.write_record(["id", "url", "title", "words", "text"])?;
+            wtr.write_record([&item.id, &doc.url, &doc.title, &doc.word_count.to_string(), &doc.markdown])?;
+            wtr.flush()?;
         }
     }
 

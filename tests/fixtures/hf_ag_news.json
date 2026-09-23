@@ -1,0 +1,62 @@
+{
+  "features": [
+    {
+      "feature_idx": 0,
+      "name": "text",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 1,
+      "name": "label",
+      "type": {
+        "names": [
+          "World",
+          "Sports",
+          "Business",
+          "Sci/Tech"
+        ],
+        "_type": "ClassLabel"
+      }
+    }
+  ],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "text": "Fears for T N pension after talks Unions representing workers at Turner & Newall say they are disappointed after talks.",
+        "label": 2
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 1,
+      "row": {
+        "text": "The Race is On: Second Private Team Sets Launch Date for Human Spaceflight with private rocketeers.",
+        "label": 3
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 2,
+      "row": {
+        "text": "Olympic Swimming: Phelps captures sixth gold medal in Athens with record performance in butterfly.",
+        "label": 1
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 3,
+      "row": {
+        "text": "Diplomatic talks resume in Geneva regarding cross-border trade tariffs and peacekeeping mandates.",
+        "label": 0
+      },
+      "truncated_cells": []
+    }
+  ],
+  "num_rows_total": 4,
+  "num_rows_per_page": 4,
+  "partial": false
+}

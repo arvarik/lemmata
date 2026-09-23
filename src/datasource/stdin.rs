@@ -35,8 +35,10 @@ impl DataSource for StdinSource {
                 continue;
             }
 
-            let item = if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                DataItem::new(format!("stdin:{idx}"), val, "stdin")
+            let item = if let Ok(parsed_item) = serde_json::from_str::<DataItem>(trimmed) {
+                parsed_item
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                super::file::FileSource::json_value_to_item(format!("stdin:{idx}"), val, "stdin")
             } else {
                 DataItem::new(
                     format!("stdin:{idx}"),
