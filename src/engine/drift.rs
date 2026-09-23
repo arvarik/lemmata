@@ -336,8 +336,8 @@ pub fn calculate_ks_statistic(sample_a: &[f64], sample_b: &[f64]) -> f64 {
     }
     let mut a = sample_a.to_vec();
     let mut b = sample_b.to_vec();
-    a.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-    b.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    a.sort_by(|x, y| x.total_cmp(y));
+    b.sort_by(|x, y| x.total_cmp(y));
 
     let n_a = a.len() as f64;
     let n_b = b.len() as f64;
@@ -345,28 +345,49 @@ pub fn calculate_ks_statistic(sample_a: &[f64], sample_b: &[f64]) -> f64 {
     let mut j = 0;
     let mut max_diff = 0.0f64;
 
-    while i < a.len() && j < b.len() {
-        let val_a = a[i];
-        let val_b = b[j];
-        let cdf_a = (i + 1) as f64 / n_a;
-        let cdf_b = (j + 1) as f64 / n_b;
-
-        if val_a < val_b {
-            let diff = ((i + 1) as f64 / n_a - j as f64 / n_b).abs();
-            if diff > max_diff { max_diff = diff; }
-            i += 1;
-        } else if val_b < val_a {
-            let diff = (i as f64 / n_a - (j + 1) as f64 / n_b).abs();
-            if diff > max_diff { max_diff = diff; }
-            j += 1;
+    while i < a.len() || j < b.len() {
+        let val = if i < a.len() && j < b.len() {
+            a[i].min(b[j])
+        } else if i < a.len() {
+            a[i]
         } else {
-            let diff = (cdf_a - cdf_b).abs();
-            if diff > max_diff { max_diff = diff; }
+            b[j]
+        };
+
+        while i < a.len() && a[i] <= val {
             i += 1;
+        }
+        while j < b.len() && b[j] <= val {
             j += 1;
+        }
+
+        let diff = (i as f64 / n_a - j as f64 / n_b).abs();
+        if diff > max_diff {
+            max_diff = diff;
         }
     }
     max_diff.clamp(0.0, 1.0)
+}
+
+/// Two-sample Kolmogorov-Smirnov asymptotic p-value using the Kolmogorov limiting distribution.
+pub fn calculate_ks_p_value(d_stat: f64, n_a: usize, n_b: usize) -> f64 {
+    if n_a == 0 || n_b == 0 || d_stat <= 0.0 {
+        return 1.0;
+    }
+    let n_eff = (n_a * n_b) as f64 / (n_a + n_b) as f64;
+    let lambda = (n_eff.sqrt() + 0.12 + 0.11 / n_eff.sqrt()) * d_stat;
+    if lambda < 0.20 {
+        return 1.0;
+    }
+    let mut p = 0.0;
+    for k in 1..=100 {
+        let term = 2.0 * (-1.0f64).powi((k - 1) as i32) * (-2.0 * (k as f64).powi(2) * lambda.powi(2)).exp();
+        p += term;
+        if term.abs() < 1e-10 {
+            break;
+        }
+    }
+    p.clamp(0.0, 1.0)
 }
 
 /// Calculate Wasserstein-1 Distance (Earth Mover's Distance) on 1D empirical distributions
@@ -394,26 +415,34 @@ pub fn calculate_wasserstein_1(sample_a: &[f64], sample_b: &[f64], num_quantiles
 
 /// Calculate Jensen-Shannon Divergence between two probability distributions.
 pub fn calculate_jsd(p: &[f64], q: &[f64]) -> f64 {
-    let n = p.len().min(q.len());
+    let n = p.len().max(q.len());
+    if n == 0 {
+        return 0.0;
+    }
     let eps = 1e-9;
     let mut m = Vec::with_capacity(n);
     for i in 0..n {
-        m.push(0.5 * (p[i] + q[i]));
+        let pi = p.get(i).copied().unwrap_or(0.0);
+        let qi = q.get(i).copied().unwrap_or(0.0);
+        m.push(0.5 * (pi + qi));
     }
 
     let mut kl_pm = 0.0;
     let mut kl_qm = 0.0;
 
     for i in 0..n {
-        if p[i] > eps {
-            kl_pm += p[i] * (p[i] / (m[i] + eps)).ln();
+        let pi = p.get(i).copied().unwrap_or(0.0);
+        let qi = q.get(i).copied().unwrap_or(0.0);
+        if pi > eps {
+            kl_pm += pi * (pi / (m[i] + eps)).ln();
         }
-        if q[i] > eps {
-            kl_qm += q[i] * (q[i] / (m[i] + eps)).ln();
+        if qi > eps {
+            kl_qm += qi * (qi / (m[i] + eps)).ln();
         }
     }
 
-    (0.5 * kl_pm + 0.5 * kl_qm).max(0.0)
+    let jsd = 0.5 * kl_pm + 0.5 * kl_qm;
+    if jsd.is_nan() || jsd < 0.0 { 0.0 } else { jsd }
 }
 
 /// Bin continuous values into `num_bins` uniform intervals over [0.0, 1.0].
@@ -453,9 +482,20 @@ mod tests {
         let s2 = vec![0.1, 0.2, 0.3, 0.4];
         assert_eq!(calculate_ks_statistic(&s1, &s2), 0.0);
 
+        // Identical distributions with tied values and different lengths must have 0.0 distance
+        let tied_a = vec![1.0, 1.0, 1.0];
+        let tied_b = vec![1.0, 1.0];
+        assert_eq!(calculate_ks_statistic(&tied_a, &tied_b), 0.0);
+
         let left = vec![0.1, 0.2, 0.3];
         let right = vec![0.8, 0.9, 1.0];
         assert_eq!(calculate_ks_statistic(&left, &right), 1.0);
+
+        let p_val_ident = calculate_ks_p_value(0.0, 100, 100);
+        assert_eq!(p_val_ident, 1.0);
+
+        let p_val_drift = calculate_ks_p_value(1.0, 50, 50);
+        assert!(p_val_drift < 0.001);
     }
 
     #[test]

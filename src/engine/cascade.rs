@@ -335,10 +335,17 @@ impl CascadeRouter {
             }
         }
 
+        if best_cost.is_infinite() {
+            bail!(
+                "Target accuracy {:.2}% cannot be achieved by cascade (maximum achievable: {:.2}%). Consider lowering target accuracy.",
+                target_accuracy * 100.0,
+                assumed_s2_acc * 100.0
+            );
+        }
+
         let s2_esc_rate = 1.0 - best_s1_cov;
         let cost_per_1000 = s2_esc_rate * 1000.0 * system2_cost;
-        let pure_s2_cost_1000 = 1000.0 * system2_cost;
-        let savings_percent = (1.0 - (cost_per_1000 / pure_s2_cost_1000.max(1e-6))) * 100.0;
+        let savings_percent = if system2_cost > 0.0 { best_s1_cov * 100.0 } else { 0.0 };
 
         Ok(CascadePolicy {
             optimal_threshold: best_tau,

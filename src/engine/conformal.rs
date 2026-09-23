@@ -96,7 +96,7 @@ impl ConformalEngine {
         // 2. Compute conformal empirical quantile
         scores.sort_by(|a, b| a.total_cmp(b));
         let n = scores.len();
-        let raw_rank = ((n + 1) as f64 * (1.0 - alpha)).ceil() as usize;
+        let raw_rank = (((n + 1) as f64 * (1.0 - alpha) - 1e-10).ceil().max(0.0)) as usize;
         let q_hat = if raw_rank > n {
             1.0
         } else if raw_rank == 0 {
@@ -160,9 +160,14 @@ impl ConformalEngine {
             alpha,
             target_coverage_pct: (1.0 - alpha) * 100.0,
             quantile_threshold: (q_hat * 1000.0).round() / 1000.0,
-            empirical_coverage_pct: ((covered_count as f64 / scores.len() as f64) * 10000.0)
-                .round()
-                / 100.0,
+            empirical_coverage_pct: {
+                let labeled_count = conformal_items.iter().filter(|i| i.is_covered.is_some()).count();
+                if labeled_count > 0 {
+                    ((covered_count as f64 / labeled_count as f64) * 10000.0).round() / 100.0
+                } else {
+                    0.0
+                }
+            },
             average_set_size: ((total_set_size as f64 / total_eval as f64) * 100.0).round() / 100.0,
             singleton_rate_pct: ((singleton_count as f64 / total_eval as f64) * 10000.0).round()
                 / 100.0,

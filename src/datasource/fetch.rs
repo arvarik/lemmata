@@ -142,7 +142,11 @@ impl HuggingFaceSource {
         let mut id_col = None;
 
         // 1. Label Column & Class Labels from ClassLabel type
-        if discovered_label.is_none() {
+        if let Some(ref custom_name) = discovered_label {
+            if let Some(feat) = features.iter().find(|f| f.name.eq_ignore_ascii_case(custom_name)) {
+                class_labels = feat.feature_type.names.clone();
+            }
+        } else {
             for feat in features {
                 if feat.feature_type.type_name == "ClassLabel" {
                     discovered_label = Some(feat.name.clone());
@@ -150,15 +154,15 @@ impl HuggingFaceSource {
                     break;
                 }
             }
-        }
 
-        // Fallback label name match
-        if discovered_label.is_none() {
-            for candidate in CANDIDATE_LABEL {
-                if let Some(feat) = features.iter().find(|f| f.name.to_lowercase() == *candidate) {
-                    discovered_label = Some(feat.name.clone());
-                    class_labels = feat.feature_type.names.clone();
-                    break;
+            // Fallback label name match
+            if discovered_label.is_none() {
+                for candidate in CANDIDATE_LABEL {
+                    if let Some(feat) = features.iter().find(|f| f.name.eq_ignore_ascii_case(candidate)) {
+                        discovered_label = Some(feat.name.clone());
+                        class_labels = feat.feature_type.names.clone();
+                        break;
+                    }
                 }
             }
         }
@@ -166,16 +170,16 @@ impl HuggingFaceSource {
         // 2. Text Column Discovery
         if text_col.is_none() {
             // Check for NLI pairs (premise / hypothesis)
-            let has_premise = features.iter().any(|f| f.name == "premise");
-            let has_hyp = features.iter().any(|f| f.name == "hypothesis");
+            let has_premise = features.iter().any(|f| f.name.eq_ignore_ascii_case("premise"));
+            let has_hyp = features.iter().any(|f| f.name.eq_ignore_ascii_case("hypothesis"));
             if has_premise && has_hyp {
                 text_col = Some("premise".into());
                 paired_text_col = Some("hypothesis".into());
             }
 
             // Check for sentence pairs (sentence1 / sentence2)
-            let has_s1 = features.iter().any(|f| f.name == "sentence1");
-            let has_s2 = features.iter().any(|f| f.name == "sentence2");
+            let has_s1 = features.iter().any(|f| f.name.eq_ignore_ascii_case("sentence1"));
+            let has_s2 = features.iter().any(|f| f.name.eq_ignore_ascii_case("sentence2"));
             if has_s1 && has_s2 {
                 text_col = Some("sentence1".into());
                 paired_text_col = Some("sentence2".into());
@@ -294,6 +298,7 @@ impl HuggingFaceSource {
                 cols = Some(self.discover_columns(&page.features)?);
             }
             let c = cols.as_ref().unwrap();
+            let page_rows_count = page.rows.len();
 
             for row_wrapper in page.rows {
                 let row_val = row_wrapper.row;
@@ -301,7 +306,11 @@ impl HuggingFaceSource {
                 // 1. Build item ID
                 let item_id = if let Some(id_field) = &c.id_col {
                     row_val.get(id_field)
-                        .map(|v| v.to_string().trim_matches('"').to_string())
+                        .filter(|v| !v.is_null())
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string().trim_matches('"').to_string(),
+                        })
                         .unwrap_or_else(|| format!("{}:{}:{}", canonical_id, self.split, row_wrapper.row_idx))
                 } else {
                     format!("{}:{}:{}", canonical_id, self.split, row_wrapper.row_idx)
@@ -355,8 +364,8 @@ impl HuggingFaceSource {
                 }
             }
 
-            current_offset += page.num_rows_per_page;
-            if current_offset >= page.num_rows_total {
+            current_offset += page_rows_count;
+            if current_offset >= page.num_rows_total || page_rows_count == 0 {
                 break;
             }
         }
@@ -607,6 +616,10 @@ impl DataSource for RedditSource {
 
         let val: serde_json::Value = serde_json::from_slice(&output.stdout)
             .context("Failed to parse Reddit response as JSON (may be rate-limited or blocked)")?;
+
+        if let Some(err) = val.get("error").or_else(|| val.get("message")) {
+            bail!("Reddit API returned error: {}", err);
+        }
 
         let mut items = Vec::new();
         if let Some(children) = val.get("data").and_then(|d| d.get("children")).and_then(|c| c.as_array()) {

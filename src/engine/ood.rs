@@ -201,9 +201,16 @@ impl OodDetector {
         let dist_factor = 1.0 / (1.0 + (-(min_dist - self.profile.distance_threshold) * 2.0).exp());
         let anomaly_score = (0.5 * energy_factor + 0.5 * dist_factor).clamp(0.0, 1.0);
 
-        let is_ood = anomaly_score >= 0.55 || energy >= self.profile.energy_threshold || min_dist >= self.profile.distance_threshold;
+        let is_ood = anomaly_score.is_nan()
+            || anomaly_score >= 0.55
+            || energy >= self.profile.energy_threshold
+            || min_dist >= self.profile.distance_threshold;
 
-        let action = if anomaly_score >= 0.75 || min_dist >= self.profile.distance_threshold * 1.5 {
+        let action = if anomaly_score.is_nan()
+            || min_dist.is_nan()
+            || anomaly_score >= 0.75
+            || min_dist >= self.profile.distance_threshold * 1.5
+        {
             GuardAction::Quarantine
         } else if is_ood {
             GuardAction::Escalate
@@ -248,7 +255,7 @@ impl OodDetector {
 /// For out-of-distribution inputs with diffuse/uncertain predictions, energy is high.
 pub fn compute_free_energy(probs: &BTreeMap<String, f64>, temperature: f64) -> f64 {
     if probs.is_empty() {
-        return 0.0;
+        return 10.0;
     }
     let temp = temperature.max(0.01);
     let p_max = probs.values().copied().fold(0.0, f64::max).max(1e-9);

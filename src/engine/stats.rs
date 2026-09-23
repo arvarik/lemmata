@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
 use crate::engine::metrics::{calculate_brier_score, calculate_ece};
-use crate::engine::{CacheLookupResult, DecisionCache, SemanticCacheConfig};
+use crate::engine::{CacheLookupResult, DecisionCache, SemanticCacheConfig, compute_schema_hash};
 use crate::model::{Question, QuestionType};
 
 /// Speed and latency statistics for single-item decisions and batches.
@@ -224,7 +224,7 @@ impl StatsEngine {
             None
         };
 
-        let schema_hash = format!("schema_{}", questions.len());
+        let schema_hash = compute_schema_hash(questions);
         let start_total = Instant::now();
 
         for _ in 0..self.config.iterations {
@@ -269,7 +269,8 @@ impl StatsEngine {
         let total_items_processed = total_items * self.config.iterations;
         let total_decisions_evaluated = total_items_processed * questions.len();
 
-        latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        latencies_ms.retain(|v| v.is_finite());
+        latencies_ms.sort_by(|a, b| a.total_cmp(b));
 
         let latency_min_ms = *latencies_ms.first().unwrap_or(&0.0);
         let latency_max_ms = *latencies_ms.last().unwrap_or(&0.0);
@@ -437,7 +438,12 @@ impl StatsEngine {
                                                 .as_ref()
                                                 .map(|v| v.iter().any(|s| s.eq_ignore_ascii_case(target_str)))
                                                 .unwrap_or(false));
-                                    let soft = ans.probabilities.get(target_str).copied().unwrap_or(0.0);
+                                    let soft = ans
+                                        .probabilities
+                                        .iter()
+                                        .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
+                                        .map(|(_, &v)| v)
+                                        .unwrap_or(0.0);
 
                                     // Collect Brier score vectors
                                     let keys: Vec<&String> = ans.probabilities.keys().collect();

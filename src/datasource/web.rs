@@ -76,12 +76,12 @@ impl HtmlExtractor {
         }
 
         // 3. Try <title>...</title>
-        if let Some(start) = html.to_lowercase().find("<title") {
+        if let Some(start) = Self::find_tag_case_insensitive(html, "<title") {
             let slice = &html[start..];
             if let Some(tag_end) = slice.find('>') {
                 let content_start = tag_end + 1;
                 let remainder = &slice[content_start..];
-                if let Some(end) = remainder.to_lowercase().find("</title>") {
+                if let Some(end) = Self::find_tag_case_insensitive(remainder, "</title>") {
                     let title = &remainder[..end];
                     return Self::clean_title(&Self::decode_entities(title.trim()));
                 }
@@ -89,12 +89,12 @@ impl HtmlExtractor {
         }
 
         // 4. Try <h1>...</h1>
-        if let Some(start) = html.to_lowercase().find("<h1") {
+        if let Some(start) = Self::find_tag_case_insensitive(html, "<h1") {
             let slice = &html[start..];
             if let Some(tag_end) = slice.find('>') {
                 let content_start = tag_end + 1;
                 let remainder = &slice[content_start..];
-                if let Some(end) = remainder.to_lowercase().find("</h1>") {
+                if let Some(end) = Self::find_tag_case_insensitive(remainder, "</h1>") {
                     let h1 = &remainder[..end];
                     let clean = Self::html_to_markdown(h1);
                     if !clean.is_empty() {
@@ -105,6 +105,25 @@ impl HtmlExtractor {
         }
 
         String::new()
+    }
+
+    fn find_tag_case_insensitive(html: &str, tag_prefix: &str) -> Option<usize> {
+        let tag_bytes = tag_prefix.as_bytes();
+        let html_bytes = html.as_bytes();
+        if html_bytes.len() < tag_bytes.len() {
+            return None;
+        }
+        for i in 0..=(html_bytes.len() - tag_bytes.len()) {
+            if html.is_char_boundary(i)
+                && html_bytes[i..i + tag_bytes.len()]
+                    .iter()
+                    .zip(tag_bytes.iter())
+                    .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            {
+                return Some(i);
+            }
+        }
+        None
     }
 
     fn extract_meta_content(html: &str, marker: &str) -> Option<String> {
@@ -231,8 +250,15 @@ impl HtmlExtractor {
                 let mut valid = false;
                 for _ in 0..10 {
                     if let Some(&ec) = chars.peek() {
+                        if ec == ';' {
+                            chars.next();
+                            valid = true;
+                            break;
+                        }
+                        if ec.is_whitespace() || ec == '<' || ec == '>' || ec == '&' {
+                            break;
+                        }
                         chars.next();
-                        if ec == ';' { valid = true; break; }
                         entity.push(ec);
                     } else {
                         break;
@@ -319,7 +345,7 @@ impl HtmlExtractor {
                     consecutive_newlines += 1;
                 }
             } else {
-                if consecutive_newlines > 0 {
+                if !res.is_empty() && consecutive_newlines == 0 {
                     res.push('\n');
                 }
                 let mut line_buf = String::new();
