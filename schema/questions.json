@@ -1,0 +1,25 @@
+{
+  "department": {
+    "type": "choice",
+    "instructions": "Which department should handle this request?",
+    "criteria": {
+      "billing": "invoices, payment issues, subscription refunds, credit card charges",
+      "technical": "system errors, bugs, outages, crashes, API failures",
+      "sales": "enterprise quotes, pricing inquiry, new customer contracts, upgrades",
+      "other": "general feedback, spam, miscellaneous questions"
+    }
+  },
+  "urgency": {
+    "type": "score",
+    "instructions": "How urgent is this customer request?",
+    "criteria": [
+      "not urgent: casual feedback or general question",
+      "normal: standard request with no immediate deadline",
+      "critical: service outage, financial loss, or blocking production issue"
+    ]
+  },
+  "churn_risk": {
+    "type": "noul",
+    "instructions": "Does the user threaten to cancel, switch to a competitor, or leave?"
+  }
+}
