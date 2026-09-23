@@ -1,0 +1,25 @@
+{
+  "category": {
+    "type": "choice",
+    "instructions": "Classify the banking inquiry topic",
+    "criteria": {
+      "cards": "Credit/debit card lost, stolen, activation, or PIN reset",
+      "transfers": "Wire transfer, ACH, limits, and international payments",
+      "security": "Unauthorized access, suspicious login, or compromised credentials",
+      "other": "General inquiries, weather, greetings, or non-banking topics"
+    }
+  },
+  "urgency": {
+    "type": "score",
+    "instructions": "Rate how urgent this ticket is",
+    "criteria": [
+      "low: casual inquiry or general information request",
+      "medium: normal transaction or delayed transfer request",
+      "high: stolen card, active fraud, or compromised account"
+    ]
+  },
+  "fraud_alert": {
+    "type": "noul",
+    "instructions": "Does this report active fraud, stolen card, or account breach?"
+  }
+}

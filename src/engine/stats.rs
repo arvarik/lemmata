@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
-use crate::engine::metrics::{calculate_brier_score, calculate_ece};
+use crate::engine::metrics::{
+    calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
+};
 use crate::engine::{CacheLookupResult, DecisionCache, SemanticCacheConfig, compute_schema_hash};
 use crate::model::{Question, QuestionType};
 
@@ -410,7 +412,8 @@ impl StatsEngine {
                     }
 
                     // Check ground truth for this question
-                    let opt_gt = gt_map.and_then(|m| m.get(qid).or_else(|| m.get("default")));
+                    let opt_gt =
+                        resolve_ground_truth_for_question(gt_map, qid, question, questions.len());
 
                     if let Some(acc) = q_accumulators.get_mut(qid) {
                         acc.sample_count += 1;

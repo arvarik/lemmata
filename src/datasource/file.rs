@@ -146,6 +146,15 @@ impl FileSource {
                         "default".to_string(),
                         serde_json::Value::String(val.to_string()),
                     );
+                } else if let Some(key) = header_lower
+                    .strip_prefix("gt_")
+                    .or_else(|| header_lower.strip_prefix("gt:"))
+                    .or_else(|| header_lower.strip_prefix("label_"))
+                    .or_else(|| header_lower.strip_prefix("label:"))
+                    .or_else(|| header_lower.strip_prefix("target_"))
+                    .or_else(|| header_lower.strip_prefix("target:"))
+                {
+                    gt.insert(key.to_string(), serde_json::Value::String(val.to_string()));
                 } else {
                     map.insert(
                         header.to_string(),
@@ -213,6 +222,26 @@ impl FileSource {
                         }
                     });
 
+                let mut prefixed_gt = BTreeMap::new();
+                for key in map.keys().cloned().collect::<Vec<_>>() {
+                    let key_lower = key.to_ascii_lowercase();
+                    if let Some(qid) = key_lower
+                        .strip_prefix("gt_")
+                        .or_else(|| key_lower.strip_prefix("gt:"))
+                        .or_else(|| key_lower.strip_prefix("label_"))
+                        .or_else(|| key_lower.strip_prefix("label:"))
+                        .or_else(|| key_lower.strip_prefix("target_"))
+                        .or_else(|| key_lower.strip_prefix("target:"))
+                    {
+                        if let Some(val) = map.remove(&key) {
+                            prefixed_gt.insert(qid.to_string(), val);
+                        }
+                    }
+                }
+
+                let mut final_gt = gt.unwrap_or_default();
+                final_gt.extend(prefixed_gt);
+
                 // If "state" is explicitly provided as a field, use that; otherwise use the whole object
                 let state = if let Some(st) = map.remove("state") {
                     st
@@ -221,8 +250,8 @@ impl FileSource {
                 };
 
                 let mut item = DataItem::new(id, state, source_uri);
-                if let Some(gt) = gt {
-                    item = item.with_ground_truth(gt);
+                if !final_gt.is_empty() {
+                    item = item.with_ground_truth(final_gt);
                 }
                 item
             }
@@ -303,5 +332,17 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+
+        // Multi-task prefixed labels
+        let val_multi = serde_json::json!({
+            "id": "item4",
+            "text": "multi query",
+            "gt_dept": "support",
+            "label_urgency": 4
+        });
+        let item_multi = FileSource::json_value_to_item("default".into(), val_multi, "test");
+        let gt = item_multi.ground_truth.unwrap();
+        assert_eq!(gt.get("dept").unwrap().as_str().unwrap(), "support");
+        assert_eq!(gt.get("urgency").unwrap().as_u64().unwrap(), 4);
     }
 }
