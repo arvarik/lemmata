@@ -1,0 +1,7 @@
+/target
+/data
+/models
+*.safetensors
+*.bin
+.DS_Store
+.env
