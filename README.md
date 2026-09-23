@@ -71,11 +71,52 @@ lemma classify \
   --labels "billing,technical,sales,other" \
   --format table
 
-# Output structured JSON for downstream pipelines
-lemma classify --file data/customer_support.jsonl --schema schema/questions.json --format json
+# Classify and export to CSV or JSONL
+lemma classify --file data/customer_support.jsonl --schema schema/questions.json --format csv --output results.csv
+lemma classify --file data/customer_support.jsonl --schema schema/questions.json --format jsonl
+
+# Filter for human supervisor review only (using Laya's Act/Escalate head)
+lemma classify --data-dir data --schema schema/questions.json --escalate-only
 ```
 
-### 3. Feature Experimentation (`lemma experiment`)
+### 3. Conformal Prediction Sets (`lemma conformal`)
+Compute prediction sets with mathematically guaranteed $(1 - \alpha)$ coverage (e.g. 95% coverage) for risk-controlled automation:
+
+```bash
+# Evaluate conformal sets with 90% or 95% coverage guarantee
+lemma conformal --file data/customer_support.jsonl --schema schema/questions.json --alpha 0.05
+```
+Automatically triages into:
+* **`AUTO-EXECUTE`**: Singleton sets ($|\mathcal{C}(X)| = 1$) safe to execute autonomously.
+* **`ESCALATE TO REVIEW`**: Ambiguous candidate sets ($|\mathcal{C}(X)| > 1$) requiring supervisor intervention.
+* **`REJECT / OOD`**: Empty sets ($|\mathcal{C}(X)| = 0$) signaling out-of-distribution input.
+
+### 4. Contrastive Saliency Attribution (`lemma explain`)
+Identify exactly which words or tokens drove the model toward the chosen option instead of a competing option via leave-one-out margin ablation:
+
+```bash
+lemma explain \
+  --text "We were billed twice on invoice #4411. Please refund immediately." \
+  --schema schema/questions.json \
+  --target billing \
+  --contrast technical
+```
+
+### 5. Inspect Safetensors Weights & Integrity (`lemma inspect`)
+Zero-copy inspection of local Safetensors archives (<1 ms). Displays parameter counts, tensor dimensions, precision formats, and verifies the Laya decision head:
+
+```bash
+lemma inspect --file models/laya/model.safetensors
+```
+
+### 6. Schema Token Budget Linter (`lemma schema validate`)
+Verify question definitions and ensure candidate options fit within ModernBERT (192) or mmBERT (256) head token budgets:
+
+```bash
+lemma schema validate schema/questions.json --checkpoint english
+```
+
+### 7. Feature Experimentation (`lemma experiment`)
 Evaluate model behavior, prompt variations, and calibration:
 
 ```bash
@@ -89,34 +130,23 @@ lemma experiment --mode temp --file data/customer_support.jsonl --schema schema/
 lemma experiment --mode checkpoints --file data/customer_support.jsonl --schema schema/questions.json
 ```
 
-### 4. Evaluate & Test Accuracy (`lemma test`)
-Compute statistical metrics against labeled ground truth data:
+### 8. Evaluate & Test Accuracy (`lemma test`)
+Compute statistical metrics against labeled ground truth data (supports CI/CD test gates with `--min-accuracy`):
 
 ```bash
-lemma test --file data/customer_support.jsonl --schema schema/questions.json
+lemma test --file data/customer_support.jsonl --schema schema/questions.json --min-accuracy 0.60
 ```
-Computes:
-- **Accuracy**: Argmax classification agreement.
-- **Soft Accuracy**: Probability mass assigned to true targets.
-- **Expected Calibration Error (ECE)**: 10-bin calibration gap.
-- **Brier Score**: Strictly proper quadratic scoring rule.
-- **Score MAE**: Mean absolute error for ordinal rubrics.
-- **Escalate / Act Rate**: Percentage of decisions flagged by Laya's act/escalate head for human supervisor review.
 
-### 5. Benchmark Performance (`lemma bench`)
-Measure real-world throughput and latency percentiles:
+### 9. Benchmark Performance (`lemma bench`)
+Measure real-world throughput and latency percentiles (with `--json` output for CI benchmarking):
 
 ```bash
 lemma bench --data-dir data --schema schema/questions.json --iterations 50 --warmup 5
 ```
-Reports:
-- Throughput (Items/sec & Decisions/sec)
-- Latency Percentiles (p50, p90, p95, p99, min, max, avg)
-- Hardware reference comparisons (Tesla T4 baseline vs Apple Silicon)
 
-### 6. Inspect Model Architecture (`lemma info`)
+### 10. Inspect Model Family Specs (`lemma info`)
 ```bash
-lemma info
+lemma info --checkpoint english
 ```
 
 ---

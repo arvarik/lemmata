@@ -60,7 +60,14 @@ impl DataSource for DirectorySource {
         let mut all_items = Vec::new();
         let mut file_count = 0;
 
-        for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        for entry in walker
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !name.starts_with('.') && name != "target"
+            })
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if path.is_file() {
                 let matches_ext = path
