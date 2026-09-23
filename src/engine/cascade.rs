@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
@@ -345,7 +345,11 @@ impl CascadeRouter {
 
         let s2_esc_rate = 1.0 - best_s1_cov;
         let cost_per_1000 = s2_esc_rate * 1000.0 * system2_cost;
-        let savings_percent = if system2_cost > 0.0 { best_s1_cov * 100.0 } else { 0.0 };
+        let savings_percent = if system2_cost > 0.0 {
+            best_s1_cov * 100.0
+        } else {
+            0.0
+        };
 
         Ok(CascadePolicy {
             optimal_threshold: best_tau,
@@ -417,8 +421,10 @@ mod tests {
             "test",
         );
 
-        let mut cfg = CascadeConfig::default();
-        cfg.risk_threshold = 0.20; // Very strict threshold forces System 2
+        let cfg = CascadeConfig {
+            risk_threshold: 0.20, // Very strict threshold forces System 2
+            ..Default::default()
+        };
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let router = CascadeRouter::new(cfg);
         let decision = router.route(&item, &questions, &classifier).unwrap();
@@ -458,7 +464,8 @@ mod tests {
             "c4",
             serde_json::json!({ "text": "Invoice payment billing refund immediate" }),
             "test",
-        ).with_ground_truth(gt);
+        )
+        .with_ground_truth(gt);
 
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let custom_cfg = CascadeConfig {
@@ -475,7 +482,8 @@ mod tests {
             0.90,
             0.01,
             &custom_cfg,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(policy.optimal_threshold > 0.0);
         assert!(policy.expected_accuracy >= 0.90);

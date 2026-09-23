@@ -103,12 +103,18 @@ impl Question {
         match self.qtype {
             QuestionType::Choice => {
                 if options.len() < 2 {
-                    return Err(format!("Choice question '{}' must specify at least 2 candidate options", qid));
+                    return Err(format!(
+                        "Choice question '{}' must specify at least 2 candidate options",
+                        qid
+                    ));
                 }
             }
             QuestionType::Score => {
                 if options.len() < 2 {
-                    return Err(format!("Score question '{}' requires at least 2 rubric levels", qid));
+                    return Err(format!(
+                        "Score question '{}' requires at least 2 rubric levels",
+                        qid
+                    ));
                 }
             }
             QuestionType::Noul => {}
@@ -224,12 +230,14 @@ impl HierarchicalSchema {
         if let Ok(schema) = serde_json::from_str::<HierarchicalSchema>(content) {
             return Ok(schema);
         }
-        if let Ok(map) = serde_json::from_str::<BTreeMap<String, HierarchicalSchema>>(content) {
-            if let Some((_name, schema)) = map.into_iter().next() {
-                return Ok(schema);
-            }
+        if let Ok(map) = serde_json::from_str::<BTreeMap<String, HierarchicalSchema>>(content)
+            && let Some((_name, schema)) = map.into_iter().next()
+        {
+            return Ok(schema);
         }
-        anyhow::bail!("Failed to parse JSON as HierarchicalSchema (requires 'coarse'/'root' question and optional 'branches'/'subtrees')")
+        anyhow::bail!(
+            "Failed to parse JSON as HierarchicalSchema (requires 'coarse'/'root' question and optional 'branches'/'subtrees')"
+        )
     }
 
     /// Calculate total leaf classes in this hierarchy
@@ -288,7 +296,8 @@ impl HierarchicalSchema {
         for (branch_key, node) in &self.branches {
             match node {
                 HierarchicalNode::Leaf(q) => {
-                    let branch_warnings = q.validate(&format!("branch:{}", branch_key), head_budget)?;
+                    let branch_warnings =
+                        q.validate(&format!("branch:{}", branch_key), head_budget)?;
                     warnings.extend(branch_warnings);
                     let b_tokens: usize = q
                         .render_options()
@@ -345,7 +354,11 @@ impl HierarchicalSchema {
         let total_coarse = coarse_options.len();
         for (i, opt) in coarse_options.iter().enumerate() {
             let is_last_coarse = i + 1 == total_coarse;
-            let prefix = if is_last_coarse { "└── " } else { "├── " };
+            let prefix = if is_last_coarse {
+                "└── "
+            } else {
+                "├── "
+            };
             let child_indent = if is_last_coarse { "    " } else { "│   " };
 
             let key = opt.split(':').next().unwrap_or(opt).trim();
@@ -359,12 +372,20 @@ impl HierarchicalSchema {
                             .sum();
                         out.push_str(&format!(
                             "{}{}: {} ({} sub-options, ~{} tokens)\n",
-                            prefix, key, q.instructions, sub_opts.len(), sub_tokens
+                            prefix,
+                            key,
+                            q.instructions,
+                            sub_opts.len(),
+                            sub_tokens
                         ));
                         let sub_total = sub_opts.len();
                         for (si, sopt) in sub_opts.iter().enumerate() {
                             let is_last_sub = si + 1 == sub_total;
-                            let sub_prefix = if is_last_sub { "└── " } else { "├── " };
+                            let sub_prefix = if is_last_sub {
+                                "└── "
+                            } else {
+                                "├── "
+                            };
                             out.push_str(&format!("{}{}{}\n", child_indent, sub_prefix, sopt));
                         }
                     }
@@ -385,7 +406,11 @@ impl HierarchicalSchema {
             .branches
             .values()
             .map(|n| match n {
-                HierarchicalNode::Leaf(q) => q.render_options().iter().map(|o| o.split_whitespace().count() * 4 / 3 + 1).sum(),
+                HierarchicalNode::Leaf(q) => q
+                    .render_options()
+                    .iter()
+                    .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                    .sum(),
                 HierarchicalNode::Subtree(s) => s.total_leaf_count() * 10,
             })
             .max()
@@ -394,10 +419,12 @@ impl HierarchicalSchema {
         out.push_str("\nSummary:\n");
         out.push_str(&format!("- Total Leaf Classes: {}\n", leaves));
         out.push_str(&format!("- Coarse Branches: {}\n", self.branches.len()));
-        out.push_str(&format!("- Max Tokens per Stage: {} / {}\n", max_stage, head_budget));
+        out.push_str(&format!(
+            "- Max Tokens per Stage: {} / {}\n",
+            max_stage, head_budget
+        ));
         out.push_str(&format!("- Tree Depth: {} levels\n", self.max_depth()));
 
         out
     }
 }
-

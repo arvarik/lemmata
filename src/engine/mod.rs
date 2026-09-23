@@ -23,7 +23,9 @@ pub use active::{
     ReviewQueueItem, ReviewQueuePrediction, RlcdSample, UncertaintyStrategy,
 };
 pub use attest::{AttestationEngine, AttestationVerificationReport, DecisionReceipt};
-pub use cache::{CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig, compute_schema_hash};
+pub use cache::{
+    CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig, compute_schema_hash,
+};
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
     CalibrationReport, CalibrationTuner, QatsProfile,
@@ -47,6 +49,6 @@ pub use stats::{
     StatsEngineConfig, SystemStatsReport, UncertaintyStats,
 };
 pub use stream::{StreamMetrics, StreamPipeline, StreamPipelineConfig, StreamRecord};
-pub use synthesis::{InferredSchemaResult, SchemaKnapsackOptimizer, SchemaOptimizationResult, SchemaSynthesizer};
-
-
+pub use synthesis::{
+    InferredSchemaResult, SchemaKnapsackOptimizer, SchemaOptimizationResult, SchemaSynthesizer,
+};

@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::datasource::DataItem;
 use crate::engine::guardrail::GuardAction;
@@ -44,7 +44,8 @@ pub struct AttestationEngine {
 }
 
 impl AttestationEngine {
-    pub const GENESIS_HASH: &'static str = "0000000000000000000000000000000000000000000000000000000000000000";
+    pub const GENESIS_HASH: &'static str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
 
     pub fn new(secret_key: impl Into<String>) -> Self {
         Self {
@@ -79,7 +80,10 @@ impl AttestationEngine {
         };
 
         let input_digest = format!("{:016x}", fnv1a64(input_text.as_bytes()));
-        let receipt_id = format!("rec_{:016x}", fnv1a64(format!("{}::{}", item.id, now_nanos()).as_bytes()));
+        let receipt_id = format!(
+            "rec_{:016x}",
+            fnv1a64(format!("{}::{}", item.id, now_nanos()).as_bytes())
+        );
         let timestamp = now_iso();
 
         let mut decisions = BTreeMap::new();
@@ -121,14 +125,23 @@ impl AttestationEngine {
             timestamp
         );
 
-        let receipt_digest = format!("{:016x}{:016x}",
+        let receipt_digest = format!(
+            "{:016x}{:016x}",
             fnv1a64(canonical_payload.as_bytes()),
-            fnv1a64(&canonical_payload.as_bytes().iter().rev().copied().collect::<Vec<u8>>())
+            fnv1a64(
+                &canonical_payload
+                    .as_bytes()
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect::<Vec<u8>>()
+            )
         );
 
         // Sign with key
         let sig_payload = format!("{}:{}", self.secret_key, receipt_digest);
-        let signature = format!("sig_{:016x}{:016x}",
+        let signature = format!(
+            "sig_{:016x}{:016x}",
             fnv1a64(sig_payload.as_bytes()),
             fnv1a64(sig_payload.chars().rev().collect::<String>().as_bytes())
         );
@@ -195,9 +208,17 @@ impl AttestationEngine {
                 rec.timestamp
             );
 
-            let computed_digest = format!("{:016x}{:016x}",
+            let computed_digest = format!(
+                "{:016x}{:016x}",
                 fnv1a64(canonical_payload.as_bytes()),
-                fnv1a64(&canonical_payload.as_bytes().iter().rev().copied().collect::<Vec<u8>>())
+                fnv1a64(
+                    &canonical_payload
+                        .as_bytes()
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect::<Vec<u8>>()
+                )
             );
 
             if computed_digest != rec.receipt_digest {
@@ -208,7 +229,8 @@ impl AttestationEngine {
 
             // 3. Verify digital signature
             let sig_payload = format!("{}:{}", secret_key, rec.receipt_digest);
-            let expected_sig = format!("sig_{:016x}{:016x}",
+            let expected_sig = format!(
+                "sig_{:016x}{:016x}",
                 fnv1a64(sig_payload.as_bytes()),
                 fnv1a64(sig_payload.chars().rev().collect::<String>().as_bytes())
             );
@@ -289,11 +311,25 @@ mod tests {
             latency_ms: 31.0,
         };
 
-        let item1 = DataItem::new("item1", serde_json::json!({ "text": "Refund invoice" }), "test");
-        let item2 = DataItem::new("item2", serde_json::json!({ "text": "Cancel subscription" }), "test");
+        let item1 = DataItem::new(
+            "item1",
+            serde_json::json!({ "text": "Refund invoice" }),
+            "test",
+        );
+        let item2 = DataItem::new(
+            "item2",
+            serde_json::json!({ "text": "Cancel subscription" }),
+            "test",
+        );
 
         let rec1 = engine
-            .create_receipt(&item1, &decision, Some("RULE_REFUND"), GuardAction::Allow, "sha_schema")
+            .create_receipt(
+                &item1,
+                &decision,
+                Some("RULE_REFUND"),
+                GuardAction::Allow,
+                "sha_schema",
+            )
             .unwrap();
 
         let rec2 = engine
@@ -315,7 +351,11 @@ mod tests {
     #[test]
     fn test_tampered_receipt_detection() {
         let mut engine = AttestationEngine::new("secret_enterprise_key_2026");
-        let item = DataItem::new("item1", serde_json::json!({ "text": "Refund invoice" }), "test");
+        let item = DataItem::new(
+            "item1",
+            serde_json::json!({ "text": "Refund invoice" }),
+            "test",
+        );
         let decision = DecisionResult {
             model: "laya".into(),
             answers: BTreeMap::new(),

@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-use std::path::Path;
 use lemma::benchmark::BenchmarkRunner;
 use lemma::datasource::{
     DataItem, DataSource, KafkaSource, MemorySource, StreamSink, StreamingDataSource,
@@ -9,14 +7,16 @@ use lemma::engine::{
     CalibrationLoss, CalibrationTuner, CascadeConfig, CascadeRouter, ClassifierConfig,
     ConformalEngine, ConsensusEngine, ConsensusStatus, DecisionCache, DriftEngine, Evaluator,
     ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy, HierarchicalRouter,
-    LayaClassifier, OodDetector, PolicyRule, ReviewQueueItem, RlcdSample,
-    SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine,
-    StreamPipeline, StreamPipelineConfig, SystemStatsReport, SystemTier, UncertaintyStrategy,
+    LayaClassifier, OodDetector, PolicyRule, ReviewQueueItem, RlcdSample, SchemaKnapsackOptimizer,
+    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
+    SystemStatsReport, SystemTier, UncertaintyStrategy,
 };
 use lemma::model::{
     Checkpoint, DecisionResult, HierarchicalSchema, Question, QuestionType, inspect_safetensors,
 };
 use lemma::{resolve_data_source_filtered, resolve_streaming_source};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 #[test]
 fn test_laya_question_schemas() {
@@ -27,7 +27,10 @@ fn test_laya_question_schemas() {
     assert_eq!(q_choice.qtype, QuestionType::Choice);
     assert_eq!(q_choice.render_options().len(), 3);
 
-    let q_score = Question::new_score("Rate urgency level", vec!["low".into(), "med".into(), "high".into()]);
+    let q_score = Question::new_score(
+        "Rate urgency level",
+        vec!["low".into(), "med".into(), "high".into()],
+    );
     assert_eq!(q_score.qtype, QuestionType::Score);
     assert_eq!(q_score.render_options().len(), 3);
 
@@ -96,10 +99,16 @@ fn test_evaluator_with_ground_truth() {
     );
 
     let mut gt1 = BTreeMap::new();
-    gt1.insert("department".into(), serde_json::Value::String("billing".into()));
+    gt1.insert(
+        "department".into(),
+        serde_json::Value::String("billing".into()),
+    );
 
     let mut gt2 = BTreeMap::new();
-    gt2.insert("department".into(), serde_json::Value::String("technical".into()));
+    gt2.insert(
+        "department".into(),
+        serde_json::Value::String("technical".into()),
+    );
 
     let items = vec![
         DataItem::new(
@@ -181,12 +190,17 @@ fn test_conformal_prediction_engine() {
     gt1.insert("dept".into(), serde_json::Value::String("billing".into()));
 
     let items = vec![
-        DataItem::new("c1", serde_json::json!({ "text": "payment billing invoice" }), "test")
-            .with_ground_truth(gt1),
+        DataItem::new(
+            "c1",
+            serde_json::json!({ "text": "payment billing invoice" }),
+            "test",
+        )
+        .with_ground_truth(gt1),
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let (report, prediction_items) = ConformalEngine::evaluate(&classifier, &items, "dept", &q, 0.10).unwrap();
+    let (report, prediction_items) =
+        ConformalEngine::evaluate(&classifier, &items, "dept", &q, 0.10).unwrap();
 
     assert_eq!(report.total_evaluated, 1);
     assert!(!prediction_items.is_empty());
@@ -200,7 +214,13 @@ fn test_attribution_explain_engine() {
     let engine = AttributionEngine::new(&classifier);
 
     let report = engine
-        .explain("We need a refund on invoice charges", "dept", &q, "billing", "technical")
+        .explain(
+            "We need a refund on invoice charges",
+            "dept",
+            &q,
+            "billing",
+            "technical",
+        )
         .unwrap();
 
     assert_eq!(report.target_choice, "billing");
@@ -225,26 +245,55 @@ fn test_drift_detection_engine() {
     let mut questions = BTreeMap::new();
     questions.insert(
         "dept".into(),
-        Question::new_choice("Pick department", vec!["billing".into(), "technical".into()]),
+        Question::new_choice(
+            "Pick department",
+            vec!["billing".into(), "technical".into()],
+        ),
     );
 
     // Baseline: predominantly billing inputs
     let baseline = vec![
-        DataItem::new("b1", serde_json::json!({ "text": "Invoice refund billing payment" }), "base"),
-        DataItem::new("b2", serde_json::json!({ "text": "Charge invoice refund billing" }), "base"),
-        DataItem::new("b3", serde_json::json!({ "text": "Payment credit card invoice billing" }), "base"),
+        DataItem::new(
+            "b1",
+            serde_json::json!({ "text": "Invoice refund billing payment" }),
+            "base",
+        ),
+        DataItem::new(
+            "b2",
+            serde_json::json!({ "text": "Charge invoice refund billing" }),
+            "base",
+        ),
+        DataItem::new(
+            "b3",
+            serde_json::json!({ "text": "Payment credit card invoice billing" }),
+            "base",
+        ),
     ];
 
     // Current: shifted heavily toward technical bugs/crashes
     let current = vec![
-        DataItem::new("c1", serde_json::json!({ "text": "Server outage crash bug exception" }), "prod"),
-        DataItem::new("c2", serde_json::json!({ "text": "System error crash stack trace" }), "prod"),
-        DataItem::new("c3", serde_json::json!({ "text": "Database error crash technical failure" }), "prod"),
+        DataItem::new(
+            "c1",
+            serde_json::json!({ "text": "Server outage crash bug exception" }),
+            "prod",
+        ),
+        DataItem::new(
+            "c2",
+            serde_json::json!({ "text": "System error crash stack trace" }),
+            "prod",
+        ),
+        DataItem::new(
+            "c3",
+            serde_json::json!({ "text": "Database error crash technical failure" }),
+            "prod",
+        ),
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let drift_engine = DriftEngine::new(&classifier).with_thresholds(0.15, 0.10);
-    let report = drift_engine.detect_drift(&baseline, &current, &questions).unwrap();
+    let report = drift_engine
+        .detect_drift(&baseline, &current, &questions)
+        .unwrap();
 
     assert_eq!(report.baseline_count, 3);
     assert_eq!(report.current_count, 3);
@@ -343,14 +392,16 @@ fn test_consensus_ensemble_engine() {
         let q_cons = &res.questions["dept"];
         assert!(q_cons.consensus_confidence > 0.0);
         assert_eq!(q_cons.checkpoint_votes.len(), 3);
-        assert!(matches!(res.overall_status, ConsensusStatus::Agreed | ConsensusStatus::Disputed));
+        assert!(matches!(
+            res.overall_status,
+            ConsensusStatus::Agreed | ConsensusStatus::Disputed
+        ));
     }
 }
 
 #[test]
 fn test_schema_synthesizer_induction() {
-    let synth = SchemaSynthesizer::new(Checkpoint::English)
-        .with_text_col("text");
+    let synth = SchemaSynthesizer::new(Checkpoint::English).with_text_col("text");
 
     let csv_path = Path::new("data/feedback_dataset.csv");
     let result = synth.infer_from_file(csv_path).unwrap();
@@ -363,7 +414,9 @@ fn test_schema_synthesizer_induction() {
         assert!(
             *tokens <= *budget,
             "Question '{}' tokens ({}) exceeded budget ({})",
-            qid, tokens, budget
+            qid,
+            tokens,
+            budget
         );
     }
 }
@@ -390,10 +443,12 @@ fn test_multi_label_classification() {
         "test",
     );
 
-    let mut cfg = ClassifierConfig::default();
-    cfg.checkpoint = Checkpoint::English;
-    cfg.multi_label = true;
-    cfg.multi_label_threshold = 0.35;
+    let cfg = ClassifierConfig {
+        checkpoint: Checkpoint::English,
+        multi_label: true,
+        multi_label_threshold: 0.35,
+        ..Default::default()
+    };
     let classifier = LayaClassifier::new(cfg);
 
     let res = classifier.classify(&item.state, &questions).unwrap();
@@ -402,7 +457,7 @@ fn test_multi_label_classification() {
     assert!(ans.selected_labels.is_some());
     let selected = ans.selected_labels.as_ref().unwrap();
     // At least billing and refund or urgent should be selected
-    assert!(selected.len() >= 1);
+    assert!(!selected.is_empty());
     assert!(selected.contains(&"billing".to_string()) || selected.contains(&"refund".to_string()));
 }
 
@@ -423,7 +478,10 @@ fn test_semantic_decision_cache_integration() {
 
     // 1. Initial lookup is a miss
     let initial_res = cache.lookup(original_text, schema_hash);
-    assert!(matches!(initial_res, lemma::engine::CacheLookupResult::Miss));
+    assert!(matches!(
+        initial_res,
+        lemma::engine::CacheLookupResult::Miss
+    ));
 
     // 2. Classify and insert into cache
     let decision = classifier.classify(&state, &questions).unwrap();
@@ -442,7 +500,9 @@ fn test_semantic_decision_cache_integration() {
     // 4. Paraphrased semantic lookup hits with high cosine similarity
     let paraphrased_text = "Can I get a refund for a duplicate invoice charge?";
     match cache.lookup(paraphrased_text, schema_hash) {
-        lemma::engine::CacheLookupResult::SemanticHit { result, similarity, .. } => {
+        lemma::engine::CacheLookupResult::SemanticHit {
+            result, similarity, ..
+        } => {
             assert_eq!(result.answers["dept"].choice.as_deref(), Some("billing"));
             assert!(similarity >= 0.85);
         }
@@ -463,27 +523,58 @@ fn test_ood_detection_profile_and_quarantine() {
     );
 
     let id_dataset = vec![
-        DataItem::new("b1", serde_json::json!({ "text": "Invoice refund billing payment" }), "id"),
-        DataItem::new("b2", serde_json::json!({ "text": "Credit card billing charge invoice" }), "id"),
-        DataItem::new("t1", serde_json::json!({ "text": "Server outage crash stack trace bug" }), "id"),
-        DataItem::new("t2", serde_json::json!({ "text": "System error exception stack bug crash" }), "id"),
+        DataItem::new(
+            "b1",
+            serde_json::json!({ "text": "Invoice refund billing payment" }),
+            "id",
+        ),
+        DataItem::new(
+            "b2",
+            serde_json::json!({ "text": "Credit card billing charge invoice" }),
+            "id",
+        ),
+        DataItem::new(
+            "t1",
+            serde_json::json!({ "text": "Server outage crash stack trace bug" }),
+            "id",
+        ),
+        DataItem::new(
+            "t2",
+            serde_json::json!({ "text": "System error exception stack bug crash" }),
+            "id",
+        ),
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let profile = OodDetector::fit("test_ood_profile", &id_dataset, &classifier, &questions, "dept").unwrap();
+    let profile = OodDetector::fit(
+        "test_ood_profile",
+        &id_dataset,
+        &classifier,
+        &questions,
+        "dept",
+    )
+    .unwrap();
 
     assert_eq!(profile.target_classes.len(), 2);
     let detector = OodDetector::new(profile);
 
     // In-distribution test sample
-    let id_item = DataItem::new("id_sample", serde_json::json!({ "text": "Invoice billing payment refund" }), "test");
+    let id_item = DataItem::new(
+        "id_sample",
+        serde_json::json!({ "text": "Invoice billing payment refund" }),
+        "test",
+    );
     let id_text = "Invoice billing payment refund";
-    let id_eval = detector.evaluate(&id_item.id, id_text, &classifier, &questions).unwrap();
+    let id_eval = detector
+        .evaluate(&id_item.id, id_text, &classifier, &questions)
+        .unwrap();
     assert_eq!(id_eval.action, GuardAction::Allow);
 
     // Out-of-distribution anomaly (random gibberish)
     let ood_text = "9283740918237409812374091823740918237409812374098123740981237409";
-    let ood_eval = detector.evaluate("ood_sample", ood_text, &classifier, &questions).unwrap();
+    let ood_eval = detector
+        .evaluate("ood_sample", ood_text, &classifier, &questions)
+        .unwrap();
     assert!(ood_eval.mahalanobis_distance > id_eval.mahalanobis_distance);
 }
 
@@ -502,10 +593,18 @@ fn test_cost_aware_cascade_pareto_tuning() {
     gt_tech.insert("dept".into(), serde_json::json!("technical"));
 
     let items = vec![
-        DataItem::new("s1", serde_json::json!({ "text": "Invoice refund payment billing charge" }), "test")
-            .with_ground_truth(gt_bill),
-        DataItem::new("s2", serde_json::json!({ "text": "Server crash bug exception stack trace" }), "test")
-            .with_ground_truth(gt_tech),
+        DataItem::new(
+            "s1",
+            serde_json::json!({ "text": "Invoice refund payment billing charge" }),
+            "test",
+        )
+        .with_ground_truth(gt_bill),
+        DataItem::new(
+            "s2",
+            serde_json::json!({ "text": "Server crash bug exception stack trace" }),
+            "test",
+        )
+        .with_ground_truth(gt_tech),
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
@@ -527,8 +626,16 @@ fn test_cost_aware_cascade_pareto_tuning() {
 fn test_cryptographic_attestation_and_merkle_chain() {
     let mut engine = AttestationEngine::new("enterprise_hmac_secret_2026");
 
-    let item1 = DataItem::new("item_1", serde_json::json!({ "text": "Urgent invoice refund" }), "test");
-    let item2 = DataItem::new("item_2", serde_json::json!({ "text": "Account login compromise" }), "test");
+    let item1 = DataItem::new(
+        "item_1",
+        serde_json::json!({ "text": "Urgent invoice refund" }),
+        "test",
+    );
+    let item2 = DataItem::new(
+        "item_2",
+        serde_json::json!({ "text": "Account login compromise" }),
+        "test",
+    );
 
     let decision = DecisionResult {
         model: "convaiinnovations/laya".into(),
@@ -538,11 +645,23 @@ fn test_cryptographic_attestation_and_merkle_chain() {
     };
 
     let rec1 = engine
-        .create_receipt(&item1, &decision, Some("RULE_REFUND"), GuardAction::Allow, "schema_v1")
+        .create_receipt(
+            &item1,
+            &decision,
+            Some("RULE_REFUND"),
+            GuardAction::Allow,
+            "schema_v1",
+        )
         .unwrap();
 
     let rec2 = engine
-        .create_receipt(&item2, &decision, Some("RULE_SECURITY"), GuardAction::Escalate, "schema_v1")
+        .create_receipt(
+            &item2,
+            &decision,
+            Some("RULE_SECURITY"),
+            GuardAction::Escalate,
+            "schema_v1",
+        )
         .unwrap();
 
     assert_eq!(rec1.parent_hash, AttestationEngine::GENESIS_HASH);
@@ -559,7 +678,8 @@ fn test_cryptographic_attestation_and_merkle_chain() {
     let mut tampered_rec2 = rec2.clone();
     tampered_rec2.parent_hash = "corrupted_hash".to_string();
     let broken_ledger = vec![rec1, tampered_rec2];
-    let broken_report = AttestationEngine::verify_ledger(&broken_ledger, "enterprise_hmac_secret_2026");
+    let broken_report =
+        AttestationEngine::verify_ledger(&broken_ledger, "enterprise_hmac_secret_2026");
     assert!(!broken_report.chain_intact);
 }
 
@@ -586,7 +706,8 @@ fn test_schema_knapsack_optimizer() {
         "dept".into(),
         Question {
             qtype: QuestionType::Choice,
-            instructions: "Classify incoming support inquiry to appropriate enterprise domain".into(),
+            instructions: "Classify incoming support inquiry to appropriate enterprise domain"
+                .into(),
             criteria: Some(serde_json::Value::Object(criteria_map)),
         },
     );
@@ -613,15 +734,9 @@ fn test_schema_knapsack_optimizer() {
 #[test]
 fn test_filtered_data_source_and_temperature_config() {
     // Test filtered directory ingestion
-    let source = resolve_data_source_filtered(
-        Path::new("data"),
-        None,
-        false,
-        None,
-        Some("jsonl"),
-        true,
-    )
-    .unwrap();
+    let source =
+        resolve_data_source_filtered(Path::new("data"), None, false, None, Some("jsonl"), true)
+            .unwrap();
 
     let items = source.read_items().unwrap();
     // customer_support.jsonl contains 6 items
@@ -641,7 +756,10 @@ fn test_hierarchical_schema_parsing_and_validation() {
     let schema_path = Path::new("schema/banking_hierarchy.json");
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
 
-    assert_eq!(schema.coarse.instructions, "Determine the high-level banking domain");
+    assert_eq!(
+        schema.coarse.instructions,
+        "Determine the high-level banking domain"
+    );
     assert_eq!(schema.branches.len(), 2);
     assert_eq!(schema.total_leaf_count(), 7);
     assert_eq!(schema.max_depth(), 2);
@@ -682,14 +800,18 @@ fn test_hierarchical_routing_execution() {
 
     // 2. Wire transfer ticket -> transfers -> wire_delay
     let transfer_ticket = "I sent an international wire transfer 3 days ago but the recipient says funds have not arrived yet.";
-    let res_transfer = router.route_text(transfer_ticket, Some("t2".into())).unwrap();
+    let res_transfer = router
+        .route_text(transfer_ticket, Some("t2".into()))
+        .unwrap();
     assert_eq!(res_transfer.path, vec!["transfers", "wire_delay"]);
     assert_eq!(res_transfer.final_choice, "wire_delay");
     assert_eq!(res_transfer.status, "COMPLETED");
 
     // 3. Security ticket -> security (terminal leaf at root)
     let security_ticket = "I noticed an unauthorized login attempt from an unknown device in an unfamiliar country. My password might be compromised.";
-    let res_sec = router.route_text(security_ticket, Some("t3".into())).unwrap();
+    let res_sec = router
+        .route_text(security_ticket, Some("t3".into()))
+        .unwrap();
     assert_eq!(res_sec.path, vec!["security"]);
     assert_eq!(res_sec.final_choice, "security");
     assert_eq!(res_sec.steps.len(), 1);
@@ -702,11 +824,13 @@ fn test_hierarchical_routing_coarse_escalation_gate() {
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     // Setting coarse_threshold high (0.95) forces escalation on ambiguous/out-of-domain inputs
-    let router = HierarchicalRouter::new(schema, classifier)
-        .with_coarse_threshold(0.95);
+    let router = HierarchicalRouter::new(schema, classifier).with_coarse_threshold(0.95);
 
-    let irrelevant_ticket = "Can you tell me what the current weather forecast is for tomorrow morning?";
-    let res = router.route_text(irrelevant_ticket, Some("t_irr".into())).unwrap();
+    let irrelevant_ticket =
+        "Can you tell me what the current weather forecast is for tomorrow morning?";
+    let res = router
+        .route_text(irrelevant_ticket, Some("t_irr".into()))
+        .unwrap();
 
     assert!(res.escalated);
     assert_eq!(res.status, "ESCALATED_AT_COARSE");
@@ -719,8 +843,7 @@ fn test_hierarchical_batch_and_benchmark() {
     let schema_path = Path::new("schema/banking_hierarchy.json");
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let router = HierarchicalRouter::new(schema, classifier)
-        .with_coarse_threshold(0.40);
+    let router = HierarchicalRouter::new(schema, classifier).with_coarse_threshold(0.40);
 
     let source = resolve_data_source_filtered(
         Path::new("data"),
@@ -729,7 +852,8 @@ fn test_hierarchical_batch_and_benchmark() {
         None,
         None,
         true,
-    ).unwrap();
+    )
+    .unwrap();
 
     let items = source.read_items().unwrap();
     assert_eq!(items.len(), 8);
@@ -845,9 +969,11 @@ fn test_qats_profile_and_adaptive_classification() {
     assert!(table.contains("0.35"));
 
     // Use with classifier
-    let mut clf_cfg = ClassifierConfig::default();
-    clf_cfg.temperature_by_options = config.temperature_by_options;
-    clf_cfg.qats_profile = Some(qats);
+    let clf_cfg = ClassifierConfig {
+        temperature_by_options: config.temperature_by_options,
+        qats_profile: Some(qats),
+        ..Default::default()
+    };
 
     let classifier = LayaClassifier::new(clf_cfg);
     for item in items.iter().take(3) {
@@ -876,16 +1002,18 @@ fn test_calibrated_config_roundtrip_and_losses() {
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
     // Test Brier Loss
-    let tuner_brier = CalibrationTuner::new(Checkpoint::English)
-        .with_loss(CalibrationLoss::Brier);
-    let (report_brier, _) = tuner_brier.fit(&items, &questions, "customer_support").unwrap();
+    let tuner_brier = CalibrationTuner::new(Checkpoint::English).with_loss(CalibrationLoss::Brier);
+    let (report_brier, _) = tuner_brier
+        .fit(&items, &questions, "customer_support")
+        .unwrap();
     assert_eq!(report_brier.loss_function, CalibrationLoss::Brier);
     assert!(report_brier.average_calibrated_ece < report_brier.average_raw_ece);
 
     // Test ECE Loss
-    let tuner_ece = CalibrationTuner::new(Checkpoint::English)
-        .with_loss(CalibrationLoss::Ece);
-    let (report_ece, config_ece) = tuner_ece.fit(&items, &questions, "customer_support").unwrap();
+    let tuner_ece = CalibrationTuner::new(Checkpoint::English).with_loss(CalibrationLoss::Ece);
+    let (report_ece, config_ece) = tuner_ece
+        .fit(&items, &questions, "customer_support")
+        .unwrap();
     assert_eq!(report_ece.loss_function, CalibrationLoss::Ece);
     assert!(report_ece.average_calibrated_ece < report_ece.average_raw_ece);
     assert!(report_ece.average_calibrated_ece < 0.10);
@@ -895,7 +1023,10 @@ fn test_calibrated_config_roundtrip_and_losses() {
     let deserialized: CalibratedAgentConfig = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.checkpoint, config_ece.checkpoint);
     assert_eq!(deserialized.loss_function, "ece");
-    assert_eq!(deserialized.temperature_by_options.len(), config_ece.temperature_by_options.len());
+    assert_eq!(
+        deserialized.temperature_by_options.len(),
+        config_ece.temperature_by_options.len()
+    );
 }
 
 #[test]
@@ -904,8 +1035,8 @@ fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
     let items = lemma::datasource::FileSource::parse_file(source_file).unwrap();
     assert_eq!(items.len(), 8);
 
-    let mut kafka = KafkaSource::new("127.0.0.1:9092", "inbound_banking", "group_analytics")
-        .with_items(items);
+    let mut kafka =
+        KafkaSource::new("127.0.0.1:9092", "inbound_banking", "group_analytics").with_items(items);
 
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
@@ -920,7 +1051,8 @@ fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
     }
 
     let primary_sink = StreamSink::from_target("target/integration_stream_primary.jsonl").unwrap();
-    let escalate_sink = StreamSink::from_target("target/integration_stream_escalate.jsonl").unwrap();
+    let escalate_sink =
+        StreamSink::from_target("target/integration_stream_escalate.jsonl").unwrap();
 
     let mut pipeline = StreamPipeline::new(classifier, questions, primary_sink)
         .with_escalate_sink(escalate_sink)
@@ -944,12 +1076,18 @@ fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
 
     // Verify written outputs
     let primary_lines = if primary_path.exists() {
-        std::fs::read_to_string(primary_path).unwrap().lines().count()
+        std::fs::read_to_string(primary_path)
+            .unwrap()
+            .lines()
+            .count()
     } else {
         0
     };
     let escalate_lines = if escalate_path.exists() {
-        std::fs::read_to_string(escalate_path).unwrap().lines().count()
+        std::fs::read_to_string(escalate_path)
+            .unwrap()
+            .lines()
+            .count()
     } else {
         0
     };
@@ -959,11 +1097,15 @@ fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
 
 #[test]
 fn test_lakehouse_columnar_projection_and_streaming() {
-    let mut source = resolve_streaming_source("lakehouse://data/customer_support.jsonl?columns=body", None).unwrap();
+    let mut source =
+        resolve_streaming_source("lakehouse://data/customer_support.jsonl?columns=body", None)
+            .unwrap();
     assert_eq!(source.name(), "LakehouseColumnarSource");
 
     // Fetch batch and inspect state
-    let batch = source.next_batch(2, std::time::Duration::from_millis(10)).unwrap();
+    let batch = source
+        .next_batch(2, std::time::Duration::from_millis(10))
+        .unwrap();
     assert_eq!(batch.len(), 2);
     for item in &batch {
         match &item.state {
@@ -983,8 +1125,8 @@ fn test_lakehouse_columnar_projection_and_streaming() {
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let sink = StreamSink::from_target("target/integration_lakehouse_sink.jsonl").unwrap();
 
-    let mut pipeline = StreamPipeline::new(classifier, questions, sink)
-        .with_config(StreamPipelineConfig {
+    let mut pipeline =
+        StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
             batch_size: 4,
             limit: Some(3),
             ..Default::default()
@@ -996,7 +1138,8 @@ fn test_lakehouse_columnar_projection_and_streaming() {
 
 #[test]
 fn test_object_store_streaming_and_attestation_audit() {
-    let mut source = resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None).unwrap();
+    let mut source =
+        resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None).unwrap();
     assert_eq!(source.name(), "ObjectStoreSource");
 
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
@@ -1007,8 +1150,8 @@ fn test_object_store_streaming_and_attestation_audit() {
     }
     let sink = StreamSink::from_target("target/integration_s3_sink.jsonl").unwrap();
 
-    let mut pipeline = StreamPipeline::new(classifier, questions, sink)
-        .with_config(StreamPipelineConfig {
+    let mut pipeline =
+        StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
             batch_size: 4,
             enable_attest: true,
             attest_secret: "s3_compliance_audit_key_2026".into(),
@@ -1082,7 +1225,10 @@ fn test_active_learning_sampling_all_strategies() {
             assert!(!item.prediction.chosen_option.is_empty());
             assert!(item.prediction.confidence >= 0.0 && item.prediction.confidence <= 1.0);
             assert!(item.prediction.top2_margin >= 0.0 && item.prediction.top2_margin <= 1.0);
-            assert!(item.prediction.normalized_entropy >= 0.0 && item.prediction.normalized_entropy <= 1.0);
+            assert!(
+                item.prediction.normalized_entropy >= 0.0
+                    && item.prediction.normalized_entropy <= 1.0
+            );
         }
     }
 }
@@ -1102,7 +1248,14 @@ fn test_active_learning_review_queue_export() {
 
     let active_engine = ActiveLearningEngine::new();
     let (queue, _report) = active_engine
-        .sample(&classifier, &items, &questions, UncertaintyStrategy::Composite, 4, None)
+        .sample(
+            &classifier,
+            &items,
+            &questions,
+            UncertaintyStrategy::Composite,
+            4,
+            None,
+        )
         .unwrap();
 
     let export_path = Path::new("target/integration_review_queue.jsonl");
@@ -1148,7 +1301,10 @@ fn test_active_distill_rlcd_dataset_generation() {
         .unwrap();
 
     assert!(report.total_samples > 0);
-    assert_eq!(report.train_samples + report.val_samples, report.total_samples);
+    assert_eq!(
+        report.train_samples + report.val_samples,
+        report.total_samples
+    );
     assert!(report.average_margin_weight >= 1.0);
     assert_eq!(rlcd_samples.len(), report.total_samples);
 
@@ -1363,7 +1519,15 @@ fn test_huggingface_ingest_and_auto_schema() {
     assert!(items[0].ground_truth.is_some());
     let gt = items[0].ground_truth.as_ref().unwrap();
     assert_eq!(gt.get("classification").unwrap(), "Business");
-    assert_eq!(items[1].ground_truth.as_ref().unwrap().get("classification").unwrap(), "Sci/Tech");
+    assert_eq!(
+        items[1]
+            .ground_truth
+            .as_ref()
+            .unwrap()
+            .get("classification")
+            .unwrap(),
+        "Sci/Tech"
+    );
 
     assert!(schema.contains_key("classification"));
     let q = &schema["classification"];
@@ -1373,7 +1537,9 @@ fn test_huggingface_ingest_and_auto_schema() {
 
     // Feed directly into StatsEngine
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let stats_engine = StatsEngine::new(classifier).with_iterations(2).with_warmup(1);
+    let stats_engine = StatsEngine::new(classifier)
+        .with_iterations(2)
+        .with_warmup(1);
     let report = stats_engine.evaluate(&items, &schema).unwrap();
 
     assert_eq!(report.dataset_items, 4);
@@ -1393,14 +1559,23 @@ fn test_web_scraper_html_extraction_and_classification() {
     assert_eq!(doc.title, "Fast Non-Autoregressive Decision Encoders");
     assert!(doc.word_count > 20);
     assert!(!doc.is_likely_spa);
-    assert!(doc.markdown.contains("# Fast Non-Autoregressive Decision Encoders"));
+    assert!(
+        doc.markdown
+            .contains("# Fast Non-Autoregressive Decision Encoders")
+    );
     assert!(!doc.markdown.contains("analytics tracking code"));
 
     // Classify using Laya
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let mut criteria = serde_json::Map::new();
-    criteria.insert("encoders".into(), serde_json::json!("ModernBERT, non-autoregressive, classification models"));
-    criteria.insert("cooking".into(), serde_json::json!("culinary, kitchen, recipes, ingredients"));
+    criteria.insert(
+        "encoders".into(),
+        serde_json::json!("ModernBERT, non-autoregressive, classification models"),
+    );
+    criteria.insert(
+        "cooking".into(),
+        serde_json::json!("culinary, kitchen, recipes, ingredients"),
+    );
     let q = Question {
         qtype: QuestionType::Choice,
         instructions: "Is this article about machine learning encoders or culinary cooking?".into(),
@@ -1409,7 +1584,9 @@ fn test_web_scraper_html_extraction_and_classification() {
     let mut questions = std::collections::BTreeMap::new();
     questions.insert("topic".to_string(), q);
 
-    let res = classifier.classify(&serde_json::json!({ "text": doc.markdown }), &questions).unwrap();
+    let res = classifier
+        .classify(&serde_json::json!({ "text": doc.markdown }), &questions)
+        .unwrap();
     let ans = res.answers.get("topic").unwrap();
     assert_eq!(ans.choice.as_deref(), Some("encoders"));
     assert!(ans.confidence > 0.5);
@@ -1427,7 +1604,8 @@ fn test_hacker_news_and_wikipedia_ingestion() {
     assert_eq!(hn_items[0].id, "hn:39000000");
     assert!(hn_items[0].preview_text(200).contains("AWS terms"));
 
-    let wiki_source = lemma::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
+    let wiki_source =
+        lemma::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
     let wiki_items = wiki_source.read_items().unwrap();
     assert_eq!(wiki_items.len(), 1);
     assert_eq!(wiki_items[0].id, "wiki:29414838");
@@ -1444,7 +1622,8 @@ fn test_web_source_parallel_read_items() {
         "https://example.com/page1".to_string(),
         "https://example.com/page2".to_string(),
     ];
-    let web_source = lemma::datasource::WebSource::new(urls, lemma::datasource::ScrapeOptions::default());
+    let web_source =
+        lemma::datasource::WebSource::new(urls, lemma::datasource::ScrapeOptions::default());
     let items = web_source.read_items().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id, "https://example.com/page1");
@@ -1454,10 +1633,13 @@ fn test_web_source_parallel_read_items() {
 #[test]
 fn test_schema_hash_isolation_and_exact_keys() {
     use lemma::create_inline_question;
-    use lemma::engine::{compute_schema_hash, DecisionCache};
+    use lemma::engine::{DecisionCache, compute_schema_hash};
 
-    let schema_support = create_inline_question("choice", "Department triage", "billing,sales,technical").unwrap();
-    let schema_sentiment = create_inline_question("choice", "Sentiment analysis", "negative,positive,neutral").unwrap();
+    let schema_support =
+        create_inline_question("choice", "Department triage", "billing,sales,technical").unwrap();
+    let schema_sentiment =
+        create_inline_question("choice", "Sentiment analysis", "negative,positive,neutral")
+            .unwrap();
 
     assert_eq!(schema_support.len(), 1);
     assert_eq!(schema_sentiment.len(), 1);
@@ -1480,7 +1662,10 @@ fn test_html_extractor_edge_cases_and_consecutive_lines() {
     // Consecutive lines should have newline between them
     let html = "<p>First paragraph.</p><p>Second paragraph.</p>";
     let doc = HtmlExtractor::extract(html, "https://example.com");
-    assert!(doc.markdown.contains("First paragraph.\n\nSecond paragraph."));
+    assert!(
+        doc.markdown
+            .contains("First paragraph.\n\nSecond paragraph.")
+    );
 
     // Entities next to tags
     let html_entity = "<div>AT&T <br> 5 &lt; 10</div>";
@@ -1502,3 +1687,17 @@ fn test_two_sample_ks_identical_distributions_ties() {
     assert_eq!(calculate_ks_statistic(&continuous_a, &continuous_b), 0.0);
 }
 
+#[test]
+fn test_shell_completions_generation() {
+    use clap::CommandFactory;
+    use clap_complete::Shell;
+
+    let mut cmd = lemma::cli::Cli::command();
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell] {
+        let mut buf = Vec::new();
+        clap_complete::generate(shell, &mut cmd, "lemma", &mut buf);
+        assert!(!buf.is_empty());
+        let content = String::from_utf8_lossy(&buf);
+        assert!(content.contains("lemma"));
+    }
+}

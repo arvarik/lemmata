@@ -1,6 +1,6 @@
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{Context, Result, bail};
 
 use super::checkpoint::Checkpoint;
 
@@ -54,12 +54,7 @@ impl Downloader {
     }
 
     /// Download a Laya checkpoint to a local directory.
-    pub fn download(
-        &self,
-        checkpoint: Checkpoint,
-        target_dir: &Path,
-        dry_run: bool,
-    ) -> Result<()> {
+    pub fn download(&self, checkpoint: Checkpoint, target_dir: &Path, dry_run: bool) -> Result<()> {
         let repo_id = checkpoint.repo_id();
         let target_str = target_dir.display().to_string();
 

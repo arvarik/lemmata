@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 use crate::model::{DecisionResult, Question};
 
@@ -119,10 +119,13 @@ impl DecisionCache {
 
     /// Generate an exact cache key for text and questions schema with length-prefixed isolation.
     pub fn make_exact_key(text: &str, schema_hash: &str) -> String {
-        let canonical: String = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let canonical: String = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         format!("{}:{}:{}", schema_hash.len(), schema_hash, canonical)
     }
-
 
     /// Query the cache for a given input state.
     pub fn lookup(&mut self, text: &str, schema_hash: &str) -> CacheLookupResult {
@@ -162,19 +165,19 @@ impl DecisionCache {
             }
         }
 
-        if best_sim >= self.config.similarity_threshold {
-            if let Some(idx) = best_idx {
-                self.entries[idx].hit_count += 1;
-                self.stats.semantic_hits += 1;
-                let mut res = self.entries[idx].result.clone();
-                res.latency_ms = 0.35; // ~0.35 ms semantic match
-                let matched_text = self.entries[idx].input_text.clone();
-                return CacheLookupResult::SemanticHit {
-                    result: res,
-                    similarity: (best_sim * 10000.0).round() / 10000.0,
-                    matched_text,
-                };
-            }
+        if best_sim >= self.config.similarity_threshold
+            && let Some(idx) = best_idx
+        {
+            self.entries[idx].hit_count += 1;
+            self.stats.semantic_hits += 1;
+            let mut res = self.entries[idx].result.clone();
+            res.latency_ms = 0.35; // ~0.35 ms semantic match
+            let matched_text = self.entries[idx].input_text.clone();
+            return CacheLookupResult::SemanticHit {
+                result: res,
+                similarity: (best_sim * 10000.0).round() / 10000.0,
+                matched_text,
+            };
         }
 
         self.stats.misses += 1;
@@ -187,7 +190,11 @@ impl DecisionCache {
         let min_confidence = if result.answers.is_empty() {
             0.0
         } else {
-            result.answers.values().map(|a| a.confidence).fold(1.0, f64::min)
+            result
+                .answers
+                .values()
+                .map(|a| a.confidence)
+                .fold(1.0, f64::min)
         };
 
         let max_act_prob = result
@@ -197,12 +204,18 @@ impl DecisionCache {
             .fold(0.0, f64::max);
 
         // Reject caching if minimum confidence is too low or supervisor escalation is indicated
-        if min_confidence < self.config.min_confidence || max_act_prob > self.config.max_escalate_probability {
+        if min_confidence < self.config.min_confidence
+            || max_act_prob > self.config.max_escalate_probability
+        {
             return false;
         }
 
         // Deduplicate: if an entry with the exact same text and schema exists in entries, replace it
-        if let Some(pos) = self.entries.iter().position(|e| e.schema_hash == schema_hash && e.input_text == text) {
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|e| e.schema_hash == schema_hash && e.input_text == text)
+        {
             self.entries.swap_remove(pos);
         }
 
@@ -255,8 +268,10 @@ impl DecisionCache {
         let ttl = self.config.ttl_seconds;
         let before_len = self.entries.len();
 
-        self.entries.retain(|item| now.saturating_sub(item.created_at_secs) <= ttl);
-        self.exact_map.retain(|_, item| now.saturating_sub(item.created_at_secs) <= ttl);
+        self.entries
+            .retain(|item| now.saturating_sub(item.created_at_secs) <= ttl);
+        self.exact_map
+            .retain(|_, item| now.saturating_sub(item.created_at_secs) <= ttl);
 
         let pruned = before_len - self.entries.len();
         self.stats.evictions += pruned as u64;
@@ -395,7 +410,10 @@ mod tests {
         let text = "Please refund my invoice payment #4411";
         let schema_hash = "schema_v1";
 
-        assert!(matches!(cache.lookup(text, schema_hash), CacheLookupResult::Miss));
+        assert!(matches!(
+            cache.lookup(text, schema_hash),
+            CacheLookupResult::Miss
+        ));
 
         cache.insert(text, schema_hash, &sample_decision());
         assert_eq!(cache.len(), 1);
@@ -411,8 +429,10 @@ mod tests {
 
     #[test]
     fn test_semantic_cache_hit() {
-        let mut config = SemanticCacheConfig::default();
-        config.similarity_threshold = 0.85;
+        let config = SemanticCacheConfig {
+            similarity_threshold: 0.85,
+            ..Default::default()
+        };
         let mut cache = DecisionCache::new(config);
 
         let original = "Please refund my duplicate invoice charge";
@@ -422,7 +442,9 @@ mod tests {
         cache.insert(original, schema_hash, &sample_decision());
 
         match cache.lookup(paraphrased, schema_hash) {
-            CacheLookupResult::SemanticHit { result, similarity, .. } => {
+            CacheLookupResult::SemanticHit {
+                result, similarity, ..
+            } => {
                 assert_eq!(result.answers["dept"].choice.as_deref(), Some("billing"));
                 assert!(similarity >= 0.80);
             }

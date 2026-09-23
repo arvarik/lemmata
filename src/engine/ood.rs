@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::datasource::DataItem;
 use crate::engine::cache::vectorize_text;
@@ -57,9 +57,9 @@ impl OodDetector {
         questions: &BTreeMap<String, Question>,
         target_qid: &str,
     ) -> Result<OodProfile> {
-        let q = questions
-            .get(target_qid)
-            .ok_or_else(|| anyhow::anyhow!("Question '{}' not found in questions schema", target_qid))?;
+        let q = questions.get(target_qid).ok_or_else(|| {
+            anyhow::anyhow!("Question '{}' not found in questions schema", target_qid)
+        })?;
 
         let options = q.render_options();
         if options.is_empty() {
@@ -82,19 +82,13 @@ impl OodDetector {
                 .get(target_qid)
                 .ok_or_else(|| anyhow::anyhow!("No answer for '{}'", target_qid))?;
 
-            let assigned_class = ans
-                .choice
-                .clone()
-                .unwrap_or_else(|| "unknown".into());
+            let assigned_class = ans.choice.clone().unwrap_or_else(|| "unknown".into());
 
             // Compute Free Energy from option probabilities: E = -T * ln(sum exp(z/T))
             let energy = compute_free_energy(&ans.probabilities, classifier.config().temperature);
             energy_scores.push(energy);
 
-            class_features
-                .entry(assigned_class)
-                .or_default()
-                .push(feat);
+            class_features.entry(assigned_class).or_default().push(feat);
         }
 
         if energy_scores.is_empty() {
@@ -172,10 +166,9 @@ impl OodDetector {
     ) -> Result<OodEvaluation> {
         let state = serde_json::Value::String(text.to_string());
         let res = classifier.classify(&state, questions)?;
-        let ans = res
-            .answers
-            .get(&self.profile.question_id)
-            .ok_or_else(|| anyhow::anyhow!("No answer for question '{}'", self.profile.question_id))?;
+        let ans = res.answers.get(&self.profile.question_id).ok_or_else(|| {
+            anyhow::anyhow!("No answer for question '{}'", self.profile.question_id)
+        })?;
 
         let feat = vectorize_text(text);
         let energy = compute_free_energy(&ans.probabilities, classifier.config().temperature);
@@ -186,7 +179,12 @@ impl OodDetector {
         let mut closest_class = "unknown".to_string();
 
         for (cls, centroid) in &self.profile.centroids {
-            let variance = self.profile.class_variances.get(cls).copied().unwrap_or(1.0);
+            let variance = self
+                .profile
+                .class_variances
+                .get(cls)
+                .copied()
+                .unwrap_or(1.0);
             let raw_dist = euclidean_distance(&feat, centroid);
             let scaled_dist = raw_dist / variance;
 
@@ -284,29 +282,65 @@ mod tests {
         );
 
         let id_items = vec![
-            DataItem::new("b1", serde_json::json!({ "text": "Invoice refund billing payment charge" }), "id"),
-            DataItem::new("b2", serde_json::json!({ "text": "Payment credit card billing refund" }), "id"),
-            DataItem::new("t1", serde_json::json!({ "text": "Server crash bug exception stack trace" }), "id"),
-            DataItem::new("t2", serde_json::json!({ "text": "System error crash stack technical outage" }), "id"),
+            DataItem::new(
+                "b1",
+                serde_json::json!({ "text": "Invoice refund billing payment charge" }),
+                "id",
+            ),
+            DataItem::new(
+                "b2",
+                serde_json::json!({ "text": "Payment credit card billing refund" }),
+                "id",
+            ),
+            DataItem::new(
+                "t1",
+                serde_json::json!({ "text": "Server crash bug exception stack trace" }),
+                "id",
+            ),
+            DataItem::new(
+                "t2",
+                serde_json::json!({ "text": "System error crash stack technical outage" }),
+                "id",
+            ),
         ];
 
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-        let profile = OodDetector::fit("support_profile", &id_items, &classifier, &questions, "dept").unwrap();
+        let profile = OodDetector::fit(
+            "support_profile",
+            &id_items,
+            &classifier,
+            &questions,
+            "dept",
+        )
+        .unwrap();
 
         assert_eq!(profile.target_classes.len(), 2);
-        assert!(profile.centroids.contains_key("billing") || profile.centroids.contains_key("technical"));
+        assert!(
+            profile.centroids.contains_key("billing")
+                || profile.centroids.contains_key("technical")
+        );
 
         let detector = OodDetector::new(profile);
 
         // In-distribution test
         let id_eval = detector
-            .evaluate("id_test", "Invoice refund payment billing charge", &classifier, &questions)
+            .evaluate(
+                "id_test",
+                "Invoice refund payment billing charge",
+                &classifier,
+                &questions,
+            )
             .unwrap();
         assert!(!id_eval.is_ood || id_eval.anomaly_score < 0.70);
 
         // Completely out-of-distribution test (gibberish / alien text)
         let ood_eval = detector
-            .evaluate("ood_test", "zxqw kljpoiu 9823412 @#$%%^&*!@# kjashdkh", &classifier, &questions)
+            .evaluate(
+                "ood_test",
+                "zxqw kljpoiu 9823412 @#$%%^&*!@# kjashdkh",
+                &classifier,
+                &questions,
+            )
             .unwrap();
         assert!(ood_eval.mahalanobis_distance > 0.5);
     }

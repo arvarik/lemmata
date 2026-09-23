@@ -87,6 +87,16 @@ pub enum Commands {
 
     /// Comprehensive system speed, throughput performance, and classification accuracy statistics
     Stats(StatsArgs),
+
+    /// Generate shell auto-completions for bash, elvish, fish, powershell, or zsh
+    Completions(CompletionsArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    /// Target shell to generate completions for
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Args, Debug)]
@@ -139,7 +149,11 @@ pub struct ClassifyArgs {
     pub qtype: String,
 
     /// Inline question instructions
-    #[arg(short, long, default_value = "Classify the topic or sentiment of this text")]
+    #[arg(
+        short,
+        long,
+        default_value = "Classify the topic or sentiment of this text"
+    )]
     pub instruction: String,
 
     /// Comma-separated labels for choice question (e.g. "billing,technical,sales,other")
@@ -1318,4 +1332,3 @@ pub struct ScrapeArgs {
     #[arg(long, default_value = "jsonl")]
     pub format: OutputFormat,
 }
-

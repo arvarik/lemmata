@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use super::metrics::{EvaluationMetrics, calculate_brier_score, calculate_ece};
@@ -58,10 +58,10 @@ impl Evaluator {
                 let conf = answer.confidence;
                 confidences.push(conf);
 
-                if let Some(act) = answer.act_probability {
-                    if act > self.classifier.config().escalate_threshold {
-                        escalate_count += 1;
-                    }
+                if let Some(act) = answer.act_probability
+                    && act > self.classifier.config().escalate_threshold
+                {
+                    escalate_count += 1;
                 }
 
                 match answer.qtype {
@@ -81,9 +81,13 @@ impl Evaluator {
 
                         // Brier score prep
                         let keys: Vec<&String> = answer.probabilities.keys().collect();
-                        let target_idx = keys.iter().position(|k| k.eq_ignore_ascii_case(target_str));
+                        let target_idx =
+                            keys.iter().position(|k| k.eq_ignore_ascii_case(target_str));
                         if let Some(t_idx) = target_idx {
-                            let p_vec: Vec<f64> = keys.iter().map(|k| answer.probabilities.get(*k).copied().unwrap_or(0.0)).collect();
+                            let p_vec: Vec<f64> = keys
+                                .iter()
+                                .map(|k| answer.probabilities.get(*k).copied().unwrap_or(0.0))
+                                .collect();
                             all_probs.push(p_vec);
                             all_targets.push(t_idx);
                         }
@@ -91,7 +95,10 @@ impl Evaluator {
                     QuestionType::Score => {
                         let pred_score = answer.score.unwrap_or(0.0);
                         let target_num = target_val.as_f64().unwrap_or_else(|| {
-                            target_val.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+                            target_val
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0)
                         });
 
                         let err = (pred_score - target_num).abs();
@@ -108,7 +115,10 @@ impl Evaluator {
                     QuestionType::Noul => {
                         let pred_noul = answer.noul.unwrap_or(0.5);
                         let target_bool = target_val.as_bool().unwrap_or_else(|| {
-                            target_val.as_str().map(|s| s.eq_ignore_ascii_case("true") || s == "1").unwrap_or(false)
+                            target_val
+                                .as_str()
+                                .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+                                .unwrap_or(false)
                         });
 
                         let is_correct = (pred_noul >= 0.5) == target_bool;
@@ -117,7 +127,11 @@ impl Evaluator {
                         }
                         correctness.push(is_correct);
 
-                        let p_target = if target_bool { pred_noul } else { 1.0 - pred_noul };
+                        let p_target = if target_bool {
+                            pred_noul
+                        } else {
+                            1.0 - pred_noul
+                        };
                         soft_acc_sum += p_target;
 
                         all_probs.push(vec![1.0 - pred_noul, pred_noul]);

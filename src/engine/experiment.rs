@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
 use rand::seq::SliceRandom;
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use super::evaluator::Evaluator;
@@ -19,7 +19,10 @@ impl ExperimentRunner {
         question: &Question,
         permutations: usize,
     ) -> Result<()> {
-        println!("\n🧪 Running Option Order Invariance Experiment (Permutations: {})", permutations);
+        println!(
+            "\n🧪 Running Option Order Invariance Experiment (Permutations: {})",
+            permutations
+        );
         println!("   Question ID: '{}'", qid);
         println!("   Instructions: \"{}\"", question.instructions);
 
@@ -182,7 +185,10 @@ impl ExperimentRunner {
         }
 
         println!("{table}");
-        println!("✨ Recommended Calibration Temperature: T = {:.2} (ECE: {:.4})\n", best_t, min_ece);
+        println!(
+            "✨ Recommended Calibration Temperature: T = {:.2} (ECE: {:.4})\n",
+            best_t, min_ece
+        );
         Ok(())
     }
 
@@ -210,7 +216,10 @@ impl ExperimentRunner {
             let evaluator = Evaluator::new(cls);
 
             let (acc_str, ece_str) = match evaluator.evaluate(items, questions) {
-                Ok(m) => (format!("{:.2}%", m.accuracy * 100.0), format!("{:.4}", m.ece)),
+                Ok(m) => (
+                    format!("{:.2}%", m.accuracy * 100.0),
+                    format!("{:.4}", m.ece),
+                ),
                 Err(_) => ("N/A".into(), "N/A".into()),
             };
 
@@ -245,8 +254,10 @@ impl ExperimentRunner {
 }
 
 fn classifier_config_with_t(t: f64) -> crate::engine::classifier::ClassifierConfig {
-    let mut cfg = crate::engine::classifier::ClassifierConfig::default();
-    cfg.temperature = t;
+    let mut cfg = crate::engine::classifier::ClassifierConfig {
+        temperature: t,
+        ..Default::default()
+    };
     for val in cfg.temperature_by_options.values_mut() {
         *val = t;
     }

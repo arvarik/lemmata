@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
 use rayon::prelude::*;
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use crate::model::Question;

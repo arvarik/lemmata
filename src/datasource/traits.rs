@@ -20,7 +20,11 @@ pub struct DataItem {
 }
 
 impl DataItem {
-    pub fn new(id: impl Into<String>, state: serde_json::Value, source_uri: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        state: serde_json::Value,
+        source_uri: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             state,

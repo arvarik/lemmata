@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::process::Command;
 
 use super::traits::{DataItem, DataSource};
 
@@ -118,7 +118,7 @@ impl HtmlExtractor {
                 && html_bytes[i..i + tag_bytes.len()]
                     .iter()
                     .zip(tag_bytes.iter())
-                    .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
             {
                 return Some(i);
             }
@@ -151,10 +151,10 @@ impl HtmlExtractor {
 
     fn clean_title(title: &str) -> String {
         for sep in [" | ", " - ", " — ", " · ", " » ", " :: "] {
-            if let Some(idx) = title.rfind(sep) {
-                if idx > 4 {
-                    return title[..idx].trim().to_string();
-                }
+            if let Some(idx) = title.rfind(sep)
+                && idx > 4
+            {
+                return title[..idx].trim().to_string();
             }
         }
         title.trim().to_string()
@@ -179,20 +179,28 @@ impl HtmlExtractor {
         let mut chars = html.chars().peekable();
 
         let discard_tags: HashSet<&str> = [
-            "script", "style", "nav", "footer", "header", "aside",
-            "noscript", "iframe", "svg", "canvas", "form", "template", "select"
-        ].into_iter().collect();
+            "script", "style", "nav", "footer", "header", "aside", "noscript", "iframe", "svg",
+            "canvas", "form", "template", "select",
+        ]
+        .into_iter()
+        .collect();
 
         while let Some(c) = chars.next() {
             if c == '<' {
                 // Check if HTML comment <!-- ... -->
                 if chars.clone().take(3).collect::<String>() == "!--" {
-                    for _ in 0..3 { chars.next(); }
+                    for _ in 0..3 {
+                        chars.next();
+                    }
                     let mut hyphens = 0;
-                    while let Some(cc) = chars.next() {
-                        if cc == '-' { hyphens += 1; }
-                        else if cc == '>' && hyphens >= 2 { break; }
-                        else { hyphens = 0; }
+                    for cc in chars.by_ref() {
+                        if cc == '-' {
+                            hyphens += 1;
+                        } else if cc == '>' && hyphens >= 2 {
+                            break;
+                        } else {
+                            hyphens = 0;
+                        }
                     }
                     continue;
                 }
@@ -200,7 +208,9 @@ impl HtmlExtractor {
                 // Parse tag name
                 let mut tag = String::new();
                 let is_closing = chars.peek() == Some(&'/');
-                if is_closing { chars.next(); }
+                if is_closing {
+                    chars.next();
+                }
 
                 while let Some(&tc) = chars.peek() {
                     if tc.is_ascii_alphanumeric() {
@@ -212,8 +222,10 @@ impl HtmlExtractor {
                 }
 
                 // Fast-forward to end of tag `>`
-                while let Some(tc) = chars.next() {
-                    if tc == '>' { break; }
+                for tc in chars.by_ref() {
+                    if tc == '>' {
+                        break;
+                    }
                 }
 
                 if !is_closing && discard_tags.contains(tag.as_str()) {
@@ -223,8 +235,10 @@ impl HtmlExtractor {
                     while let Some(sc) = chars.next() {
                         window.push(sc.to_ascii_lowercase());
                         if window.ends_with(&close_pattern) {
-                            while let Some(ec) = chars.next() {
-                                if ec == '>' { break; }
+                            for ec in chars.by_ref() {
+                                if ec == '>' {
+                                    break;
+                                }
                             }
                             break;
                         }
@@ -296,10 +310,10 @@ impl HtmlExtractor {
                 } else {
                     other[1..].parse::<u32>().ok()
                 };
-                if let Some(code) = code_str {
-                    if let Some(ch) = char::from_u32(code) {
-                        return ch.to_string();
-                    }
+                if let Some(code) = code_str
+                    && let Some(ch) = char::from_u32(code)
+                {
+                    return ch.to_string();
                 }
                 format!("&{};", other)
             }
@@ -316,9 +330,14 @@ impl HtmlExtractor {
                 let mut found = false;
                 while let Some(&ec) = chars.peek() {
                     chars.next();
-                    if ec == ';' { found = true; break; }
+                    if ec == ';' {
+                        found = true;
+                        break;
+                    }
                     ent.push(ec);
-                    if ent.len() > 10 { break; }
+                    if ent.len() > 10 {
+                        break;
+                    }
                 }
                 if found {
                     out.push_str(&Self::resolve_entity(&ent));
@@ -350,7 +369,9 @@ impl HtmlExtractor {
                 }
                 let mut line_buf = String::new();
                 for word in trimmed.split_whitespace() {
-                    if !line_buf.is_empty() { line_buf.push(' '); }
+                    if !line_buf.is_empty() {
+                        line_buf.push(' ');
+                    }
                     line_buf.push_str(word);
                 }
                 res.push_str(&line_buf);
@@ -370,10 +391,14 @@ impl JinaReaderClient {
         let mut cmd = Command::new("curl");
         cmd.args([
             "-sSL",
-            "--max-time", &timeout_secs.to_string(),
-            "-H", "Accept: text/plain",
-            "-H", "X-Return-Format: markdown",
-            "-H", "X-Timeout: 20",
+            "--max-time",
+            &timeout_secs.to_string(),
+            "-H",
+            "Accept: text/plain",
+            "-H",
+            "X-Return-Format: markdown",
+            "-H",
+            "X-Timeout: 20",
         ]);
 
         if let Some(key) = api_key {
@@ -382,7 +407,9 @@ impl JinaReaderClient {
 
         cmd.arg(&jina_url);
 
-        let output = cmd.output().context("Failed to execute curl for Jina Reader API")?;
+        let output = cmd
+            .output()
+            .context("Failed to execute curl for Jina Reader API")?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
             bail!("Jina Reader request failed: {}", err);
@@ -430,7 +457,10 @@ impl WebScraper {
 
     pub fn scrape(&self, url: &str) -> Result<ExtractedDocument> {
         // If offline mode is enabled via environment, check fixture
-        if std::env::var("LEMMA_OFFLINE").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("LEMMA_OFFLINE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             let fixture_path = std::path::Path::new("tests/fixtures/sample_article.html");
             if fixture_path.exists() {
                 let html = std::fs::read_to_string(fixture_path)?;
@@ -439,17 +469,25 @@ impl WebScraper {
         }
 
         if self.options.use_jina {
-            return JinaReaderClient::fetch(url, self.options.jina_api_key.as_deref(), self.options.timeout_secs);
+            return JinaReaderClient::fetch(
+                url,
+                self.options.jina_api_key.as_deref(),
+                self.options.timeout_secs,
+            );
         }
 
         // 1. Fetch raw HTML via system curl (zero dependencies)
         let mut cmd = Command::new("curl");
         cmd.args([
             "-sSL",
-            "--max-time", &self.options.timeout_secs.to_string(),
-            "-A", &self.options.user_agent,
-            "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "-H", "Accept-Language: en-US,en;q=0.9",
+            "--max-time",
+            &self.options.timeout_secs.to_string(),
+            "-A",
+            &self.options.user_agent,
+            "-H",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "-H",
+            "Accept-Language: en-US,en;q=0.9",
             url,
         ]);
 
@@ -463,12 +501,16 @@ impl WebScraper {
         let mut doc = HtmlExtractor::extract(&raw_html, url);
 
         // 2. Fallback check: if extracted text is minimal or SPA detected, try Jina Reader
-        if (doc.is_likely_spa || doc.markdown.len() < 120) && !self.options.use_jina {
-            if let Ok(jina_doc) = JinaReaderClient::fetch(url, self.options.jina_api_key.as_deref(), self.options.timeout_secs) {
-                if jina_doc.word_count > doc.word_count {
-                    doc = jina_doc;
-                }
-            }
+        if (doc.is_likely_spa || doc.markdown.len() < 120)
+            && !self.options.use_jina
+            && let Ok(jina_doc) = JinaReaderClient::fetch(
+                url,
+                self.options.jina_api_key.as_deref(),
+                self.options.timeout_secs,
+            )
+            && jina_doc.word_count > doc.word_count
+        {
+            doc = jina_doc;
         }
 
         // 3. Truncate safely on unicode character boundary
@@ -504,23 +546,22 @@ impl DataSource for WebSource {
     fn read_items(&self) -> Result<Vec<DataItem>> {
         use rayon::prelude::*;
 
-        let items: Vec<DataItem> = self.urls
+        let items: Vec<DataItem> = self
+            .urls
             .par_iter()
-            .filter_map(|url| {
-                match self.scraper.scrape(url) {
-                    Ok(doc) => {
-                        let state = serde_json::json!({
-                            "title": doc.title,
-                            "text": doc.markdown,
-                            "url": doc.url,
-                            "words": doc.word_count,
-                        });
-                        Some(DataItem::new(url.clone(), state, url.clone()))
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️  Failed to scrape {}: {}", url, e);
-                        None
-                    }
+            .filter_map(|url| match self.scraper.scrape(url) {
+                Ok(doc) => {
+                    let state = serde_json::json!({
+                        "title": doc.title,
+                        "text": doc.markdown,
+                        "url": doc.url,
+                        "words": doc.word_count,
+                    });
+                    Some(DataItem::new(url.clone(), state, url.clone()))
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to scrape {}: {}", url, e);
+                    None
                 }
             })
             .collect();
@@ -559,7 +600,10 @@ mod tests {
         let doc = HtmlExtractor::extract(html, "https://example.com/test");
         assert_eq!(doc.title, "Test Page");
         assert!(doc.markdown.contains("# Breaking News Headline"));
-        assert!(doc.markdown.contains("This is the first paragraph with & entity and \"quotes\"."));
+        assert!(
+            doc.markdown
+                .contains("This is the first paragraph with & entity and \"quotes\".")
+        );
         assert!(doc.markdown.contains("- First bullet"));
         assert!(doc.markdown.contains("- Second bullet"));
         assert!(!doc.markdown.contains("ignore me"));
@@ -576,10 +620,12 @@ mod tests {
 
     #[test]
     fn test_spa_detection() {
-        let spa_html = "<html><body><div id=\"root\"></div><script src=\"bundle.js\"></script></body></html>";
+        let spa_html =
+            "<html><body><div id=\"root\"></div><script src=\"bundle.js\"></script></body></html>";
         assert!(HtmlExtractor::detect_spa(spa_html));
 
-        let static_html = "<html><body><article><p>Static article text here.</p></article></body></html>";
+        let static_html =
+            "<html><body><article><p>Static article text here.</p></article></body></html>";
         assert!(!HtmlExtractor::detect_spa(static_html));
     }
 }

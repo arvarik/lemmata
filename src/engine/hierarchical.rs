@@ -1,15 +1,17 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use anyhow::Result;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::datasource::DataItem;
 use crate::engine::cache::{CacheLookupResult, DecisionCache};
 use crate::engine::classifier::LayaClassifier;
 use crate::engine::ood::OodDetector;
-use crate::model::{DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema, QuestionType};
+use crate::model::{
+    DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema, QuestionType,
+};
 
 /// A single step in a hierarchical routing trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,47 +108,51 @@ impl HierarchicalRouter {
     }
 
     /// Route a single text input through the coarse-to-fine hierarchy.
-    pub fn route_text(&self, text: &str, item_id: Option<String>) -> Result<HierarchicalDecisionResult> {
+    pub fn route_text(
+        &self,
+        text: &str,
+        item_id: Option<String>,
+    ) -> Result<HierarchicalDecisionResult> {
         let clean_text = text.trim();
 
         // 1. Check semantic / exact cache
-        if let Some(cache_mutex) = &self.cache {
-            if let Ok(mut c) = cache_mutex.lock() {
-                match c.lookup(clean_text, "hierarchical") {
-                    CacheLookupResult::ExactHit(res)
-                    | CacheLookupResult::SemanticHit { result: res, .. } => {
-                        if let Some(ans) = res.answers.get("final") {
-                            let compound_conf = ans.confidence;
-                            let final_choice = ans.choice.clone().unwrap_or_default();
-                            let formatted_path = ans
-                                .selected_labels
-                                .as_ref()
-                                .map(|v| v.join(" -> "))
-                                .unwrap_or_else(|| final_choice.clone());
-                            let path = ans
-                                .selected_labels
-                                .clone()
-                                .unwrap_or_else(|| vec![final_choice.clone()]);
-                            return Ok(HierarchicalDecisionResult {
-                                item_id,
-                                input_text: clean_text.to_string(),
-                                path,
-                                formatted_path,
-                                final_choice,
-                                compound_confidence: compound_conf,
-                                coarse_confidence: compound_conf,
-                                fine_confidence: None,
-                                steps: vec![],
-                                total_latency_ms: res.latency_ms,
-                                escalated: false,
-                                status: "COMPLETED (CACHED)".to_string(),
-                                escalation_reason: None,
-                                cache_hit: true,
-                            });
-                        }
+        if let Some(cache_mutex) = &self.cache
+            && let Ok(mut c) = cache_mutex.lock()
+        {
+            match c.lookup(clean_text, "hierarchical") {
+                CacheLookupResult::ExactHit(res)
+                | CacheLookupResult::SemanticHit { result: res, .. } => {
+                    if let Some(ans) = res.answers.get("final") {
+                        let compound_conf = ans.confidence;
+                        let final_choice = ans.choice.clone().unwrap_or_default();
+                        let formatted_path = ans
+                            .selected_labels
+                            .as_ref()
+                            .map(|v| v.join(" -> "))
+                            .unwrap_or_else(|| final_choice.clone());
+                        let path = ans
+                            .selected_labels
+                            .clone()
+                            .unwrap_or_else(|| vec![final_choice.clone()]);
+                        return Ok(HierarchicalDecisionResult {
+                            item_id,
+                            input_text: clean_text.to_string(),
+                            path,
+                            formatted_path,
+                            final_choice,
+                            compound_confidence: compound_conf,
+                            coarse_confidence: compound_conf,
+                            fine_confidence: None,
+                            steps: vec![],
+                            total_latency_ms: res.latency_ms,
+                            escalated: false,
+                            status: "COMPLETED (CACHED)".to_string(),
+                            escalation_reason: None,
+                            cache_hit: true,
+                        });
                     }
-                    CacheLookupResult::Miss => {}
                 }
+                CacheLookupResult::Miss => {}
             }
         }
 
@@ -160,35 +166,40 @@ impl HierarchicalRouter {
         if let Some(ood) = &self.ood_detector {
             let mut qmap = BTreeMap::new();
             qmap.insert("coarse".to_string(), self.schema.coarse.clone());
-            if let Ok(eval) = ood.evaluate("coarse", clean_text, &self.classifier, &qmap) {
-                if eval.is_ood {
-                    let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-                    return Ok(HierarchicalDecisionResult {
-                        item_id,
-                        input_text: clean_text.to_string(),
-                        path: vec!["REJECTED_OOD".to_string()],
-                        formatted_path: "REJECTED_OOD".to_string(),
-                        final_choice: "REJECTED_OOD".to_string(),
-                        compound_confidence: 0.0,
-                        coarse_confidence: 0.0,
-                        fine_confidence: None,
-                        steps: vec![],
-                        total_latency_ms: total_latency,
-                        escalated: true,
-                        status: "REJECTED_OOD".to_string(),
-                        escalation_reason: Some(format!(
-                            "Out-of-Distribution detected at coarse stage (anomaly score: {:.4})",
-                            eval.anomaly_score
-                        )),
-                        cache_hit: false,
-                    });
-                }
+            if let Ok(eval) = ood.evaluate("coarse", clean_text, &self.classifier, &qmap)
+                && eval.is_ood
+            {
+                let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
+                return Ok(HierarchicalDecisionResult {
+                    item_id,
+                    input_text: clean_text.to_string(),
+                    path: vec!["REJECTED_OOD".to_string()],
+                    formatted_path: "REJECTED_OOD".to_string(),
+                    final_choice: "REJECTED_OOD".to_string(),
+                    compound_confidence: 0.0,
+                    coarse_confidence: 0.0,
+                    fine_confidence: None,
+                    steps: vec![],
+                    total_latency_ms: total_latency,
+                    escalated: true,
+                    status: "REJECTED_OOD".to_string(),
+                    escalation_reason: Some(format!(
+                        "Out-of-Distribution detected at coarse stage (anomaly score: {:.4})",
+                        eval.anomaly_score
+                    )),
+                    cache_hit: false,
+                });
             }
         }
 
-        let coarse_ans = self.classifier.classify_single(clean_text, &self.schema.coarse)?;
+        let coarse_ans = self
+            .classifier
+            .classify_single(clean_text, &self.schema.coarse)?;
         let coarse_latency = coarse_start.elapsed().as_secs_f64() * 1000.0;
-        let coarse_choice = coarse_ans.choice.clone().unwrap_or_else(|| "unknown".to_string());
+        let coarse_choice = coarse_ans
+            .choice
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let coarse_conf = coarse_ans.confidence;
         let coarse_act = coarse_ans.act_probability.unwrap_or(0.0);
 
@@ -278,7 +289,10 @@ impl HierarchicalRouter {
                 let fine_start = Instant::now();
                 let fine_ans = self.classifier.classify_single(clean_text, sub_q)?;
                 let fine_latency = fine_start.elapsed().as_secs_f64() * 1000.0;
-                let fine_choice = fine_ans.choice.clone().unwrap_or_else(|| "unknown".to_string());
+                let fine_choice = fine_ans
+                    .choice
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
                 let fine_conf = fine_ans.confidence;
                 let fine_act = fine_ans.act_probability.unwrap_or(0.0);
 
@@ -374,31 +388,32 @@ impl HierarchicalRouter {
         };
 
         // Cache admission check
-        if let Some(cache_mutex) = &self.cache {
-            if !result.escalated && result.compound_confidence >= 0.70 {
-                let mut answers = BTreeMap::new();
-                answers.insert(
-                    "final".to_string(),
-                    DecisionAnswer {
-                        qtype: QuestionType::Choice,
-                        choice: Some(result.final_choice.clone()),
-                        selected_labels: Some(result.path.clone()),
-                        score: None,
-                        noul: None,
-                        confidence: result.compound_confidence,
-                        probabilities: BTreeMap::new(),
-                        act_probability: Some(0.1),
-                    },
-                );
-                let dec_res = DecisionResult {
-                    model: "laya-hierarchical".to_string(),
-                    answers,
-                    input_tokens: clean_text.split_whitespace().count(),
-                    latency_ms: result.total_latency_ms,
-                };
-                if let Ok(mut c) = cache_mutex.lock() {
-                    c.insert(clean_text, "hierarchical", &dec_res);
-                }
+        if let Some(cache_mutex) = &self.cache
+            && !result.escalated
+            && result.compound_confidence >= 0.70
+        {
+            let mut answers = BTreeMap::new();
+            answers.insert(
+                "final".to_string(),
+                DecisionAnswer {
+                    qtype: QuestionType::Choice,
+                    choice: Some(result.final_choice.clone()),
+                    selected_labels: Some(result.path.clone()),
+                    score: None,
+                    noul: None,
+                    confidence: result.compound_confidence,
+                    probabilities: BTreeMap::new(),
+                    act_probability: Some(0.1),
+                },
+            );
+            let dec_res = DecisionResult {
+                model: "laya-hierarchical".to_string(),
+                answers,
+                input_tokens: clean_text.split_whitespace().count(),
+                latency_ms: result.total_latency_ms,
+            };
+            if let Ok(mut c) = cache_mutex.lock() {
+                c.insert(clean_text, "hierarchical", &dec_res);
             }
         }
 
@@ -406,6 +421,7 @@ impl HierarchicalRouter {
     }
 
     /// Recursively traverse nested subtrees up to depth limit.
+    #[allow(clippy::too_many_arguments)]
     fn traverse_subtree(
         &self,
         text: &str,
@@ -466,7 +482,10 @@ impl HierarchicalRouter {
                     let leaf_start = Instant::now();
                     let leaf_ans = self.classifier.classify_single(text, sub_q)?;
                     let leaf_latency = leaf_start.elapsed().as_secs_f64() * 1000.0;
-                    let leaf_choice = leaf_ans.choice.clone().unwrap_or_else(|| "unknown".to_string());
+                    let leaf_choice = leaf_ans
+                        .choice
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
                     let leaf_conf = leaf_ans.confidence;
                     let leaf_act = leaf_ans.act_probability.unwrap_or(0.0);
 
@@ -482,7 +501,8 @@ impl HierarchicalRouter {
                     });
 
                     path.push(leaf_choice.clone());
-                    *compound_confidence = ((*compound_confidence * leaf_conf) * 10000.0).round() / 10000.0;
+                    *compound_confidence =
+                        ((*compound_confidence * leaf_conf) * 10000.0).round() / 10000.0;
                     *last_fine_conf = Some(leaf_conf);
                     *final_choice = leaf_choice;
 
@@ -557,7 +577,11 @@ impl HierarchicalRouter {
     }
 
     /// Benchmark hierarchical routing over a test dataset.
-    pub fn benchmark(&self, items: &[DataItem], iterations: usize) -> Result<HierarchicalBenchResult> {
+    pub fn benchmark(
+        &self,
+        items: &[DataItem],
+        iterations: usize,
+    ) -> Result<HierarchicalBenchResult> {
         if items.is_empty() || iterations == 0 {
             anyhow::bail!("Cannot benchmark with 0 items or 0 iterations");
         }
@@ -624,7 +648,13 @@ impl HierarchicalRouter {
         let mut out = String::new();
         out.push_str(&format!(
             "{:<4} | {:<28} | {:<16} | {:<18} | {:<8} | {:<19} | {:<7}\n",
-            "#", "Input Snippet", "Coarse Intent", "Branch Intent", "Comp.Conf", "Status", "Latency"
+            "#",
+            "Input Snippet",
+            "Coarse Intent",
+            "Branch Intent",
+            "Comp.Conf",
+            "Status",
+            "Latency"
         ));
         out.push_str(&format!(
             "{:-<4}-+-{:-<28}-+-{:-<16}-+-{:-<18}-+-{:-<8}-+-{:-<19}-+-{:-<7}\n",
@@ -643,13 +673,25 @@ impl HierarchicalRouter {
                 .steps
                 .first()
                 .map(|s| format!("{}:{:.2}", s.chosen_option, s.confidence))
-                .or_else(|| r.path.first().map(|p| format!("{}:{:.2}", p, r.coarse_confidence)))
+                .or_else(|| {
+                    r.path
+                        .first()
+                        .map(|p| format!("{}:{:.2}", p, r.coarse_confidence))
+                })
                 .unwrap_or_else(|| "-".into());
             let fine = r
                 .steps
                 .get(1)
                 .map(|s| format!("{}:{:.2}", s.chosen_option, s.confidence))
-                .or_else(|| r.path.get(1).map(|p| format!("{}:{:.2}", p, r.fine_confidence.unwrap_or(r.compound_confidence))))
+                .or_else(|| {
+                    r.path.get(1).map(|p| {
+                        format!(
+                            "{}:{:.2}",
+                            p,
+                            r.fine_confidence.unwrap_or(r.compound_confidence)
+                        )
+                    })
+                })
                 .unwrap_or_else(|| "-".into());
 
             out.push_str(&format!(
@@ -731,7 +773,11 @@ mod tests {
         };
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let router = HierarchicalRouter::new(schema, classifier);
-        let items = vec![DataItem::new("1", serde_json::json!({"text": "test"}), "test")];
+        let items = vec![DataItem::new(
+            "1",
+            serde_json::json!({"text": "test"}),
+            "test",
+        )];
         assert!(router.benchmark(&items, 0).is_err());
     }
 
@@ -754,7 +800,7 @@ mod tests {
             cache_hit: true,
         };
 
-        let table = HierarchicalRouter::format_table(&[res.clone()]);
+        let table = HierarchicalRouter::format_table(std::slice::from_ref(&res));
         assert!(table.contains("billing:0.95"));
         assert!(table.contains("invoices:0.95"));
 
@@ -777,7 +823,15 @@ mod tests {
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let router = HierarchicalRouter::new(schema, classifier);
 
-        assert!(router.find_branch("cards", &router.schema.branches).is_some());
-        assert!(router.find_branch("cards: card issues", &router.schema.branches).is_some());
+        assert!(
+            router
+                .find_branch("cards", &router.schema.branches)
+                .is_some()
+        );
+        assert!(
+            router
+                .find_branch("cards: card issues", &router.schema.branches)
+                .is_some()
+        );
     }
 }

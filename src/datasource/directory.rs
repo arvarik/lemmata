@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use anyhow::{Result, bail};
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use super::file::FileSource;
@@ -73,7 +73,11 @@ impl DataSource for DirectorySource {
                 let matches_ext = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(|ext| self.extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)))
+                    .map(|ext| {
+                        self.extensions
+                            .iter()
+                            .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+                    })
                     .unwrap_or(false);
 
                 if matches_ext {

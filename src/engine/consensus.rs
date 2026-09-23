@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use crate::datasource::DataItem;
@@ -131,7 +131,11 @@ impl ConsensusEngine {
                         } else if let Some(s) = ans.score {
                             format!("{:.0}", s.round())
                         } else if let Some(n) = ans.noul {
-                            if n > 0.5 { "true".into() } else { "false".into() }
+                            if n > 0.5 {
+                                "true".into()
+                            } else {
+                                "false".into()
+                            }
                         } else {
                             "N/A".into()
                         };
@@ -171,14 +175,16 @@ impl ConsensusEngine {
 
                 let k = pooled_probs.len().max(2);
                 let consensus_confidence = if k > 1 {
-                    ((best_p - (1.0 - best_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round() / 10000.0
+                    ((best_p - (1.0 - best_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round()
+                        / 10000.0
                 } else {
                     best_p
                 };
 
                 // Check for vote discordance: do distinct checkpoints choose different top labels?
                 let distinct_votes: std::collections::BTreeSet<_> = votes.values().collect();
-                let has_dispute = epistemic > self.disagreement_threshold || (distinct_votes.len() > 1 && consensus_confidence < 0.85);
+                let has_dispute = epistemic > self.disagreement_threshold
+                    || (distinct_votes.len() > 1 && consensus_confidence < 0.85);
 
                 let status = if has_dispute {
                     overall_disputed = true;
@@ -267,7 +273,7 @@ impl ConsensusEngine {
                     .checkpoint_votes
                     .iter()
                     .map(|(ckpt, vote)| {
-                        let short_name = ckpt.split('/').last().unwrap_or(ckpt);
+                        let short_name = ckpt.split('/').next_back().unwrap_or(ckpt);
                         format!("{short_name}: {vote}")
                     })
                     .collect();

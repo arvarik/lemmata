@@ -1,9 +1,9 @@
+use anyhow::{Context, Result, bail};
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use anyhow::{Context, Result, bail};
 
 use super::file::FileSource;
 use super::traits::DataItem;
@@ -88,7 +88,9 @@ impl StreamSourceKind {
                     if kv.len() == 2 {
                         match kv[0] {
                             "group_id" | "group" => group_id = kv[1].to_string(),
-                            "file" | "payload" | "path" => payload_path = Some(PathBuf::from(kv[1])),
+                            "file" | "payload" | "path" => {
+                                payload_path = Some(PathBuf::from(kv[1]))
+                            }
                             _ => {}
                         }
                     }
@@ -103,7 +105,10 @@ impl StreamSourceKind {
             });
         }
 
-        if trimmed.starts_with("s3://") || trimmed.starts_with("gcs://") || trimmed.starts_with("blob://") {
+        if trimmed.starts_with("s3://")
+            || trimmed.starts_with("gcs://")
+            || trimmed.starts_with("blob://")
+        {
             let provider = if trimmed.starts_with("s3://") {
                 "s3"
             } else if trimmed.starts_with("gcs://") {
@@ -131,12 +136,20 @@ impl StreamSourceKind {
             let mut columns = Vec::new();
 
             if let Some(cols_str) = explicit_columns {
-                columns = cols_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                columns = cols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             } else if let Some(query) = parts.get(1) {
                 for param in query.split('&') {
                     let kv: Vec<&str> = param.splitn(2, '=').collect();
                     if kv.len() == 2 && kv[0] == "columns" {
-                        columns = kv[1].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        columns = kv[1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                 }
             }
@@ -146,7 +159,11 @@ impl StreamSourceKind {
 
         let path = PathBuf::from(trimmed.strip_prefix("file://").unwrap_or(trimmed));
         if let Some(cols_str) = explicit_columns {
-            let columns = cols_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let columns = cols_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             return Ok(StreamSourceKind::Lakehouse { path, columns });
         }
 
@@ -165,7 +182,11 @@ pub struct KafkaSource {
 }
 
 impl KafkaSource {
-    pub fn new(broker: impl Into<String>, topic: impl Into<String>, group_id: impl Into<String>) -> Self {
+    pub fn new(
+        broker: impl Into<String>,
+        topic: impl Into<String>,
+        group_id: impl Into<String>,
+    ) -> Self {
         Self {
             broker: broker.into(),
             topic: topic.into(),
@@ -264,7 +285,10 @@ impl LakehouseColumnarSource {
 
     fn load_projected(&mut self) -> Result<()> {
         if !self.path.exists() {
-            bail!("Lakehouse source file does not exist: {}", self.path.display());
+            bail!(
+                "Lakehouse source file does not exist: {}",
+                self.path.display()
+            );
         }
 
         // Ingest raw records and project strictly requested columns
@@ -353,7 +377,11 @@ pub struct ObjectStoreSource {
 }
 
 impl ObjectStoreSource {
-    pub fn new(provider: impl Into<String>, bucket: impl Into<String>, key: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        provider: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<Self> {
         let prov = provider.into();
         let b = bucket.into();
         let k = key.into();
@@ -456,7 +484,8 @@ pub struct LineStreamSource {
 
 impl LineStreamSource {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("Failed to open stream file: {}", path.display()))?;
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open stream file: {}", path.display()))?;
         let reader: Box<dyn std::io::Read + Send + Sync> = Box::new(file);
         Ok(Self {
             reader: Some(BufReader::new(reader)),
@@ -578,10 +607,10 @@ impl StreamSink {
                     let kv: Vec<&str> = param.splitn(2, '=').collect();
                     if kv.len() == 2 && (kv[0] == "file" || kv[0] == "path") {
                         let path = PathBuf::from(kv[1]);
-                        if let Some(p) = path.parent() {
-                            if !p.as_os_str().is_empty() {
-                                std::fs::create_dir_all(p)?;
-                            }
+                        if let Some(p) = path.parent()
+                            && !p.as_os_str().is_empty()
+                        {
+                            std::fs::create_dir_all(p)?;
                         }
                         let file = OpenOptions::new().create(true).append(true).open(path)?;
                         out_file = Some(BufWriter::new(file));
@@ -598,10 +627,10 @@ impl StreamSink {
 
         let clean_target = trimmed.strip_prefix("file://").unwrap_or(trimmed);
         let path = PathBuf::from(clean_target);
-        if let Some(p) = path.parent() {
-            if !p.as_os_str().is_empty() {
-                std::fs::create_dir_all(p)?;
-            }
+        if let Some(p) = path.parent()
+            && !p.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(p)?;
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(StreamSink::File(BufWriter::new(file)))
@@ -659,9 +688,15 @@ mod tests {
 
     #[test]
     fn test_uri_parser_variants() {
-        let k = StreamSourceKind::from_uri("kafka://10.0.0.1:9092/tickets?group_id=analysts", None).unwrap();
+        let k = StreamSourceKind::from_uri("kafka://10.0.0.1:9092/tickets?group_id=analysts", None)
+            .unwrap();
         match k {
-            StreamSourceKind::Kafka { broker, topic, group_id, .. } => {
+            StreamSourceKind::Kafka {
+                broker,
+                topic,
+                group_id,
+                ..
+            } => {
                 assert_eq!(broker, "10.0.0.1:9092");
                 assert_eq!(topic, "tickets");
                 assert_eq!(group_id, "analysts");
@@ -671,7 +706,11 @@ mod tests {
 
         let s3 = StreamSourceKind::from_uri("s3://prod-data/2026/events.parquet", None).unwrap();
         match s3 {
-            StreamSourceKind::ObjectStore { provider, bucket, key } => {
+            StreamSourceKind::ObjectStore {
+                provider,
+                bucket,
+                key,
+            } => {
                 assert_eq!(provider, "s3");
                 assert_eq!(bucket, "prod-data");
                 assert_eq!(key, "2026/events.parquet");
@@ -679,7 +718,9 @@ mod tests {
             _ => panic!("Expected ObjectStore variant"),
         }
 
-        let lk = StreamSourceKind::from_uri("lakehouse://data/tickets.csv?columns=id,body,target", None).unwrap();
+        let lk =
+            StreamSourceKind::from_uri("lakehouse://data/tickets.csv?columns=id,body,target", None)
+                .unwrap();
         match lk {
             StreamSourceKind::Lakehouse { columns, .. } => {
                 assert_eq!(columns, vec!["id", "body", "target"]);
@@ -696,7 +737,8 @@ mod tests {
             DataItem::new("t3", serde_json::json!({"text": "issue 3"}), "k1"),
         ];
 
-        let mut kafka = KafkaSource::new("localhost:9092", "support", "test_group").with_items(items);
+        let mut kafka =
+            KafkaSource::new("localhost:9092", "support", "test_group").with_items(items);
         assert_eq!(kafka.current_offset(), 0);
         assert_eq!(kafka.committed_offset(), 0);
 
@@ -717,7 +759,9 @@ mod tests {
 
     #[test]
     fn test_lakehouse_columnar_projection() {
-        let source = LakehouseColumnarSource::new("data/customer_support.jsonl", vec!["body".into()]).unwrap();
+        let source =
+            LakehouseColumnarSource::new("data/customer_support.jsonl", vec!["body".into()])
+                .unwrap();
         assert!(!source.is_exhausted());
         assert_eq!(source.name(), "LakehouseColumnarSource");
     }

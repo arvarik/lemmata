@@ -74,10 +74,13 @@ impl std::str::FromStr for Checkpoint {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "english" | "laya" | "convaiinnovations/laya" | "default" => Ok(Self::English),
-            "multilingual" | "multi" | "laya-multilingual" | "convaiinnovations/laya-multilingual" => {
-                Ok(Self::Multilingual)
-            }
-            "typed-decisions" | "typed" | "laya-typed-decisions"
+            "multilingual"
+            | "multi"
+            | "laya-multilingual"
+            | "convaiinnovations/laya-multilingual" => Ok(Self::Multilingual),
+            "typed-decisions"
+            | "typed"
+            | "laya-typed-decisions"
             | "convaiinnovations/laya-typed-decisions" => Ok(Self::TypedDecisions),
             other => Err(format!(
                 "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions",
