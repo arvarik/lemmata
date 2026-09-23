@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Community Discussions
+    url: https://github.com/arvarik/lemma/discussions
+    about: Ask questions, share workflows, and discuss ideas with the community.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/arvarik/lemma/security/advisories/new
+    about: Report sensitive security vulnerabilities privately.

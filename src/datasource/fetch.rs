@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::process::Command;
 
 use super::traits::{DataItem, DataSource};
 use crate::model::schema::Question;
@@ -102,7 +102,11 @@ impl HuggingFaceSource {
         self
     }
 
-    pub fn with_custom_columns(mut self, text_col: Option<String>, label_col: Option<String>) -> Self {
+    pub fn with_custom_columns(
+        mut self,
+        text_col: Option<String>,
+        label_col: Option<String>,
+    ) -> Self {
         self.custom_text_col = text_col;
         self.custom_label_col = label_col;
         self
@@ -126,12 +130,30 @@ impl HuggingFaceSource {
     /// Auto-detect text, label, and ID columns from the features schema
     pub fn discover_columns(&self, features: &[HfFeature]) -> Result<DiscoveredColumns> {
         const CANDIDATE_TEXT: &[&str] = &[
-            "text", "sentence", "content", "body", "review", "premise",
-            "comment", "comment_text", "document", "article", "query", "question"
+            "text",
+            "sentence",
+            "content",
+            "body",
+            "review",
+            "premise",
+            "comment",
+            "comment_text",
+            "document",
+            "article",
+            "query",
+            "question",
         ];
         const CANDIDATE_LABEL: &[&str] = &[
-            "label", "target", "intent", "category", "class", "stars",
-            "sentiment", "topic", "score", "ground_truth"
+            "label",
+            "target",
+            "intent",
+            "category",
+            "class",
+            "stars",
+            "sentiment",
+            "topic",
+            "score",
+            "ground_truth",
         ];
         const CANDIDATE_ID: &[&str] = &["id", "item_id", "idx", "row_id", "uuid"];
 
@@ -143,7 +165,10 @@ impl HuggingFaceSource {
 
         // 1. Label Column & Class Labels from ClassLabel type
         if let Some(ref custom_name) = discovered_label {
-            if let Some(feat) = features.iter().find(|f| f.name.eq_ignore_ascii_case(custom_name)) {
+            if let Some(feat) = features
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(custom_name))
+            {
                 class_labels = feat.feature_type.names.clone();
             }
         } else {
@@ -158,7 +183,10 @@ impl HuggingFaceSource {
             // Fallback label name match
             if discovered_label.is_none() {
                 for candidate in CANDIDATE_LABEL {
-                    if let Some(feat) = features.iter().find(|f| f.name.eq_ignore_ascii_case(candidate)) {
+                    if let Some(feat) = features
+                        .iter()
+                        .find(|f| f.name.eq_ignore_ascii_case(candidate))
+                    {
                         discovered_label = Some(feat.name.clone());
                         class_labels = feat.feature_type.names.clone();
                         break;
@@ -170,16 +198,24 @@ impl HuggingFaceSource {
         // 2. Text Column Discovery
         if text_col.is_none() {
             // Check for NLI pairs (premise / hypothesis)
-            let has_premise = features.iter().any(|f| f.name.eq_ignore_ascii_case("premise"));
-            let has_hyp = features.iter().any(|f| f.name.eq_ignore_ascii_case("hypothesis"));
+            let has_premise = features
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case("premise"));
+            let has_hyp = features
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case("hypothesis"));
             if has_premise && has_hyp {
                 text_col = Some("premise".into());
                 paired_text_col = Some("hypothesis".into());
             }
 
             // Check for sentence pairs (sentence1 / sentence2)
-            let has_s1 = features.iter().any(|f| f.name.eq_ignore_ascii_case("sentence1"));
-            let has_s2 = features.iter().any(|f| f.name.eq_ignore_ascii_case("sentence2"));
+            let has_s1 = features
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case("sentence1"));
+            let has_s2 = features
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case("sentence2"));
             if has_s1 && has_s2 {
                 text_col = Some("sentence1".into());
                 paired_text_col = Some("sentence2".into());
@@ -188,7 +224,10 @@ impl HuggingFaceSource {
 
         if text_col.is_none() {
             for candidate in CANDIDATE_TEXT {
-                if let Some(feat) = features.iter().find(|f| f.name.to_lowercase() == *candidate) {
+                if let Some(feat) = features
+                    .iter()
+                    .find(|f| f.name.to_lowercase() == *candidate)
+                {
                     text_col = Some(feat.name.clone());
                     break;
                 }
@@ -197,14 +236,19 @@ impl HuggingFaceSource {
 
         // 3. ID Column Discovery
         for candidate in CANDIDATE_ID {
-            if let Some(feat) = features.iter().find(|f| f.name.to_lowercase() == *candidate) {
+            if let Some(feat) = features
+                .iter()
+                .find(|f| f.name.to_lowercase() == *candidate)
+            {
                 id_col = Some(feat.name.clone());
                 break;
             }
         }
 
         let text_col = text_col.ok_or_else(|| {
-            anyhow::anyhow!("Could not automatically determine text column. Specify text_col explicitly.")
+            anyhow::anyhow!(
+                "Could not automatically determine text column. Specify text_col explicitly."
+            )
         })?;
 
         Ok(DiscoveredColumns {
@@ -217,11 +261,17 @@ impl HuggingFaceSource {
     }
 
     /// Auto-generate aligned Lemma questions schema from dataset class labels
-    pub fn generate_questions_schema(&self, cols: &DiscoveredColumns) -> BTreeMap<String, Question> {
+    pub fn generate_questions_schema(
+        &self,
+        cols: &DiscoveredColumns,
+    ) -> BTreeMap<String, Question> {
         let mut questions = BTreeMap::new();
         if let Some(labels) = &cols.class_labels {
             let q = Question::new_choice(
-                format!("Classify the input into one of the designated categories for {}", self.dataset),
+                format!(
+                    "Classify the input into one of the designated categories for {}",
+                    self.dataset
+                ),
                 labels.clone(),
             );
             questions.insert("classification".to_string(), q);
@@ -237,7 +287,10 @@ impl HuggingFaceSource {
 
     fn fetch_page(&self, dataset_id: &str, offset: usize, length: usize) -> Result<HfRowsResponse> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("LEMMA_OFFLINE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             let fixture_path = std::path::Path::new("tests/fixtures/hf_ag_news.json");
             if fixture_path.exists() {
                 let content = std::fs::read_to_string(fixture_path)?;
@@ -260,15 +313,19 @@ impl HuggingFaceSource {
         let mut cmd = Command::new("curl");
         cmd.args([
             "-sSL",
-            "--max-time", "20",
-            "-H", "Accept: application/json",
+            "--max-time",
+            "20",
+            "-H",
+            "Accept: application/json",
             &url,
         ]);
         if let Some(token) = &self.token {
             cmd.args(["-H", &format!("Authorization: Bearer {}", token)]);
         }
 
-        let output = cmd.output().context("Failed to execute curl request to HF Datasets Server")?;
+        let output = cmd
+            .output()
+            .context("Failed to execute curl request to HF Datasets Server")?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
             bail!("HF Datasets Server request failed: {}", err);
@@ -305,13 +362,16 @@ impl HuggingFaceSource {
 
                 // 1. Build item ID
                 let item_id = if let Some(id_field) = &c.id_col {
-                    row_val.get(id_field)
+                    row_val
+                        .get(id_field)
                         .filter(|v| !v.is_null())
                         .map(|v| match v {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string().trim_matches('"').to_string(),
                         })
-                        .unwrap_or_else(|| format!("{}:{}:{}", canonical_id, self.split, row_wrapper.row_idx))
+                        .unwrap_or_else(|| {
+                            format!("{}:{}:{}", canonical_id, self.split, row_wrapper.row_idx)
+                        })
                 } else {
                     format!("{}:{}:{}", canonical_id, self.split, row_wrapper.row_idx)
                 };
@@ -330,25 +390,37 @@ impl HuggingFaceSource {
 
                 // 3. Resolve Ground Truth label
                 let mut ground_truth = None;
-                if let Some(label_field) = &c.label_col {
-                    if let Some(raw_label) = row_val.get(label_field) {
-                        let mut gt_map = BTreeMap::new();
-                        if let Some(int_idx) = raw_label.as_u64() {
-                            if let Some(names) = &c.class_labels {
-                                if let Some(label_str) = names.get(int_idx as usize) {
-                                    gt_map.insert("classification".to_string(), serde_json::Value::String(label_str.clone()));
-                                } else {
-                                    gt_map.insert("classification".to_string(), serde_json::Value::Number(int_idx.into()));
-                                }
+                if let Some(label_field) = &c.label_col
+                    && let Some(raw_label) = row_val.get(label_field)
+                {
+                    let mut gt_map = BTreeMap::new();
+                    if let Some(int_idx) = raw_label.as_u64() {
+                        if let Some(names) = &c.class_labels {
+                            if let Some(label_str) = names.get(int_idx as usize) {
+                                gt_map.insert(
+                                    "classification".to_string(),
+                                    serde_json::Value::String(label_str.clone()),
+                                );
                             } else {
-                                gt_map.insert("classification".to_string(), serde_json::Value::Number(int_idx.into()));
+                                gt_map.insert(
+                                    "classification".to_string(),
+                                    serde_json::Value::Number(int_idx.into()),
+                                );
                             }
-                        } else if let Some(s) = raw_label.as_str() {
-                            gt_map.insert("classification".to_string(), serde_json::Value::String(s.to_string()));
+                        } else {
+                            gt_map.insert(
+                                "classification".to_string(),
+                                serde_json::Value::Number(int_idx.into()),
+                            );
                         }
-                        if !gt_map.is_empty() {
-                            ground_truth = Some(gt_map);
-                        }
+                    } else if let Some(s) = raw_label.as_str() {
+                        gt_map.insert(
+                            "classification".to_string(),
+                            serde_json::Value::String(s.to_string()),
+                        );
+                    }
+                    if !gt_map.is_empty() {
+                        ground_truth = Some(gt_map);
                     }
                 }
 
@@ -413,16 +485,15 @@ impl DataSource for HackerNewsSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("LEMMA_OFFLINE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             let fixture_path = std::path::Path::new("tests/fixtures/hn_item.json");
             if fixture_path.exists() {
                 let content = std::fs::read_to_string(fixture_path)?;
                 let val: serde_json::Value = serde_json::from_str(&content)?;
-                let item = DataItem::new(
-                    "hn:39000000",
-                    val,
-                    "hn:top",
-                );
+                let item = DataItem::new("hn:39000000", val, "hn:top");
                 return Ok(vec![item]);
             }
         }
@@ -443,8 +514,7 @@ impl DataSource for HackerNewsSource {
             .output()
             .context("Failed to query Hacker News story list")?;
 
-        let ids: Vec<u64> = serde_json::from_slice(&output.stdout)
-            .unwrap_or_default();
+        let ids: Vec<u64> = serde_json::from_slice(&output.stdout).unwrap_or_default();
 
         let mut items = Vec::new();
         for id in ids.into_iter().take(self.limit) {
@@ -453,29 +523,31 @@ impl DataSource for HackerNewsSource {
                 .args(["-sSL", "--max-time", "5", &item_url])
                 .output();
 
-            if let Ok(out) = item_output {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if !val.is_null() {
-                        let title = val.get("title").and_then(|t| t.as_str()).unwrap_or_default();
-                        let text = val.get("text").and_then(|t| t.as_str()).unwrap_or(title);
-                        let clean_text = super::web::HtmlExtractor::decode_entities(text);
+            if let Ok(out) = item_output
+                && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                && !val.is_null()
+            {
+                let title = val
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+                let text = val.get("text").and_then(|t| t.as_str()).unwrap_or(title);
+                let clean_text = super::web::HtmlExtractor::decode_entities(text);
 
-                        let state = serde_json::json!({
-                            "title": title,
-                            "text": clean_text,
-                            "by": val.get("by").and_then(|b| b.as_str()).unwrap_or_default(),
-                            "score": val.get("score").and_then(|s| s.as_u64()).unwrap_or(0),
-                            "url": val.get("url").and_then(|u| u.as_str()).unwrap_or_default(),
-                            "type": val.get("type").and_then(|t| t.as_str()).unwrap_or("story"),
-                        });
+                let state = serde_json::json!({
+                    "title": title,
+                    "text": clean_text,
+                    "by": val.get("by").and_then(|b| b.as_str()).unwrap_or_default(),
+                    "score": val.get("score").and_then(|s| s.as_u64()).unwrap_or(0),
+                    "url": val.get("url").and_then(|u| u.as_str()).unwrap_or_default(),
+                    "type": val.get("type").and_then(|t| t.as_str()).unwrap_or("story"),
+                });
 
-                        items.push(DataItem::new(
-                            format!("hn:{}", id),
-                            state,
-                            format!("hn:{}", self.category),
-                        ));
-                    }
-                }
+                items.push(DataItem::new(
+                    format!("hn:{}", id),
+                    state,
+                    format!("hn:{}", self.category),
+                ));
             }
         }
 
@@ -505,16 +577,15 @@ impl DataSource for WikipediaSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("LEMMA_OFFLINE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             let fixture_path = std::path::Path::new("tests/fixtures/wikipedia_rust.json");
             if fixture_path.exists() {
                 let content = std::fs::read_to_string(fixture_path)?;
                 let val: serde_json::Value = serde_json::from_str(&content)?;
-                let item = DataItem::new(
-                    "wiki:29414838",
-                    val,
-                    "wiki:Rust_(programming_language)",
-                );
+                let item = DataItem::new("wiki:29414838", val, "wiki:Rust_(programming_language)");
                 return Ok(vec![item]);
             }
         }
@@ -531,10 +602,19 @@ impl DataSource for WikipediaSource {
                 .context("Failed to fetch Wikipedia article summary")?;
 
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                let page_id = val.get("pageid").map(|p| p.to_string()).unwrap_or_else(|| title.clone());
+                let page_id = val
+                    .get("pageid")
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| title.clone());
                 let title_str = val.get("title").and_then(|t| t.as_str()).unwrap_or(title);
-                let extract = val.get("extract").and_then(|e| e.as_str()).unwrap_or_default();
-                let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or_default();
+                let extract = val
+                    .get("extract")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or_default();
+                let desc = val
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default();
 
                 let state = serde_json::json!({
                     "title": title_str,
@@ -556,26 +636,34 @@ impl DataSource for WikipediaSource {
                     .args(["-sSL", "--max-time", "10", "-A", user_agent, url])
                     .output();
 
-                if let Ok(out) = output {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        if let Some(title) = val.get("title").and_then(|t| t.as_str()) {
-                            let page_id = val.get("pageid").map(|p| p.to_string()).unwrap_or_else(|| title.to_string());
-                            let extract = val.get("extract").and_then(|e| e.as_str()).unwrap_or_default();
-                            let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or_default();
+                if let Ok(out) = output
+                    && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    && let Some(title) = val.get("title").and_then(|t| t.as_str())
+                {
+                    let page_id = val
+                        .get("pageid")
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| title.to_string());
+                    let extract = val
+                        .get("extract")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or_default();
+                    let desc = val
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default();
 
-                            let state = serde_json::json!({
-                                "title": title,
-                                "text": extract,
-                                "description": desc,
-                            });
+                    let state = serde_json::json!({
+                        "title": title,
+                        "text": extract,
+                        "description": desc,
+                    });
 
-                            items.push(DataItem::new(
-                                format!("wiki:{}", page_id),
-                                state,
-                                format!("wiki:{}", title),
-                            ));
-                        }
-                    }
+                    items.push(DataItem::new(
+                        format!("wiki:{}", page_id),
+                        state,
+                        format!("wiki:{}", title),
+                    ));
                 }
             }
         }
@@ -607,7 +695,10 @@ impl DataSource for RedditSource {
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Desktop user agent to avoid Reddit CDN blocking
         let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (LemmaCLI/0.1)";
-        let url = format!("https://www.reddit.com/r/{}/hot.json?limit={}", self.subreddit, self.limit);
+        let url = format!(
+            "https://www.reddit.com/r/{}/hot.json?limit={}",
+            self.subreddit, self.limit
+        );
 
         let output = Command::new("curl")
             .args(["-sSL", "--max-time", "10", "-A", ua, &url])
@@ -622,15 +713,31 @@ impl DataSource for RedditSource {
         }
 
         let mut items = Vec::new();
-        if let Some(children) = val.get("data").and_then(|d| d.get("children")).and_then(|c| c.as_array()) {
+        if let Some(children) = val
+            .get("data")
+            .and_then(|d| d.get("children"))
+            .and_then(|c| c.as_array())
+        {
             for child in children.iter().take(self.limit) {
                 if let Some(post) = child.get("data") {
                     let id = post.get("id").and_then(|i| i.as_str()).unwrap_or_default();
-                    let title = post.get("title").and_then(|t| t.as_str()).unwrap_or_default();
-                    let selftext = post.get("selftext").and_then(|s| s.as_str()).unwrap_or_default();
-                    let subreddit = post.get("subreddit").and_then(|s| s.as_str()).unwrap_or(&self.subreddit);
+                    let title = post
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    let selftext = post
+                        .get("selftext")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or_default();
+                    let subreddit = post
+                        .get("subreddit")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or(&self.subreddit);
                     let score = post.get("score").and_then(|s| s.as_i64()).unwrap_or(0);
-                    let flair = post.get("link_flair_text").and_then(|f| f.as_str()).unwrap_or_default();
+                    let flair = post
+                        .get("link_flair_text")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or_default();
 
                     let text = if selftext.is_empty() {
                         title.to_string()
@@ -647,11 +754,18 @@ impl DataSource for RedditSource {
                     });
 
                     let mut gt = BTreeMap::new();
-                    gt.insert("classification".to_string(), serde_json::Value::String(subreddit.to_string()));
+                    gt.insert(
+                        "classification".to_string(),
+                        serde_json::Value::String(subreddit.to_string()),
+                    );
 
                     items.push(
-                        DataItem::new(format!("reddit:{}", id), state, format!("reddit:{}", self.subreddit))
-                            .with_ground_truth(gt),
+                        DataItem::new(
+                            format!("reddit:{}", id),
+                            state,
+                            format!("reddit:{}", self.subreddit),
+                        )
+                        .with_ground_truth(gt),
                     );
                 }
             }
@@ -667,10 +781,22 @@ mod tests {
 
     #[test]
     fn test_canonical_dataset_resolution() {
-        assert_eq!(HuggingFaceSource::resolve_canonical_dataset("ag_news"), "fancyzhx/ag_news");
-        assert_eq!(HuggingFaceSource::resolve_canonical_dataset("imdb"), "stanfordnlp/imdb");
-        assert_eq!(HuggingFaceSource::resolve_canonical_dataset("banking77"), "PolyAI/banking77");
-        assert_eq!(HuggingFaceSource::resolve_canonical_dataset("custom/repo"), "custom/repo");
+        assert_eq!(
+            HuggingFaceSource::resolve_canonical_dataset("ag_news"),
+            "fancyzhx/ag_news"
+        );
+        assert_eq!(
+            HuggingFaceSource::resolve_canonical_dataset("imdb"),
+            "stanfordnlp/imdb"
+        );
+        assert_eq!(
+            HuggingFaceSource::resolve_canonical_dataset("banking77"),
+            "PolyAI/banking77"
+        );
+        assert_eq!(
+            HuggingFaceSource::resolve_canonical_dataset("custom/repo"),
+            "custom/repo"
+        );
     }
 
     #[test]
@@ -692,7 +818,12 @@ mod tests {
                 feature_type: HfFeatureType {
                     dtype: None,
                     type_name: "ClassLabel".to_string(),
-                    names: Some(vec!["World".into(), "Sports".into(), "Business".into(), "Sci/Tech".into()]),
+                    names: Some(vec![
+                        "World".into(),
+                        "Sports".into(),
+                        "Business".into(),
+                        "Sci/Tech".into(),
+                    ]),
                     num_classes: Some(4),
                 },
             },

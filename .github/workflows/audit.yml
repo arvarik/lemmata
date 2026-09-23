@@ -1,0 +1,28 @@
+name: Security Audit
+
+on:
+  schedule:
+    # Run every Monday at 04:00 UTC
+    - cron: '0 4 * * 1'
+  push:
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+
+jobs:
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run Cargo Audit Check
+        run: cargo audit --deny warnings

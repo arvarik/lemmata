@@ -1,9 +1,9 @@
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct RawTensorInfo {
@@ -31,7 +31,10 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
 
     let file_size = file.metadata()?.len();
     if file_size < 8 {
-        bail!("File is too small to be a valid Safetensors file (size: {} bytes)", file_size);
+        bail!(
+            "File is too small to be a valid Safetensors file (size: {} bytes)",
+            file_size
+        );
     }
 
     let mut len_bytes = [0u8; 8];
@@ -41,7 +44,8 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
     if 8 + header_len > file_size {
         bail!(
             "Corrupted Safetensors file: header size ({} bytes) exceeds file size ({} bytes)",
-            header_len, file_size
+            header_len,
+            file_size
         );
     }
 

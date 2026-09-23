@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use std::time::Instant;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::datasource::DataItem;
 use crate::model::{Checkpoint, DecisionAnswer, DecisionResult, Question, QuestionType};
@@ -54,8 +54,10 @@ impl LayaClassifier {
     }
 
     pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
-        let mut cfg = ClassifierConfig::default();
-        cfg.checkpoint = checkpoint;
+        let cfg = ClassifierConfig {
+            checkpoint,
+            ..Default::default()
+        };
         Self::new(cfg)
     }
 
@@ -64,11 +66,7 @@ impl LayaClassifier {
     }
 
     /// Perform inference for a single question on state text.
-    pub fn classify_single(
-        &self,
-        state_text: &str,
-        question: &Question,
-    ) -> Result<DecisionAnswer> {
+    pub fn classify_single(&self, state_text: &str, question: &Question) -> Result<DecisionAnswer> {
         let mut map = BTreeMap::new();
         map.insert("single".to_string(), question.clone());
         let state_val = serde_json::Value::String(state_text.to_string());
@@ -107,7 +105,10 @@ impl LayaClassifier {
             // Verify Laya option budget constraint:
             // English: 192 head tokens budget. Multilingual: 256.
             let head_budget = self.config.checkpoint.head_budget();
-            let est_option_tokens = options.iter().map(|o| o.split_whitespace().count() * 4 / 3 + 1).sum::<usize>();
+            let est_option_tokens = options
+                .iter()
+                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                .sum::<usize>();
 
             if est_option_tokens > head_budget {
                 eprintln!(
@@ -132,28 +133,33 @@ impl LayaClassifier {
                 .unwrap_or(self.config.temperature);
 
             // 2026 Q-ATS: Adaptive temperature scaling under covariate shift
-            if let Some(qats) = &self.config.qats_profile {
-                if qats.enabled && qats.std_distance > 1e-6 && !qats.class_centroids.is_empty() {
-                    let feat = crate::engine::cache::vectorize_text(&state_text);
-                    let mut min_dist = f64::INFINITY;
-                    for centroid in qats.class_centroids.values() {
-                        let dist = crate::engine::ood::euclidean_distance(&feat, centroid);
-                        if dist < min_dist {
-                            min_dist = dist;
-                        }
+            if let Some(qats) = &self.config.qats_profile
+                && qats.enabled
+                && qats.std_distance > 1e-6
+                && !qats.class_centroids.is_empty()
+            {
+                let feat = crate::engine::cache::vectorize_text(&state_text);
+                let mut min_dist = f64::INFINITY;
+                for centroid in qats.class_centroids.values() {
+                    let dist = crate::engine::ood::euclidean_distance(&feat, centroid);
+                    if dist < min_dist {
+                        min_dist = dist;
                     }
-                    if min_dist.is_finite() {
-                        let z_dist = (min_dist - qats.mean_distance) / qats.std_distance;
-                        let factor = 1.0 + qats.gamma * z_dist.tanh();
-                        temp = (temp * factor).clamp(0.05, 10.0);
-                    }
+                }
+                if min_dist.is_finite() {
+                    let z_dist = (min_dist - qats.mean_distance) / qats.std_distance;
+                    let factor = 1.0 + qats.gamma * z_dist.tanh();
+                    temp = (temp * factor).clamp(0.05, 10.0);
                 }
             }
 
             let scaled_logits: Vec<f64> = raw_logits.iter().map(|&z| z / temp).collect();
 
             // Softmax
-            let max_logit = scaled_logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max_logit = scaled_logits
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             let exp_sum: f64 = scaled_logits.iter().map(|&z| (z - max_logit).exp()).sum();
             let probs: Vec<f64> = scaled_logits
                 .iter()
@@ -180,13 +186,16 @@ impl LayaClassifier {
             let mut prob_map = BTreeMap::new();
             match q.qtype {
                 QuestionType::Choice => {
-                    let keys: Vec<String> = if let Some(serde_json::Value::Object(map)) = &q.criteria {
-                        map.keys().cloned().collect()
-                    } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
-                        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
-                    } else {
-                        options.clone()
-                    };
+                    let keys: Vec<String> =
+                        if let Some(serde_json::Value::Object(map)) = &q.criteria {
+                            map.keys().cloned().collect()
+                        } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        } else {
+                            options.clone()
+                        };
 
                     if self.config.multi_label {
                         // Independent sigmoid scoring per option: p_i = 1 / (1 + exp(-z_i))
@@ -204,10 +213,10 @@ impl LayaClassifier {
                                 best_idx = i;
                             }
                         }
-                        if selected.is_empty() {
-                            if let Some(lbl) = keys.get(best_idx) {
-                                selected.push(lbl.clone());
-                            }
+                        if selected.is_empty()
+                            && let Some(lbl) = keys.get(best_idx)
+                        {
+                            selected.push(lbl.clone());
                         }
                         let primary = selected.first().cloned();
                         answers.insert(
@@ -220,7 +229,9 @@ impl LayaClassifier {
                                 noul: None,
                                 confidence,
                                 probabilities: prob_map,
-                                act_probability: Some((act_probability * 10000.0).round() / 10000.0),
+                                act_probability: Some(
+                                    (act_probability * 10000.0).round() / 10000.0,
+                                ),
                             },
                         );
                     } else {
@@ -234,7 +245,10 @@ impl LayaClassifier {
                             }
                         }
 
-                        let chosen_label = keys.get(best_idx).cloned().unwrap_or_else(|| "unknown".into());
+                        let chosen_label = keys
+                            .get(best_idx)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into());
                         answers.insert(
                             qid.clone(),
                             DecisionAnswer {
@@ -245,7 +259,9 @@ impl LayaClassifier {
                                 noul: None,
                                 confidence,
                                 probabilities: prob_map,
-                                act_probability: Some((act_probability * 10000.0).round() / 10000.0),
+                                act_probability: Some(
+                                    (act_probability * 10000.0).round() / 10000.0,
+                                ),
                             },
                         );
                     }
@@ -355,11 +371,62 @@ impl LayaClassifier {
 
             // Built-in semantic associations for typical routing domains
             let synonyms: &[(&str, &[&str])] = &[
-                ("billing", &["invoice", "charge", "refund", "billed", "payment", "receipt", "price", "cost"]),
-                ("technical", &["bug", "error", "crash", "outage", "broken", "issue", "stack", "exception"]),
-                ("sales", &["pricing", "contract", "enterprise", "quote", "demo", "buy", "purchase", "lead"]),
-                ("urgency", &["immediate", "urgent", "asap", "critical", "blocking", "today", "emergency"]),
-                ("churn", &["cancel", "leave", "terminate", "switching", "competitor", "stop"]),
+                (
+                    "billing",
+                    &[
+                        "invoice", "charge", "refund", "billed", "payment", "receipt", "price",
+                        "cost",
+                    ],
+                ),
+                (
+                    "technical",
+                    &[
+                        "bug",
+                        "error",
+                        "crash",
+                        "outage",
+                        "broken",
+                        "issue",
+                        "stack",
+                        "exception",
+                    ],
+                ),
+                (
+                    "sales",
+                    &[
+                        "pricing",
+                        "contract",
+                        "enterprise",
+                        "quote",
+                        "demo",
+                        "buy",
+                        "purchase",
+                        "lead",
+                    ],
+                ),
+                (
+                    "urgency",
+                    &[
+                        "immediate",
+                        "urgent",
+                        "asap",
+                        "critical",
+                        "blocking",
+                        "today",
+                        "emergency",
+                    ],
+                ),
+                (
+                    "churn",
+                    &[
+                        "cancel",
+                        "leave",
+                        "terminate",
+                        "switching",
+                        "competitor",
+                        "stop",
+                    ],
+                ),
             ];
 
             for (domain, words) in synonyms {

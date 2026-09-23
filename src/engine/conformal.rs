@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use crate::datasource::DataItem;
@@ -41,7 +41,10 @@ impl ConformalEngine {
         alpha: f64,
     ) -> Result<(ConformalReport, Vec<ConformalPredictionItem>)> {
         if !(0.0..=1.0).contains(&alpha) || alpha.is_nan() {
-            bail!("Conformal significance level alpha must be between 0.0 and 1.0 (received: {})", alpha);
+            bail!(
+                "Conformal significance level alpha must be between 0.0 and 1.0 (received: {})",
+                alpha
+            );
         }
         if items.is_empty() {
             bail!("No calibration items provided for conformal prediction");
@@ -90,7 +93,9 @@ impl ConformalEngine {
         }
 
         if scores.is_empty() {
-            bail!("No labeled ground-truth targets found matching question options in calibration dataset");
+            bail!(
+                "No labeled ground-truth targets found matching question options in calibration dataset"
+            );
         }
 
         // 2. Compute conformal empirical quantile
@@ -161,7 +166,10 @@ impl ConformalEngine {
             target_coverage_pct: (1.0 - alpha) * 100.0,
             quantile_threshold: (q_hat * 1000.0).round() / 1000.0,
             empirical_coverage_pct: {
-                let labeled_count = conformal_items.iter().filter(|i| i.is_covered.is_some()).count();
+                let labeled_count = conformal_items
+                    .iter()
+                    .filter(|i| i.is_covered.is_some())
+                    .count();
                 if labeled_count > 0 {
                     ((covered_count as f64 / labeled_count as f64) * 10000.0).round() / 100.0
                 } else {

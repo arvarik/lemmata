@@ -1,12 +1,12 @@
+use anyhow::{Context, Result, bail};
+use comfy_table::{Cell, Color, Table};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::{Context, Result, bail};
-use comfy_table::{Cell, Color, Table};
-use serde::{Deserialize, Serialize};
 
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
@@ -154,13 +154,7 @@ impl ActiveLearningEngine {
         self
     }
 
-    pub fn with_weights(
-        mut self,
-        entropy: f64,
-        margin: f64,
-        conformal: f64,
-        energy: f64,
-    ) -> Self {
+    pub fn with_weights(mut self, entropy: f64, margin: f64, conformal: f64, energy: f64) -> Self {
         self.weight_entropy = entropy;
         self.weight_margin = margin;
         self.weight_conformal = conformal;
@@ -209,7 +203,8 @@ impl ActiveLearningEngine {
                     let k = candidate_options.len().max(2);
 
                     let mut sorted_probs: Vec<f64> = ans.probabilities.values().copied().collect();
-                    sorted_probs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted_probs
+                        .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
                     let p_top1 = sorted_probs.first().copied().unwrap_or(0.5);
                     let p_top2 = sorted_probs.get(1).copied().unwrap_or(0.0);
@@ -230,7 +225,9 @@ impl ActiveLearningEngine {
                     total_entropy_sum += normalized_entropy;
 
                     // Act Probability
-                    let act_prob = ans.act_probability.unwrap_or((0.05 + 0.9 * normalized_entropy).clamp(0.0, 1.0));
+                    let act_prob = ans
+                        .act_probability
+                        .unwrap_or((0.05 + 0.9 * normalized_entropy).clamp(0.0, 1.0));
 
                     // Conformal Prediction Set
                     let threshold = 1.0 - self.conformal_alpha;
@@ -238,7 +235,8 @@ impl ActiveLearningEngine {
                     let mut conformal_set = Vec::new();
 
                     let mut label_probs: Vec<(&String, &f64)> = ans.probabilities.iter().collect();
-                    label_probs.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    label_probs
+                        .sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                     for (label, &prob) in label_probs {
                         conformal_set.push(label.clone());
@@ -277,9 +275,7 @@ impl ActiveLearningEngine {
                                 conformal_set.len() as f64 / k as f64
                             }
                         }
-                        UncertaintyStrategy::Energy => {
-                            1.0 / (1.0 + (-free_energy).exp())
-                        }
+                        UncertaintyStrategy::Energy => 1.0 / (1.0 + (-free_energy).exp()),
                         UncertaintyStrategy::Composite => {
                             let norm_energy = 1.0 / (1.0 + (-free_energy).exp());
                             let norm_conformal = conformal_set.len() as f64 / k as f64;
@@ -304,7 +300,10 @@ impl ActiveLearningEngine {
                         reason_parts.push(format!("low_conf={:.1}%", ans.confidence * 100.0));
                     }
                     if conformal_set.len() > 1 {
-                        reason_parts.push(format!("ambiguous_conformal_cardinality={}", conformal_set.len()));
+                        reason_parts.push(format!(
+                            "ambiguous_conformal_cardinality={}",
+                            conformal_set.len()
+                        ));
                     }
                     if is_ood {
                         reason_parts.push("ood_distribution_shift".into());
@@ -366,7 +365,11 @@ impl ActiveLearningEngine {
 
         let acquired_count = scored_items.len();
         let mean_acq = if acquired_count > 0 {
-            scored_items.iter().map(|it| it.acquisition_score).sum::<f64>() / acquired_count as f64
+            scored_items
+                .iter()
+                .map(|it| it.acquisition_score)
+                .sum::<f64>()
+                / acquired_count as f64
         } else {
             0.0
         };
@@ -425,7 +428,10 @@ impl ActiveLearningEngine {
 
                 // Extract ground truth target
                 let opt_gt = if let Some(gt_map) = &item.ground_truth {
-                    gt_map.get(qid).cloned().or_else(|| gt_map.get("default").cloned())
+                    gt_map
+                        .get(qid)
+                        .cloned()
+                        .or_else(|| gt_map.get("default").cloned())
                 } else {
                     None
                 };
@@ -450,8 +456,18 @@ impl ActiveLearningEngine {
                         "unknown".into()
                     };
 
-                    let clean_target = target_label.split(':').next().unwrap_or(&target_label).trim().to_lowercase();
-                    let clean_chosen = chosen_opt.split(':').next().unwrap_or(&chosen_opt).trim().to_lowercase();
+                    let clean_target = target_label
+                        .split(':')
+                        .next()
+                        .unwrap_or(&target_label)
+                        .trim()
+                        .to_lowercase();
+                    let clean_chosen = chosen_opt
+                        .split(':')
+                        .next()
+                        .unwrap_or(&chosen_opt)
+                        .trim()
+                        .to_lowercase();
 
                     // Determine negative label:
                     // If model chose wrong option, negative is chosen_opt.
@@ -463,11 +479,18 @@ impl ActiveLearningEngine {
                             .probabilities
                             .iter()
                             .filter(|(label, _)| {
-                                let clean_l = label.split(':').next().unwrap_or(label).trim().to_lowercase();
+                                let clean_l = label
+                                    .split(':')
+                                    .next()
+                                    .unwrap_or(label)
+                                    .trim()
+                                    .to_lowercase();
                                 clean_l != clean_target
                             })
                             .collect();
-                        alt_candidates.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        alt_candidates.sort_by(|a, b| {
+                            b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         alt_candidates
                             .first()
                             .map(|(label, _)| (*label).clone())
@@ -475,7 +498,8 @@ impl ActiveLearningEngine {
                                 candidate_options
                                     .iter()
                                     .find(|&c| {
-                                        let clean_c = c.split(':').next().unwrap_or(c).trim().to_lowercase();
+                                        let clean_c =
+                                            c.split(':').next().unwrap_or(c).trim().to_lowercase();
                                         clean_c != clean_target
                                     })
                                     .cloned()
@@ -493,11 +517,16 @@ impl ActiveLearningEngine {
                         / (candidate_options.len().max(2) as f64).ln().max(1e-9);
 
                     let p_target = ans.probabilities.get(&target_label).copied().unwrap_or(0.0);
-                    let p_neg = ans.probabilities.get(&negative_label).copied().unwrap_or(0.0);
+                    let p_neg = ans
+                        .probabilities
+                        .get(&negative_label)
+                        .copied()
+                        .unwrap_or(0.0);
                     let margin_gap = p_target - p_neg;
 
                     // Contrastive weight: high uncertainty and close/inverted margin yields higher weight
-                    let margin_weight = ((1.0 + entropy + (1.0 - margin_gap).max(0.0)) * 100.0).round() / 100.0;
+                    let margin_weight =
+                        ((1.0 + entropy + (1.0 - margin_gap).max(0.0)) * 100.0).round() / 100.0;
                     total_weight += margin_weight;
                     if margin_weight > max_weight {
                         max_weight = margin_weight;
@@ -527,7 +556,9 @@ impl ActiveLearningEngine {
         }
 
         if samples.is_empty() {
-            bail!("No labeled ground-truth targets found in dataset. Ensure items have ground truth.");
+            bail!(
+                "No labeled ground-truth targets found in dataset. Ensure items have ground truth."
+            );
         }
 
         let total_samples = samples.len();
@@ -550,12 +581,13 @@ impl ActiveLearningEngine {
 
     /// Serializes review queue items to a JSONL file.
     pub fn export_queue(items: &[ReviewQueueItem], path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
-        let file = File::create(path).with_context(|| format!("Failed to create queue file: {}", path.display()))?;
+        let file = File::create(path)
+            .with_context(|| format!("Failed to create queue file: {}", path.display()))?;
         let mut writer = std::io::BufWriter::new(file);
 
         for item in items {
@@ -568,12 +600,13 @@ impl ActiveLearningEngine {
 
     /// Serializes RLCD distillation samples to a JSONL file.
     pub fn export_rlcd(samples: &[RlcdSample], path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
-        let file = File::create(path).with_context(|| format!("Failed to create RLCD file: {}", path.display()))?;
+        let file = File::create(path)
+            .with_context(|| format!("Failed to create RLCD file: {}", path.display()))?;
         let mut writer = std::io::BufWriter::new(file);
 
         for s in samples {
@@ -622,7 +655,9 @@ impl ActiveLearningEngine {
 
         let mut output = String::new();
         output.push_str("\n🎯 Active Learning Uncertainty Prioritization\n");
-        output.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        output.push_str(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+        );
         output.push_str(&format!(
             "Strategy:       {:?} (Acquired {} of {} candidate decisions)\n",
             report.strategy, report.acquired_count, report.total_evaluated
@@ -634,7 +669,10 @@ impl ActiveLearningEngine {
         output.push_str(&table.to_string());
 
         if items.len() > 15 {
-            output.push_str(&format!("\n... and {} more items in review queue\n", items.len() - 15));
+            output.push_str(&format!(
+                "\n... and {} more items in review queue\n",
+                items.len() - 15
+            ));
         }
 
         if let Some(p) = export_path {
@@ -690,7 +728,10 @@ impl ActiveLearningEngine {
             Cell::new(&report.export_path).fg(Color::Green),
         ]);
 
-        format!("\n🧪 RLCD Contrastive Distillation Corpus Ready:\n{}", table)
+        format!(
+            "\n🧪 RLCD Contrastive Distillation Corpus Ready:\n{}",
+            table
+        )
     }
 
     /// Formats sampling report as JSON.
@@ -725,11 +766,26 @@ mod tests {
 
     #[test]
     fn test_uncertainty_strategies_parsing() {
-        assert_eq!(UncertaintyStrategy::from_str("composite").unwrap(), UncertaintyStrategy::Composite);
-        assert_eq!(UncertaintyStrategy::from_str("entropy").unwrap(), UncertaintyStrategy::Entropy);
-        assert_eq!(UncertaintyStrategy::from_str("margin").unwrap(), UncertaintyStrategy::Margin);
-        assert_eq!(UncertaintyStrategy::from_str("conformal").unwrap(), UncertaintyStrategy::Conformal);
-        assert_eq!(UncertaintyStrategy::from_str("energy").unwrap(), UncertaintyStrategy::Energy);
+        assert_eq!(
+            UncertaintyStrategy::from_str("composite").unwrap(),
+            UncertaintyStrategy::Composite
+        );
+        assert_eq!(
+            UncertaintyStrategy::from_str("entropy").unwrap(),
+            UncertaintyStrategy::Entropy
+        );
+        assert_eq!(
+            UncertaintyStrategy::from_str("margin").unwrap(),
+            UncertaintyStrategy::Margin
+        );
+        assert_eq!(
+            UncertaintyStrategy::from_str("conformal").unwrap(),
+            UncertaintyStrategy::Conformal
+        );
+        assert_eq!(
+            UncertaintyStrategy::from_str("energy").unwrap(),
+            UncertaintyStrategy::Energy
+        );
     }
 
     #[test]
@@ -741,16 +797,35 @@ mod tests {
         );
 
         let items = vec![
-            DataItem::new("t1", serde_json::json!({"text": "urgent invoice refund"}), "test"),
-            DataItem::new("t2", serde_json::json!({"text": "server crash stack trace"}), "test"),
-            DataItem::new("t3", serde_json::json!({"text": "unclear request maybe billing maybe tech"}), "test"),
+            DataItem::new(
+                "t1",
+                serde_json::json!({"text": "urgent invoice refund"}),
+                "test",
+            ),
+            DataItem::new(
+                "t2",
+                serde_json::json!({"text": "server crash stack trace"}),
+                "test",
+            ),
+            DataItem::new(
+                "t3",
+                serde_json::json!({"text": "unclear request maybe billing maybe tech"}),
+                "test",
+            ),
         ];
 
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let engine = ActiveLearningEngine::new().with_escalate_threshold(0.70);
 
         let (queue, report) = engine
-            .sample(&classifier, &items, &questions, UncertaintyStrategy::Composite, 2, None)
+            .sample(
+                &classifier,
+                &items,
+                &questions,
+                UncertaintyStrategy::Composite,
+                2,
+                None,
+            )
             .unwrap();
 
         assert_eq!(queue.len(), 2);
@@ -764,14 +839,22 @@ mod tests {
         let mut questions = BTreeMap::new();
         questions.insert(
             "dept".into(),
-            Question::new_choice("Department", vec!["billing".into(), "technical".into(), "sales".into()]),
+            Question::new_choice(
+                "Department",
+                vec!["billing".into(), "technical".into(), "sales".into()],
+            ),
         );
 
         let mut gt = BTreeMap::new();
         gt.insert("dept".into(), serde_json::Value::String("technical".into()));
 
         let items = vec![
-            DataItem::new("t1", serde_json::json!({"text": "server crash error"}), "test").with_ground_truth(gt),
+            DataItem::new(
+                "t1",
+                serde_json::json!({"text": "server crash error"}),
+                "test",
+            )
+            .with_ground_truth(gt),
         ];
 
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);

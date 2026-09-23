@@ -1,8 +1,8 @@
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result, bail};
 
 use super::traits::{DataItem, DataSource};
 
@@ -21,10 +21,10 @@ impl FileSource {
             bail!("Input file does not exist: {}", path.display());
         }
 
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() == 0 {
-                return Ok(vec![]);
-            }
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() == 0
+        {
+            return Ok(vec![]);
         }
 
         let ext = path
@@ -63,7 +63,11 @@ impl FileSource {
                 let mut items = Vec::with_capacity(arr.len());
                 for (i, v) in arr.into_iter().enumerate() {
                     items.push(Self::json_value_to_item(
-                        format!("{}:{}", path.file_stem().and_then(|s| s.to_str()).unwrap_or("item"), i),
+                        format!(
+                            "{}:{}",
+                            path.file_stem().and_then(|s| s.to_str()).unwrap_or("item"),
+                            i
+                        ),
                         v,
                         &path_str,
                     ));
@@ -71,7 +75,11 @@ impl FileSource {
                 Ok(items)
             }
             serde_json::Value::Object(_) => {
-                let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("item").to_string();
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("item")
+                    .to_string();
                 Ok(vec![Self::json_value_to_item(id, val, &path_str)])
             }
             _ => bail!("JSON must be an object or array of objects"),
@@ -130,10 +138,19 @@ impl FileSource {
                 let header_lower = header.to_lowercase();
                 if header_lower == "id" || header_lower == "item_id" {
                     id = val.to_string();
-                } else if header_lower == "target" || header_lower == "label" || header_lower == "ground_truth" {
-                    gt.insert("default".to_string(), serde_json::Value::String(val.to_string()));
+                } else if header_lower == "target"
+                    || header_lower == "label"
+                    || header_lower == "ground_truth"
+                {
+                    gt.insert(
+                        "default".to_string(),
+                        serde_json::Value::String(val.to_string()),
+                    );
                 } else {
-                    map.insert(header.to_string(), serde_json::Value::String(val.to_string()));
+                    map.insert(
+                        header.to_string(),
+                        serde_json::Value::String(val.to_string()),
+                    );
                 }
             }
 
@@ -163,7 +180,11 @@ impl FileSource {
         Ok(vec![DataItem::new(id, state, path_str)])
     }
 
-    pub fn json_value_to_item(default_id: String, val: serde_json::Value, source_uri: &str) -> DataItem {
+    pub fn json_value_to_item(
+        default_id: String,
+        val: serde_json::Value,
+        source_uri: &str,
+    ) -> DataItem {
         match val {
             serde_json::Value::Object(mut map) => {
                 let id = map
@@ -182,7 +203,8 @@ impl FileSource {
                             let mut m = BTreeMap::new();
                             m.insert("default".to_string(), serde_json::Value::String(s));
                             Some(m)
-                        } else if let serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v {
+                        } else if let serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v
+                        {
                             let mut m = BTreeMap::new();
                             m.insert("default".to_string(), v);
                             Some(m)
@@ -237,7 +259,13 @@ mod tests {
         let item_str = FileSource::json_value_to_item("default".into(), val_str, "test");
         assert_eq!(item_str.id, "item1");
         assert_eq!(
-            item_str.ground_truth.unwrap().get("default").unwrap().as_str().unwrap(),
+            item_str
+                .ground_truth
+                .unwrap()
+                .get("default")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "billing"
         );
 
@@ -249,7 +277,13 @@ mod tests {
         });
         let item_num = FileSource::json_value_to_item("default".into(), val_num, "test");
         assert_eq!(
-            item_num.ground_truth.unwrap().get("default").unwrap().as_u64().unwrap(),
+            item_num
+                .ground_truth
+                .unwrap()
+                .get("default")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
             3
         );
 
@@ -260,9 +294,14 @@ mod tests {
             "label": true
         });
         let item_bool = FileSource::json_value_to_item("default".into(), val_bool, "test");
-        assert_eq!(
-            item_bool.ground_truth.unwrap().get("default").unwrap().as_bool().unwrap(),
-            true
+        assert!(
+            item_bool
+                .ground_truth
+                .unwrap()
+                .get("default")
+                .unwrap()
+                .as_bool()
+                .unwrap()
         );
     }
 }

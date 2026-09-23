@@ -15,4 +15,6 @@ pub use streaming::{
     StreamSourceKind, StreamingDataSource,
 };
 pub use traits::{DataItem, DataSource, MemorySource};
-pub use web::{ExtractedDocument, HtmlExtractor, JinaReaderClient, ScrapeOptions, WebScraper, WebSource};
+pub use web::{
+    ExtractedDocument, HtmlExtractor, JinaReaderClient, ScrapeOptions, WebScraper, WebSource,
+};

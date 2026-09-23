@@ -1,5 +1,11 @@
 # lemma ⚡
 
+[![CI](https://github.com/arvarik/lemma/actions/workflows/ci.yml/badge.svg)](https://github.com/arvarik/lemma/actions/workflows/ci.yml)
+[![Security Audit](https://github.com/arvarik/lemma/actions/workflows/audit.yml/badge.svg)](https://github.com/arvarik/lemma/actions/workflows/audit.yml)
+[![Release](https://img.shields.io/github/v/release/arvarik/lemma)](https://github.com/arvarik/lemma/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+
 > **A high-performance Rust CLI and engine for Laya System 1 decision and classification models.**
 
 `lemma` provides enterprise-grade data ingestion, classification, experimentation, evaluation, and benchmarking for the **Laya** decision model family developed by Convai Innovations.
@@ -26,14 +32,47 @@
 
 ## 🚀 Installation & Quickstart
 
-### Prerequisites
-- Rust 1.85+ (or installed via `cargo` / `mise`)
-- Hugging Face CLI (`hf` or `huggingface-cli`) for model downloads
-
-### Build
+### 1. Standalone Installer (macOS & Linux)
+Installs the pre-built binary for your platform and verifies SHA-256 checksum:
 ```bash
+curl -fsSL https://raw.githubusercontent.com/arvarik/lemma/main/install.sh | sh
+```
+
+### 2. Via `cargo binstall` (Fast Prebuilt Binary)
+```bash
+cargo binstall lemma
+```
+
+### 3. From Source via Cargo
+```bash
+cargo install --git https://github.com/arvarik/lemma.git
+```
+
+### 4. Build from Local Repository
+```bash
+git clone https://github.com/arvarik/lemma.git
+cd lemma
 cargo build --release
-cp target/release/lemma /usr/local/bin/ # or add target/release to PATH
+cp target/release/lemma /usr/local/bin/
+```
+
+### 🐚 Shell Auto-Completions
+Enable tab-completions for all subcommands and arguments:
+
+```bash
+# Bash
+lemma completions bash > ~/.local/share/bash-completion/completions/lemma
+
+# Zsh
+eval "$(lemma completions zsh)"
+# or persist:
+lemma completions zsh > "${fpath[1]}/_lemma"
+
+# Fish
+lemma completions fish > ~/.config/fish/completions/lemma.fish
+
+# PowerShell
+lemma completions powershell | Out-String | Invoke-Expression
 ```
 
 ---

@@ -4,11 +4,11 @@ pub mod datasource;
 pub mod engine;
 pub mod model;
 
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use anyhow::{Context, Result, bail};
 
 use datasource::{DataItem, DataSource, DirectorySource, FileSource, MemorySource, StdinSource};
 use model::{Question, QuestionType};
@@ -40,7 +40,10 @@ pub fn create_inline_question(
         "choice" => QuestionType::Choice,
         "score" => QuestionType::Score,
         "noul" | "boolean" | "bool" => QuestionType::Noul,
-        other => bail!("Invalid question type '{}'. Options: choice, score, noul", other),
+        other => bail!(
+            "Invalid question type '{}'. Options: choice, score, noul",
+            other
+        ),
     };
 
     let q = match qtype {
@@ -170,4 +173,3 @@ pub fn resolve_streaming_source(
         }
     }
 }
-

@@ -1,27 +1,30 @@
-use std::io::Write;
-use std::str::FromStr;
+#![allow(clippy::field_reassign_with_default, clippy::too_many_arguments)]
+
 use anyhow::{Result, bail};
 use clap::Parser;
 use comfy_table::{Cell, Color, Table};
+use std::io::Write;
+use std::str::FromStr;
 
 use lemma::benchmark::BenchmarkRunner;
 use lemma::cli::{
     ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
     AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
-    CascadeCommands, Cli, Commands, ConformalArgs, ConsensusArgs, DownloadArgs, DriftArgs,
-    ExplainArgs, ExperimentArgs, ExperimentMode, FetchArgs, GuardArgs, HierarchicalCommands, InfoArgs,
-    InspectArgs, OodArgs, OodCommands, OutputFormat, ScrapeArgs, SchemaArgs, SchemaCommands, SchemaInferArgs,
-    SchemaOptimizeArgs, SchemaValidateArgs, StatsArgs, StreamArgs, TestArgs,
-};
-use lemma::engine::{
-    ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner,
-    CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine, DecisionCache,
-    DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy,
-    HierarchicalRouter, LayaClassifier, OodDetector, OodProfile, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
-    UncertaintyStrategy, compute_schema_hash,
+    CascadeCommands, Cli, Commands, CompletionsArgs, ConformalArgs, ConsensusArgs, DownloadArgs,
+    DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
+    HierarchicalCommands, InfoArgs, InspectArgs, OodArgs, OodCommands, OutputFormat, SchemaArgs,
+    SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs, SchemaValidateArgs, ScrapeArgs, StatsArgs,
+    StreamArgs, TestArgs,
 };
 use lemma::datasource::{DataItem, DataSource, StreamSink};
+use lemma::engine::{
+    ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner,
+    CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
+    DecisionCache, DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine,
+    GuardrailPolicy, HierarchicalRouter, LayaClassifier, OodDetector, OodProfile,
+    SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline,
+    StreamPipelineConfig, UncertaintyStrategy, compute_schema_hash,
+};
 use lemma::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
 use lemma::{
     create_inline_question, load_questions_from_file, resolve_data_source,
@@ -31,10 +34,10 @@ use lemma::{
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
-        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-            if io_err.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(());
-            }
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>()
+            && io_err.kind() == std::io::ErrorKind::BrokenPipe
+        {
+            return Ok(());
         }
         return Err(e);
     }
@@ -67,7 +70,25 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Stats(args) => handle_stats(args),
         Commands::Fetch(args) => handle_fetch(args),
         Commands::Scrape(args) => handle_scrape(args),
+        Commands::Completions(args) => handle_completions(args),
     }
+}
+
+fn handle_completions(args: CompletionsArgs) -> Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::generate;
+
+    let mut cmd = Cli::command();
+    let mut buf = Vec::new();
+    generate(args.shell, &mut cmd, "lemma", &mut buf);
+    let mut stdout = std::io::stdout();
+    if let Err(e) = stdout.write_all(&buf) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 fn handle_download(args: DownloadArgs) -> Result<()> {
@@ -75,7 +96,10 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
     let downloader = Downloader::detect()?;
 
     if args.verify_only {
-        println!("🔍 Verifying checkpoint files in {}", args.target_dir.display());
+        println!(
+            "🔍 Verifying checkpoint files in {}",
+            args.target_dir.display()
+        );
         let report = downloader.verify(&args.target_dir)?;
         if report.is_valid {
             println!("✅ All required checkpoint files are valid and present!");
@@ -83,7 +107,10 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
                 println!("   - {}: {:.2} MB", f, sz as f64 / 1_048_576.0);
             }
         } else {
-            println!("❌ Missing required files in {}:", args.target_dir.display());
+            println!(
+                "❌ Missing required files in {}:",
+                args.target_dir.display()
+            );
             for m in report.missing {
                 println!("   - {}", m);
             }
@@ -155,22 +182,26 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     if let Some(cfg_path) = &args.config {
         let f = std::fs::File::open(cfg_path)?;
         let val: serde_json::Value = serde_json::from_reader(f)?;
-        if let Some(base_t) = val.get("temperature").and_then(|v| v.as_f64()) {
-            if (args.temperature - 1.0).abs() < f64::EPSILON {
-                config.temperature = base_t;
-            }
+        if let Some(base_t) = val.get("temperature").and_then(|v| v.as_f64())
+            && (args.temperature - 1.0).abs() < f64::EPSILON
+        {
+            config.temperature = base_t;
         }
-        if let Some(temp_map) = val.get("temperature_by_options").and_then(|v| v.as_object()) {
+        if let Some(temp_map) = val
+            .get("temperature_by_options")
+            .and_then(|v| v.as_object())
+        {
             for (k, v) in temp_map {
                 if let Some(t) = v.as_f64() {
                     config.temperature_by_options.insert(k.clone(), t);
                 }
             }
         }
-        if let Some(qats_val) = val.get("qats").or_else(|| val.get("qats_profile")) {
-            if let Ok(profile) = serde_json::from_value::<lemma::engine::calibrate::QatsProfile>(qats_val.clone()) {
-                config.qats_profile = Some(profile);
-            }
+        if let Some(qats_val) = val.get("qats").or_else(|| val.get("qats_profile"))
+            && let Ok(profile) =
+                serde_json::from_value::<lemma::engine::calibrate::QatsProfile>(qats_val.clone())
+        {
+            config.qats_profile = Some(profile);
         }
     }
     let classifier = LayaClassifier::new(config);
@@ -240,17 +271,17 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         raw_results.push((item.id.clone(), res));
     }
 
-    if args.cache_stats {
-        if let Some(c) = &cache {
-            let stats = c.stats();
-            eprintln!("\n📊 Semantic Decision Cache Statistics:");
-            eprintln!("   Total Lookups : {}", stats.total_lookups());
-            eprintln!("   Exact Hits    : {}", stats.exact_hits);
-            eprintln!("   Semantic Hits : {}", stats.semantic_hits);
-            eprintln!("   Misses        : {}", stats.misses);
-            eprintln!("   Hit Rate      : {:.2}%", stats.hit_rate() * 100.0);
-            eprintln!("   Cached Items  : {}", c.len());
-        }
+    if args.cache_stats
+        && let Some(c) = &cache
+    {
+        let stats = c.stats();
+        eprintln!("\n📊 Semantic Decision Cache Statistics:");
+        eprintln!("   Total Lookups : {}", stats.total_lookups());
+        eprintln!("   Exact Hits    : {}", stats.exact_hits);
+        eprintln!("   Semantic Hits : {}", stats.semantic_hits);
+        eprintln!("   Misses        : {}", stats.misses);
+        eprintln!("   Hit Rate      : {:.2}%", stats.hit_rate() * 100.0);
+        eprintln!("   Cached Items  : {}", c.len());
     }
 
     // Optional filter for supervisor escalation
@@ -291,7 +322,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         }
         OutputFormat::Csv => {
             let mut wtr = csv::Writer::from_writer(out_writer);
-            wtr.write_record(&[
+            wtr.write_record([
                 "item_id",
                 "question_id",
                 "prediction",
@@ -314,7 +345,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
                         "N/A".into()
                     };
 
-                    wtr.write_record(&[
+                    wtr.write_record([
                         id.as_str(),
                         qid.as_str(),
                         &pred_str,
@@ -333,7 +364,12 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
                 write!(out_writer, "{id} => ")?;
                 for (qid, ans) in &res.answers {
                     if let Some(labels) = &ans.selected_labels {
-                        write!(out_writer, "{qid}:[{}] ({:.2}%) ", labels.join(", "), ans.confidence * 100.0)?;
+                        write!(
+                            out_writer,
+                            "{qid}:[{}] ({:.2}%) ",
+                            labels.join(", "),
+                            ans.confidence * 100.0
+                        )?;
                     } else if let Some(c) = &ans.choice {
                         write!(out_writer, "{qid}:{c} ({:.2}%) ", ans.confidence * 100.0)?;
                     } else if let Some(s) = ans.score {
@@ -360,8 +396,11 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
             let item_map: std::collections::HashMap<&str, &DataItem> =
                 items.iter().map(|it| (it.id.as_str(), it)).collect();
 
-            for (_idx, (id, res)) in results.iter().enumerate() {
-                let snippet = item_map.get(id.as_str()).map(|it| it.preview_text(40)).unwrap_or_default();
+            for (id, res) in results.iter() {
+                let snippet = item_map
+                    .get(id.as_str())
+                    .map(|it| it.preview_text(40))
+                    .unwrap_or_default();
 
                 for (qid, ans) in &res.answers {
                     let pred_str = if let Some(labels) = &ans.selected_labels {
@@ -460,11 +499,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
     let questions = if let Some(schema_path) = &args.schema {
         load_questions_from_file(schema_path)?
     } else {
-        create_inline_question(
-            "choice",
-            "Classify topic",
-            "billing,technical,sales,other",
-        )?
+        create_inline_question("choice", "Classify topic", "billing,technical,sales,other")?
     };
 
     let source = resolve_data_source_filtered(
@@ -684,12 +719,19 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
     ]);
     table.add_row(vec![
         Cell::new("Total Parameters"),
-        Cell::new(format!("{:.2}M ({} elements)", rep.total_parameters as f64 / 1_000_000.0, rep.total_parameters)),
+        Cell::new(format!(
+            "{:.2}M ({} elements)",
+            rep.total_parameters as f64 / 1_000_000.0,
+            rep.total_parameters
+        )),
         Cell::new("ModernBERT-large + decision head expected ~421M"),
     ]);
     table.add_row(vec![
         Cell::new("File Size"),
-        Cell::new(format!("{:.2} MB", rep.file_size_bytes as f64 / 1_048_576.0)),
+        Cell::new(format!(
+            "{:.2} MB",
+            rep.file_size_bytes as f64 / 1_048_576.0
+        )),
         Cell::new(format!("Header JSON size: {} bytes", rep.header_size_bytes)),
     ]);
     table.add_row(vec![
@@ -699,8 +741,15 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
     ]);
     table.add_row(vec![
         Cell::new("Laya Decision Head"),
-        Cell::new(if rep.is_laya_compatible { "VERIFIED (✅)" } else { "NOT FOUND (⚠️)" }),
-        Cell::new(format!("Act head: {}, Mask Scorer: {}", rep.has_act_head, rep.has_decision_scorer)),
+        Cell::new(if rep.is_laya_compatible {
+            "VERIFIED (✅)"
+        } else {
+            "NOT FOUND (⚠️)"
+        }),
+        Cell::new(format!(
+            "Act head: {}, Mask Scorer: {}",
+            rep.has_act_head, rep.has_decision_scorer
+        )),
     ]);
 
     println!("\n{table}\n");
@@ -709,7 +758,10 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
     for (name, shape) in rep.tensor_shapes.iter().take(8) {
         println!("  • {:<45} {:?}", name, shape);
     }
-    println!("  ... and {} more tensors.\n", rep.total_tensors.saturating_sub(8));
+    println!(
+        "  ... and {} more tensors.\n",
+        rep.total_tensors.saturating_sub(8)
+    );
 
     Ok(())
 }
@@ -824,7 +876,12 @@ fn handle_schema_validate(val_args: SchemaValidateArgs) -> Result<()> {
         match q.validate(qid, head_budget) {
             Ok(warnings) => {
                 let opts = q.render_options();
-                println!("  ✅ Question '{}' (type: {:?}, {} options): valid", qid, q.qtype, opts.len());
+                println!(
+                    "  ✅ Question '{}' (type: {:?}, {} options): valid",
+                    qid,
+                    q.qtype,
+                    opts.len()
+                );
                 for w in warnings {
                     println!("     ⚠️  {}", w);
                     total_warnings += 1;
@@ -839,7 +896,10 @@ fn handle_schema_validate(val_args: SchemaValidateArgs) -> Result<()> {
 
     println!();
     if all_valid {
-        println!("✨ Schema validation passed successfully ({} warnings).\n", total_warnings);
+        println!(
+            "✨ Schema validation passed successfully ({} warnings).\n",
+            total_warnings
+        );
         Ok(())
     } else {
         bail!("Schema validation failed! Resolve errors above.");
@@ -861,7 +921,10 @@ fn handle_schema_infer(args: SchemaInferArgs) -> Result<()> {
         synth = synth.with_target_cols(cols);
     }
 
-    println!("🔍 Analyzing dataset for schema induction: {}", args.data.display());
+    println!(
+        "🔍 Analyzing dataset for schema induction: {}",
+        args.data.display()
+    );
     let rep = synth.infer_from_file(&args.data)?;
 
     println!(
@@ -938,7 +1001,10 @@ fn handle_schema_optimize(args: SchemaOptimizeArgs) -> Result<()> {
     println!("\n✂️  Schema Criteria Knapsack Token Optimizer");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Input Schema    : {}", args.schema.display());
-    println!("Target Budget   : {} tokens (ModernBERT / mmBERT head limit)", args.budget);
+    println!(
+        "Target Budget   : {} tokens (ModernBERT / mmBERT head limit)",
+        args.budget
+    );
     println!("Original Tokens : {} tokens", result.original_tokens);
     println!("Optimized Tokens: {} tokens", result.optimized_tokens);
     println!("Pruned Clauses  : {}", result.pruned_clauses);
@@ -964,7 +1030,10 @@ fn handle_schema_optimize(args: SchemaOptimizeArgs) -> Result<()> {
         }
         let f = std::fs::File::create(out_path)?;
         serde_json::to_writer_pretty(f, &result.optimized_schema)?;
-        println!("\n✅ Saved optimized schema JSON to: {}", out_path.display());
+        println!(
+            "\n✅ Saved optimized schema JSON to: {}",
+            out_path.display()
+        );
     }
 
     Ok(())
@@ -1075,7 +1144,9 @@ fn handle_guard(args: GuardArgs) -> Result<()> {
         for (item, (_, dec)) in items.iter().zip(decisions.iter()) {
             let matched_rec = audit_records.iter().find(|r| r.item_id == item.id);
             let rule = matched_rec.and_then(|r| r.matched_rule.as_deref());
-            let action = matched_rec.map(|r| r.final_action).unwrap_or(GuardAction::Allow);
+            let action = matched_rec
+                .map(|r| r.final_action)
+                .unwrap_or(GuardAction::Allow);
 
             let receipt = attest_engine.create_receipt(item, dec, rule, action, &schema_digest)?;
             writeln!(file, "{}", serde_json::to_string(&receipt)?)?;
@@ -1177,14 +1248,20 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             println!("   Cache Architecture : In-Memory Two-Tier (Exact KV + Dense Cosine/HNSW)");
             println!("   Capacity Limit     : 10,000 entries");
             println!("   Default TTL        : 86,400s (24 hours)");
-            println!("   Similarity Metric  : Normalized 128-d Hypersphere Cosine (threshold: 0.92)");
+            println!(
+                "   Similarity Metric  : Normalized 128-d Hypersphere Cosine (threshold: 0.92)"
+            );
             println!("   Admission Filter   : confidence >= 0.70, act_probability <= 0.50");
         }
         CacheCommands::Bench(bench_args) => {
             let schema = if let Some(p) = &bench_args.schema {
                 load_questions_from_file(p)?
             } else {
-                create_inline_question("choice", "Department triage", "billing,technical,sales,other")?
+                create_inline_question(
+                    "choice",
+                    "Department triage",
+                    "billing,technical,sales,other",
+                )?
             };
             let source = lemma::datasource::FileSource::new(&bench_args.file);
             let items = source.read_items()?;
@@ -1197,7 +1274,10 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             cfg.similarity_threshold = bench_args.threshold;
             let mut cache = DecisionCache::new(cfg);
 
-            println!("\n⚡ Benchmarking Semantic Decision Cache on {} items...", items.len());
+            println!(
+                "\n⚡ Benchmarking Semantic Decision Cache on {} items...",
+                items.len()
+            );
             let schema_hash = compute_schema_hash(&schema);
 
             // Run Pass 1: Cold cache (inference)
@@ -1252,7 +1332,10 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
                 Cell::new("Warm (Semantic Decision Cache)"),
                 Cell::new(format!("{:.2} ms", warm_time.as_secs_f64() * 1000.0)),
                 Cell::new(format!("{:.4} ms", warm_per_item)),
-                Cell::new(format!("{:.1}%", (hits as f64 / items.len() as f64) * 100.0)),
+                Cell::new(format!(
+                    "{:.1}%",
+                    (hits as f64 / items.len() as f64) * 100.0
+                )),
                 Cell::new(format!("{:.1}x Faster", speedup)),
             ]);
             println!("{table}");
@@ -1267,12 +1350,16 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 fn handle_ood(args: OodArgs) -> Result<()> {
     match args.action {
         OodCommands::Fit(fit_args) => {
-            let checkpoint = Checkpoint::from_str(&fit_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&fit_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let questions = load_questions_from_file(&fit_args.schema)?;
             let source = lemma::datasource::FileSource::new(&fit_args.train_data);
             let items = source.read_items()?;
 
-            println!("🔬 Fitting OOD profile on {} in-distribution samples...", items.len());
+            println!(
+                "🔬 Fitting OOD profile on {} in-distribution samples...",
+                items.len()
+            );
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
             let target_qid = if questions.contains_key(&fit_args.target_qid) {
@@ -1281,7 +1368,8 @@ fn handle_ood(args: OodArgs) -> Result<()> {
                 questions.keys().next().unwrap()
             };
 
-            let profile = OodDetector::fit("laya_profile", &items, &classifier, &questions, target_qid)?;
+            let profile =
+                OodDetector::fit("laya_profile", &items, &classifier, &questions, target_qid)?;
 
             if let Some(parent) = fit_args.output.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -1291,7 +1379,10 @@ fn handle_ood(args: OodArgs) -> Result<()> {
 
             println!("\n✅ Fitted OOD Profile:");
             println!("   Question ID       : {}", profile.question_id);
-            println!("   Target Classes    : {}", profile.target_classes.join(", "));
+            println!(
+                "   Target Classes    : {}",
+                profile.target_classes.join(", ")
+            );
             println!("   Mean Free Energy  : {:.4}", profile.mean_energy);
             println!("   Std Free Energy   : {:.4}", profile.std_energy);
             println!("   Energy Threshold  : {:.4}", profile.energy_threshold);
@@ -1299,7 +1390,8 @@ fn handle_ood(args: OodArgs) -> Result<()> {
             println!("💾 Saved profile to: {}", fit_args.output.display());
         }
         OodCommands::Eval(eval_args) => {
-            let checkpoint = Checkpoint::from_str(&eval_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&eval_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let questions = load_questions_from_file(&eval_args.schema)?;
 
             let profile_file = std::fs::File::open(&eval_args.profile)?;
@@ -1319,11 +1411,18 @@ fn handle_ood(args: OodArgs) -> Result<()> {
             let id_evals = detector.evaluate_batch(&id_items, &classifier, &questions)?;
             let ood_evals = detector.evaluate_batch(&ood_items, &classifier, &questions)?;
 
-            let id_avg_energy = id_evals.iter().map(|e| e.free_energy).sum::<f64>() / id_evals.len().max(1) as f64;
-            let ood_avg_energy = ood_evals.iter().map(|e| e.free_energy).sum::<f64>() / ood_evals.len().max(1) as f64;
+            let id_avg_energy =
+                id_evals.iter().map(|e| e.free_energy).sum::<f64>() / id_evals.len().max(1) as f64;
+            let ood_avg_energy = ood_evals.iter().map(|e| e.free_energy).sum::<f64>()
+                / ood_evals.len().max(1) as f64;
 
-            let id_avg_dist = id_evals.iter().map(|e| e.mahalanobis_distance).sum::<f64>() / id_evals.len().max(1) as f64;
-            let ood_avg_dist = ood_evals.iter().map(|e| e.mahalanobis_distance).sum::<f64>() / ood_evals.len().max(1) as f64;
+            let id_avg_dist = id_evals.iter().map(|e| e.mahalanobis_distance).sum::<f64>()
+                / id_evals.len().max(1) as f64;
+            let ood_avg_dist = ood_evals
+                .iter()
+                .map(|e| e.mahalanobis_distance)
+                .sum::<f64>()
+                / ood_evals.len().max(1) as f64;
 
             let id_flagged = id_evals.iter().filter(|e| e.is_ood).count();
             let ood_flagged = ood_evals.iter().filter(|e| e.is_ood).count();
@@ -1343,7 +1442,10 @@ fn handle_ood(args: OodArgs) -> Result<()> {
                 Cell::new(format!("{:.4}", id_avg_energy)),
                 Cell::new(format!("{:.4}", id_avg_dist)),
                 Cell::new(id_flagged.to_string()),
-                Cell::new(format!("{:.1}% (FPR)", (id_flagged as f64 / id_items.len().max(1) as f64) * 100.0)),
+                Cell::new(format!(
+                    "{:.1}% (FPR)",
+                    (id_flagged as f64 / id_items.len().max(1) as f64) * 100.0
+                )),
             ]);
             table.add_row(vec![
                 Cell::new("Out-of-Distribution (OOD)"),
@@ -1351,7 +1453,10 @@ fn handle_ood(args: OodArgs) -> Result<()> {
                 Cell::new(format!("{:.4}", ood_avg_energy)),
                 Cell::new(format!("{:.4}", ood_avg_dist)),
                 Cell::new(ood_flagged.to_string()),
-                Cell::new(format!("{:.1}% (TPR/Recall)", (ood_flagged as f64 / ood_items.len().max(1) as f64) * 100.0)),
+                Cell::new(format!(
+                    "{:.1}% (TPR/Recall)",
+                    (ood_flagged as f64 / ood_items.len().max(1) as f64) * 100.0
+                )),
             ]);
             println!("{table}");
         }
@@ -1362,12 +1467,16 @@ fn handle_ood(args: OodArgs) -> Result<()> {
 fn handle_cascade(args: CascadeArgs) -> Result<()> {
     match args.action {
         CascadeCommands::Tune(tune_args) => {
-            let checkpoint = Checkpoint::from_str(&tune_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&tune_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let questions = load_questions_from_file(&tune_args.schema)?;
             let source = lemma::datasource::FileSource::new(&tune_args.val_data);
             let items = source.read_items()?;
 
-            println!("📈 Tuning Pareto-optimal System 1 / System 2 cascade on {} samples...", items.len());
+            println!(
+                "📈 Tuning Pareto-optimal System 1 / System 2 cascade on {} samples...",
+                items.len()
+            );
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
             let policy = CascadeRouter::tune_pareto(
@@ -1379,13 +1488,31 @@ fn handle_cascade(args: CascadeArgs) -> Result<()> {
             )?;
 
             println!("\n⚖️  Pareto Frontier Optimization Results:");
-            println!("   Target Accuracy SLA   : {:.1}%", policy.target_accuracy * 100.0);
-            println!("   Expected Hybrid Acc   : {:.2}%", policy.expected_accuracy * 100.0);
+            println!(
+                "   Target Accuracy SLA   : {:.1}%",
+                policy.target_accuracy * 100.0
+            );
+            println!(
+                "   Expected Hybrid Acc   : {:.2}%",
+                policy.expected_accuracy * 100.0
+            );
             println!("   Optimal Threshold τ*  : {:.2}", policy.optimal_threshold);
-            println!("   System 1 Fast Coverage: {:.1}%", policy.system1_coverage_rate * 100.0);
-            println!("   System 2 Escalation   : {:.1}%", policy.system2_escalation_rate * 100.0);
-            println!("   Cost Savings vs LLM   : -{:.1}%", policy.cost_savings_percent);
-            println!("   Estimated Cost / 1k   : ${:.2}", policy.estimated_cost_per_1000);
+            println!(
+                "   System 1 Fast Coverage: {:.1}%",
+                policy.system1_coverage_rate * 100.0
+            );
+            println!(
+                "   System 2 Escalation   : {:.1}%",
+                policy.system2_escalation_rate * 100.0
+            );
+            println!(
+                "   Cost Savings vs LLM   : -{:.1}%",
+                policy.cost_savings_percent
+            );
+            println!(
+                "   Estimated Cost / 1k   : ${:.2}",
+                policy.estimated_cost_per_1000
+            );
 
             if let Some(export_path) = &tune_args.export_policy {
                 if let Some(parent) = export_path.parent() {
@@ -1397,11 +1524,16 @@ fn handle_cascade(args: CascadeArgs) -> Result<()> {
             }
         }
         CascadeCommands::Run(run_args) => {
-            let checkpoint = Checkpoint::from_str(&run_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&run_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let questions = if let Some(p) = &run_args.schema {
                 load_questions_from_file(p)?
             } else {
-                create_inline_question("choice", "Department triage", "billing,technical,sales,other")?
+                create_inline_question(
+                    "choice",
+                    "Department triage",
+                    "billing,technical,sales,other",
+                )?
             };
             let source = resolve_data_source(
                 std::path::Path::new("data"),
@@ -1474,7 +1606,10 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
                 }
             }
 
-            println!("🔍 Verifying cryptographic decision receipts in: {}", verify_args.receipt_log.display());
+            println!(
+                "🔍 Verifying cryptographic decision receipts in: {}",
+                verify_args.receipt_log.display()
+            );
             let report = AttestationEngine::verify_ledger(&receipts, &verify_args.secret_key);
 
             println!("\n🛡️  Attestation Verification Report:");
@@ -1483,7 +1618,11 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
             println!("   Invalid / Tampered Sigs  : {}", report.invalid_receipts);
             println!(
                 "   Merkle Chain Intact      : {}",
-                if report.chain_intact { "✅ YES" } else { "❌ NO (Chain Broken!)" }
+                if report.chain_intact {
+                    "✅ YES"
+                } else {
+                    "❌ NO (Chain Broken!)"
+                }
             );
 
             if let Some(idx) = report.broken_link_index {
@@ -1537,7 +1676,9 @@ fn run_hierarchical_classification(
         .with_escalate_threshold(escalate_threshold);
 
     if cache_enabled {
-        let cache = std::sync::Arc::new(std::sync::Mutex::new(DecisionCache::new(SemanticCacheConfig::default())));
+        let cache = std::sync::Arc::new(std::sync::Mutex::new(DecisionCache::new(
+            SemanticCacheConfig::default(),
+        )));
         router = router.with_cache(cache);
     }
 
@@ -1562,7 +1703,11 @@ fn run_hierarchical_classification(
 
     if let Some(out_path) = output {
         std::fs::write(out_path, rendered)?;
-        println!("💾 Successfully wrote {} hierarchical decision(s) to {}", results.len(), out_path.display());
+        println!(
+            "💾 Successfully wrote {} hierarchical decision(s) to {}",
+            results.len(),
+            out_path.display()
+        );
     } else {
         println!("{}", rendered);
     }
@@ -1573,7 +1718,8 @@ fn run_hierarchical_classification(
 fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
     match args.command {
         HierarchicalCommands::Run(run_args) => {
-            let checkpoint = Checkpoint::from_str(&run_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&run_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let source = resolve_data_source(
                 &run_args.data_dir,
                 run_args.file.as_deref(),
@@ -1595,31 +1741,54 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
             )
         }
         HierarchicalCommands::Tree(tree_args) => {
-            let checkpoint = Checkpoint::from_str(&tree_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&tree_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let schema = HierarchicalSchema::load_from_file(&tree_args.schema)?;
             let budget = checkpoint.head_budget();
-            println!("\n🌲 Hierarchical Decision Tree Visualization ({})", checkpoint.repo_id());
+            println!(
+                "\n🌲 Hierarchical Decision Tree Visualization ({})",
+                checkpoint.repo_id()
+            );
             println!("{}\n", "=".repeat(65));
             let tree = schema.render_ascii_tree(budget);
             println!("{}", tree);
             Ok(())
         }
         HierarchicalCommands::Validate(val_args) => {
-            let checkpoint = Checkpoint::from_str(&val_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&val_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let schema = HierarchicalSchema::load_from_file(&val_args.schema)?;
             let budget = checkpoint.head_budget();
-            println!("\n🔍 Validating Hierarchical Schema against {} (Head Budget: {} tokens)", checkpoint.repo_id(), budget);
+            println!(
+                "\n🔍 Validating Hierarchical Schema against {} (Head Budget: {} tokens)",
+                checkpoint.repo_id(),
+                budget
+            );
             println!("{}\n", "=".repeat(75));
             match schema.validate(budget) {
                 Ok(report) => {
                     println!("✅ Hierarchical schema is structurally VALID!");
-                    println!("   • Root coarse tokens:      ~{} tokens", report.root_tokens);
-                    println!("   • Max branch tokens:       ~{} tokens", report.max_branch_tokens);
+                    println!(
+                        "   • Root coarse tokens:      ~{} tokens",
+                        report.root_tokens
+                    );
+                    println!(
+                        "   • Max branch tokens:       ~{} tokens",
+                        report.max_branch_tokens
+                    );
                     println!("   • Coarse branches count:   {}", report.branch_count);
-                    println!("   • Total leaf classes:      {}", report.total_leaf_classes);
-                    println!("   • Tree depth:              {} levels", schema.max_depth());
+                    println!(
+                        "   • Total leaf classes:      {}",
+                        report.total_leaf_classes
+                    );
+                    println!(
+                        "   • Tree depth:              {} levels",
+                        schema.max_depth()
+                    );
                     if report.warnings.is_empty() {
-                        println!("\n✨ Zero warnings: all coarse and fine nodes comfortably fit inside token budget!");
+                        println!(
+                            "\n✨ Zero warnings: all coarse and fine nodes comfortably fit inside token budget!"
+                        );
                     } else {
                         println!("\n⚠️  Warnings encountered ({}):", report.warnings.len());
                         for w in report.warnings {
@@ -1635,7 +1804,8 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
             }
         }
         HierarchicalCommands::Bench(bench_args) => {
-            let checkpoint = Checkpoint::from_str(&bench_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
+            let checkpoint =
+                Checkpoint::from_str(&bench_args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
             let schema = HierarchicalSchema::load_from_file(&bench_args.schema)?;
             let source = resolve_data_source(
                 &bench_args.data_dir,
@@ -1655,7 +1825,12 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
                 .with_coarse_threshold(bench_args.coarse_threshold);
 
             println!("\n⚡ Benchmarking Hierarchical Coarse-to-Fine Router...");
-            println!("   Checkpoint: {} | Samples: {} | Iterations: {}", checkpoint.repo_id(), items.len(), bench_args.iterations);
+            println!(
+                "   Checkpoint: {} | Samples: {} | Iterations: {}",
+                checkpoint.repo_id(),
+                items.len(),
+                bench_args.iterations
+            );
             println!("{}\n", "=".repeat(70));
 
             let bench_res = router.benchmark(&items, bench_args.iterations)?;
@@ -1664,14 +1839,38 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&bench_res)?);
             } else {
                 println!("📊 Benchmark Results:");
-                println!("   • Total Evaluated:       {} decisions", bench_res.total_samples);
-                println!("   • Avg Coarse Latency:    {:.2} ms", bench_res.avg_coarse_latency_ms);
-                println!("   • Avg Fine Latency:      {:.2} ms", bench_res.avg_fine_latency_ms);
-                println!("   • Avg Total Latency:     {:.2} ms", bench_res.avg_total_latency_ms);
-                println!("   • Coarse Escalation Rate: {:.1}%", bench_res.coarse_escalation_rate * 100.0);
-                println!("   • Completion Rate:       {:.1}%", bench_res.completion_rate * 100.0);
-                println!("   • Avg Compound Conf:     {:.3}", bench_res.avg_compound_confidence);
-                println!("   • Throughput:            {:.1} requests/sec", bench_res.throughput_qps);
+                println!(
+                    "   • Total Evaluated:       {} decisions",
+                    bench_res.total_samples
+                );
+                println!(
+                    "   • Avg Coarse Latency:    {:.2} ms",
+                    bench_res.avg_coarse_latency_ms
+                );
+                println!(
+                    "   • Avg Fine Latency:      {:.2} ms",
+                    bench_res.avg_fine_latency_ms
+                );
+                println!(
+                    "   • Avg Total Latency:     {:.2} ms",
+                    bench_res.avg_total_latency_ms
+                );
+                println!(
+                    "   • Coarse Escalation Rate: {:.1}%",
+                    bench_res.coarse_escalation_rate * 100.0
+                );
+                println!(
+                    "   • Completion Rate:       {:.1}%",
+                    bench_res.completion_rate * 100.0
+                );
+                println!(
+                    "   • Avg Compound Conf:     {:.3}",
+                    bench_res.avg_compound_confidence
+                );
+                println!(
+                    "   • Throughput:            {:.1} requests/sec",
+                    bench_res.throughput_qps
+                );
             }
             Ok(())
         }
@@ -1717,14 +1916,17 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
     let (report, calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
 
     if let Some(export_path) = &args.export_config {
-        if let Some(parent) = export_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = export_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let json_str = serde_json::to_string_pretty(&calibrated_config)?;
         std::fs::write(export_path, json_str)?;
-        eprintln!("💾 Calibrated agent config exported to: {}", export_path.display());
+        eprintln!(
+            "💾 Calibrated agent config exported to: {}",
+            export_path.display()
+        );
     }
 
     match args.format {
@@ -1732,7 +1934,10 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
             println!("{}", CalibrationTuner::format_json(&report)?);
         }
         OutputFormat::Table | OutputFormat::Pretty | OutputFormat::Compact | OutputFormat::Csv => {
-            println!("{}", CalibrationTuner::format_table(&report, args.export_config.as_deref()));
+            println!(
+                "{}",
+                CalibrationTuner::format_table(&report, args.export_config.as_deref())
+            );
         }
     }
 
@@ -1763,17 +1968,21 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
         if let Some(base_t) = val.get("temperature").and_then(|v| v.as_f64()) {
             config.temperature = base_t;
         }
-        if let Some(temp_map) = val.get("temperature_by_options").and_then(|v| v.as_object()) {
+        if let Some(temp_map) = val
+            .get("temperature_by_options")
+            .and_then(|v| v.as_object())
+        {
             for (k, v) in temp_map {
                 if let Some(t) = v.as_f64() {
                     config.temperature_by_options.insert(k.clone(), t);
                 }
             }
         }
-        if let Some(qats_val) = val.get("qats").or_else(|| val.get("qats_profile")) {
-            if let Ok(profile) = serde_json::from_value::<lemma::engine::QatsProfile>(qats_val.clone()) {
-                config.qats_profile = Some(profile);
-            }
+        if let Some(qats_val) = val.get("qats").or_else(|| val.get("qats_profile"))
+            && let Ok(profile) =
+                serde_json::from_value::<lemma::engine::QatsProfile>(qats_val.clone())
+        {
+            config.qats_profile = Some(profile);
         }
     }
 
@@ -1789,8 +1998,8 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
     pipeline_cfg.attest_secret = args.attest_secret;
     pipeline_cfg.limit = args.limit;
 
-    let mut pipeline = StreamPipeline::new(classifier, questions, primary_sink)
-        .with_config(pipeline_cfg);
+    let mut pipeline =
+        StreamPipeline::new(classifier, questions, primary_sink).with_config(pipeline_cfg);
 
     if let Some(esc_target) = &args.escalate_sink {
         let esc_sink = StreamSink::from_target(esc_target)?;
@@ -1888,12 +2097,19 @@ fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
 
     match args.format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            println!("{}", ActiveLearningEngine::format_sample_json(&report, &queue_items)?);
+            println!(
+                "{}",
+                ActiveLearningEngine::format_sample_json(&report, &queue_items)?
+            );
         }
         OutputFormat::Table | OutputFormat::Pretty | OutputFormat::Compact | OutputFormat::Csv => {
             println!(
                 "{}",
-                ActiveLearningEngine::format_sample_table(&report, &queue_items, args.export_queue.as_deref())
+                ActiveLearningEngine::format_sample_table(
+                    &report,
+                    &queue_items,
+                    args.export_queue.as_deref()
+                )
             );
         }
     }
@@ -1935,7 +2151,10 @@ fn handle_active_distill(args: ActiveDistillArgs) -> Result<()> {
 
     match args.format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            println!("{}", ActiveLearningEngine::format_distill_json(&report, &samples)?);
+            println!(
+                "{}",
+                ActiveLearningEngine::format_distill_json(&report, &samples)?
+            );
         }
         OutputFormat::Table | OutputFormat::Pretty | OutputFormat::Compact | OutputFormat::Csv => {
             println!("{}", ActiveLearningEngine::format_distill_table(&report));
@@ -2083,25 +2302,27 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
         bail!("No source specified for fetch. Specify one of: --hf, --hn, --reddit, --wikipedia");
     };
 
-    if args.auto_schema {
-        if let Some((name, schema)) = schema_generated {
-            if !schema.is_empty() {
-                let schema_path = if let Some(p) = &args.schema_output {
-                    p.clone()
-                } else {
-                    let slug = name.replace('/', "_");
-                    std::path::PathBuf::from(format!("schema/{}.json", slug))
-                };
-                if let Some(parent) = schema_path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                }
-                let json = serde_json::to_string_pretty(&schema)?;
-                std::fs::write(&schema_path, json)?;
-                eprintln!("✨ Inferred question schema written to {}", schema_path.display());
-            }
+    if args.auto_schema
+        && let Some((name, schema)) = schema_generated
+        && !schema.is_empty()
+    {
+        let schema_path = if let Some(p) = &args.schema_output {
+            p.clone()
+        } else {
+            let slug = name.replace('/', "_");
+            std::path::PathBuf::from(format!("schema/{}.json", slug))
+        };
+        if let Some(parent) = schema_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
+        let json = serde_json::to_string_pretty(&schema)?;
+        std::fs::write(&schema_path, json)?;
+        eprintln!(
+            "✨ Inferred question schema written to {}",
+            schema_path.display()
+        );
     }
 
     if items.is_empty() {
@@ -2113,10 +2334,10 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
 
     let mut out_writer: Box<dyn Write> = match &args.output {
         Some(path) => {
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
             }
             Box::new(std::fs::File::create(path)?)
         }
@@ -2149,7 +2370,9 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
             table.load_preset(comfy_table::presets::UTF8_FULL);
             table.set_header(vec!["ID", "Origin", "Ground Truth", "Preview Text"]);
             for item in &items {
-                let gt_str = item.ground_truth.as_ref()
+                let gt_str = item
+                    .ground_truth
+                    .as_ref()
                     .map(|gt| serde_json::to_string(gt).unwrap_or_default())
                     .unwrap_or_else(|| "-".to_string());
                 table.add_row(vec![
@@ -2170,7 +2393,9 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
             let mut wtr = csv::Writer::from_writer(out_writer);
             wtr.write_record(["id", "source_uri", "ground_truth", "state"])?;
             for item in &items {
-                let gt_str = item.ground_truth.as_ref()
+                let gt_str = item
+                    .ground_truth
+                    .as_ref()
                     .map(|gt| serde_json::to_string(gt).unwrap_or_default())
                     .unwrap_or_default();
                 let state_str = serde_json::to_string(&item.state).unwrap_or_default();
@@ -2193,7 +2418,10 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
     let scraper = lemma::datasource::WebScraper::new(options);
     let doc = scraper.scrape(&args.url)?;
 
-    eprintln!("🌐 Scraped '{}' ({} words, SPA: {})", doc.url, doc.word_count, doc.is_likely_spa);
+    eprintln!(
+        "🌐 Scraped '{}' ({} words, SPA: {})",
+        doc.url, doc.word_count, doc.is_likely_spa
+    );
 
     let state = serde_json::json!({
         "title": doc.title,
@@ -2205,10 +2433,10 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
 
     let mut out_writer: Box<dyn Write> = match &args.output {
         Some(path) => {
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
             }
             Box::new(std::fs::File::create(path)?)
         }
@@ -2241,7 +2469,10 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
             table.add_row(vec!["URL", &doc.url]);
             table.add_row(vec!["Title", &doc.title]);
             table.add_row(vec!["Word Count", &doc.word_count.to_string()]);
-            table.add_row(vec!["SPA Shell", if doc.is_likely_spa { "true" } else { "false" }]);
+            table.add_row(vec![
+                "SPA Shell",
+                if doc.is_likely_spa { "true" } else { "false" },
+            ]);
             table.add_row(vec!["Content Preview", &item.preview_text(160)]);
             if let Err(e) = writeln!(out_writer, "{table}") {
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -2253,7 +2484,13 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
         OutputFormat::Csv => {
             let mut wtr = csv::Writer::from_writer(out_writer);
             wtr.write_record(["id", "url", "title", "words", "text"])?;
-            wtr.write_record([&item.id, &doc.url, &doc.title, &doc.word_count.to_string(), &doc.markdown])?;
+            wtr.write_record([
+                &item.id,
+                &doc.url,
+                &doc.title,
+                &doc.word_count.to_string(),
+                &doc.markdown,
+            ])?;
             wtr.flush()?;
         }
     }

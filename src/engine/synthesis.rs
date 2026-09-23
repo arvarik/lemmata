@@ -1,8 +1,8 @@
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use anyhow::{Result, bail};
 
 use crate::model::{Checkpoint, Question, QuestionType};
 
@@ -51,7 +51,10 @@ impl SchemaSynthesizer {
         let rows: Vec<BTreeMap<String, String>> = match ext.as_str() {
             "csv" => self.read_csv_rows(path)?,
             "jsonl" | "json" => self.read_json_rows(path)?,
-            _ => bail!("Unsupported data format for schema inference: {}. Use CSV or JSONL.", path.display()),
+            _ => bail!(
+                "Unsupported data format for schema inference: {}. Use CSV or JSONL.",
+                path.display()
+            ),
         };
 
         if rows.is_empty() {
@@ -81,7 +84,8 @@ impl SchemaSynthesizer {
         let mut token_budgets = BTreeMap::new();
 
         for target in &targets {
-            let (q, est_tokens) = self.synthesize_question(target, &text_column, &rows, head_budget);
+            let (q, est_tokens) =
+                self.synthesize_question(target, &text_column, &rows, head_budget);
             token_budgets.insert(target.clone(), (est_tokens, head_budget));
             questions.insert(target.clone(), q);
         }
@@ -107,7 +111,10 @@ impl SchemaSynthesizer {
             if let (Some(target_val), Some(text_val)) = (r.get(target_col), r.get(text_col)) {
                 let clean_target = target_val.trim().to_lowercase();
                 if !clean_target.is_empty() {
-                    label_texts.entry(clean_target).or_default().push(text_val.clone());
+                    label_texts
+                        .entry(clean_target)
+                        .or_default()
+                        .push(text_val.clone());
                 }
             }
         }
@@ -123,22 +130,37 @@ impl SchemaSynthesizer {
                 )
             });
             if is_bool {
-                let instructions = format!("Evaluate whether {} holds true for this input", target_col.replace('_', " "));
+                let instructions = format!(
+                    "Evaluate whether {} holds true for this input",
+                    target_col.replace('_', " ")
+                );
                 let q = Question::new_noul(instructions);
-                let est_tokens = q.render_options().iter().map(|o| o.split_whitespace().count() * 4 / 3 + 1).sum();
+                let est_tokens = q
+                    .render_options()
+                    .iter()
+                    .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                    .sum();
                 return (q, est_tokens);
             }
         }
 
         // 2. Check for ordinal rubric -> Score
-        let all_integers = !unique_labels.is_empty() && unique_labels.iter().all(|l| l.parse::<i64>().is_ok());
+        let all_integers =
+            !unique_labels.is_empty() && unique_labels.iter().all(|l| l.parse::<i64>().is_ok());
         if all_integers && unique_labels.len() <= 6 {
-            let mut int_vals: Vec<i64> = unique_labels.iter().filter_map(|l| l.parse::<i64>().ok()).collect();
+            let mut int_vals: Vec<i64> = unique_labels
+                .iter()
+                .filter_map(|l| l.parse::<i64>().ok())
+                .collect();
             int_vals.sort();
             let levels: Vec<String> = int_vals.into_iter().map(|v| format!("level {v}")).collect();
             let instructions = format!("Rate {} on ordinal rubric", target_col.replace('_', " "));
             let q = Question::new_score(instructions, levels);
-            let est_tokens = q.render_options().iter().map(|o| o.split_whitespace().count() * 4 / 3 + 1).sum();
+            let est_tokens = q
+                .render_options()
+                .iter()
+                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                .sum();
             return (q, est_tokens);
         }
 
@@ -180,11 +202,8 @@ impl SchemaSynthesizer {
             scored_words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             // Take top 4-5 distinctive keywords
-            let top_keywords: Vec<String> = scored_words
-                .into_iter()
-                .take(5)
-                .map(|(w, _)| w)
-                .collect();
+            let top_keywords: Vec<String> =
+                scored_words.into_iter().take(5).map(|(w, _)| w).collect();
 
             let desc = if top_keywords.is_empty() {
                 label.clone()
@@ -198,7 +217,10 @@ impl SchemaSynthesizer {
         // Apply knapsack token budget reduction if criteria exceed head budget
         let mut question = Question {
             qtype: QuestionType::Choice,
-            instructions: format!("Which {} best categorizes this request?", target_col.replace('_', " ")),
+            instructions: format!(
+                "Which {} best categorizes this request?",
+                target_col.replace('_', " ")
+            ),
             criteria: Some(serde_json::Value::Object(criteria_map)),
         };
 
@@ -298,7 +320,16 @@ impl SchemaSynthesizer {
     }
 
     fn detect_text_column(&self, rows: &[BTreeMap<String, String>]) -> Result<String> {
-        let candidate_names = ["text", "body", "input", "message", "description", "content", "feedback", "snippet"];
+        let candidate_names = [
+            "text",
+            "body",
+            "input",
+            "message",
+            "description",
+            "content",
+            "feedback",
+            "snippet",
+        ];
         for name in candidate_names {
             if rows.iter().any(|r| r.contains_key(name)) {
                 return Ok(name.to_string());
@@ -322,7 +353,11 @@ impl SchemaSynthesizer {
         Ok(best_col)
     }
 
-    fn detect_target_columns(&self, rows: &[BTreeMap<String, String>], text_col: &str) -> Vec<String> {
+    fn detect_target_columns(
+        &self,
+        rows: &[BTreeMap<String, String>],
+        text_col: &str,
+    ) -> Vec<String> {
         let mut targets = Vec::new();
         let total = rows.len().max(1);
 
@@ -330,14 +365,22 @@ impl SchemaSynthesizer {
         for r in rows {
             for (k, v) in r {
                 if k != text_col && !v.is_empty() {
-                    unique_vals_per_col.entry(k.clone()).or_default().insert(v.clone());
+                    unique_vals_per_col
+                        .entry(k.clone())
+                        .or_default()
+                        .insert(v.clone());
                 }
             }
         }
 
         for (col, vals) in unique_vals_per_col {
             // Target columns typically have between 2 and 20 discrete categories and are not identifier columns
-            if col != "id" && !col.ends_with("_id") && vals.len() >= 2 && vals.len() <= 20 && (total <= 10 || vals.len() <= total / 2) {
+            if col != "id"
+                && !col.ends_with("_id")
+                && vals.len() >= 2
+                && vals.len() <= 20
+                && (total <= 10 || vals.len() <= total / 2)
+            {
                 targets.push(col);
             }
         }
@@ -439,7 +482,10 @@ impl SchemaKnapsackOptimizer {
     ) -> (Option<serde_json::Value>, usize, usize) {
         let k = map.len().max(1);
         // Reserve token budget for label names and delimiters
-        let label_overhead: usize = map.keys().map(|k| k.split_whitespace().count() * 4 / 3 + 2).sum();
+        let label_overhead: usize = map
+            .keys()
+            .map(|k| k.split_whitespace().count() * 4 / 3 + 2)
+            .sum();
         let avail_budget = budget.saturating_sub(label_overhead + 8).max(k * 2);
 
         // Target token budget per option
@@ -452,7 +498,7 @@ impl SchemaKnapsackOptimizer {
             if let Some(desc) = val.as_str() {
                 // Split description into clauses by punctuation
                 let clauses: Vec<&str> = desc
-                    .split(|c| c == ',' || c == ';' || c == '.' || c == '\n')
+                    .split([',', ';', '.', '\n'])
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .collect();
@@ -525,7 +571,10 @@ impl SchemaKnapsackOptimizer {
             })
             .sum();
 
-        (Some(serde_json::Value::Object(new_map)), pruned_clauses, total_tokens)
+        (
+            Some(serde_json::Value::Object(new_map)),
+            pruned_clauses,
+            total_tokens,
+        )
     }
 }
-

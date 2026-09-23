@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use crate::datasource::DataItem;
@@ -192,11 +192,15 @@ impl<'a> DriftEngine<'a> {
             // Determine status
             let is_severe = conf_psi >= self.psi_threshold
                 || conf_wasserstein >= self.wasserstein_threshold
-                || class_prior_psi.map(|p| p >= self.psi_threshold).unwrap_or(false);
+                || class_prior_psi
+                    .map(|p| p >= self.psi_threshold)
+                    .unwrap_or(false);
 
             let is_moderate = conf_psi >= self.psi_threshold * 0.5
                 || conf_wasserstein >= self.wasserstein_threshold * 0.6
-                || class_prior_psi.map(|p| p >= self.psi_threshold * 0.5).unwrap_or(false);
+                || class_prior_psi
+                    .map(|p| p >= self.psi_threshold * 0.5)
+                    .unwrap_or(false);
 
             let status = if is_severe {
                 DriftSeverity::Severe
@@ -381,7 +385,7 @@ pub fn calculate_ks_p_value(d_stat: f64, n_a: usize, n_b: usize) -> f64 {
     }
     let mut p = 0.0;
     for k in 1..=100 {
-        let term = 2.0 * (-1.0f64).powi((k - 1) as i32) * (-2.0 * (k as f64).powi(2) * lambda.powi(2)).exp();
+        let term = 2.0 * (-1.0f64).powi(k - 1) * (-2.0 * (k as f64).powi(2) * lambda.powi(2)).exp();
         p += term;
         if term.abs() < 1e-10 {
             break;
@@ -430,14 +434,14 @@ pub fn calculate_jsd(p: &[f64], q: &[f64]) -> f64 {
     let mut kl_pm = 0.0;
     let mut kl_qm = 0.0;
 
-    for i in 0..n {
+    for (i, &mi) in m.iter().enumerate().take(n) {
         let pi = p.get(i).copied().unwrap_or(0.0);
         let qi = q.get(i).copied().unwrap_or(0.0);
         if pi > eps {
-            kl_pm += pi * (pi / (m[i] + eps)).ln();
+            kl_pm += pi * (pi / (mi + eps)).ln();
         }
         if qi > eps {
-            kl_qm += qi * (qi / (m[i] + eps)).ln();
+            kl_qm += qi * (qi / (mi + eps)).ln();
         }
     }
 

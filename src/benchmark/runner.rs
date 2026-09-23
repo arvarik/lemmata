@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use std::time::Instant;
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::datasource::DataItem;
 use crate::engine::LayaClassifier;
@@ -62,8 +62,13 @@ impl BenchmarkRunner {
         }
 
         if !self.silent {
-            println!("🚀 Preparing benchmark: {} items, {} questions, {} iterations (warmup: {})",
-                items.len(), questions.len(), iterations, self.warmup_runs);
+            println!(
+                "🚀 Preparing benchmark: {} items, {} questions, {} iterations (warmup: {})",
+                items.len(),
+                questions.len(),
+                iterations,
+                self.warmup_runs
+            );
         }
 
         // Warmup runs
@@ -137,7 +142,10 @@ impl BenchmarkRunner {
         ]);
         table.add_row(vec![
             Cell::new("Throughput (Decisions/sec)"),
-            Cell::new(format!("{:.1} decisions/s", report.throughput_questions_per_sec)),
+            Cell::new(format!(
+                "{:.1} decisions/s",
+                report.throughput_questions_per_sec
+            )),
             Cell::new("T4 baseline: 103-332 decisions/s batched"),
         ]);
         table.add_row(vec![
@@ -162,13 +170,19 @@ impl BenchmarkRunner {
         ]);
         table.add_row(vec![
             Cell::new("Latency Min / Max"),
-            Cell::new(format!("{:.2} ms / {:.2} ms", report.latency_min_ms, report.latency_max_ms)),
+            Cell::new(format!(
+                "{:.2} ms / {:.2} ms",
+                report.latency_min_ms, report.latency_max_ms
+            )),
             Cell::new(format!("Average: {:.2} ms", report.latency_avg_ms)),
         ]);
         table.add_row(vec![
             Cell::new("Total Elapsed Time"),
             Cell::new(format!("{:.3} s", report.elapsed_secs)),
-            Cell::new(format!("{} total decisions evaluated", report.total_questions)),
+            Cell::new(format!(
+                "{} total decisions evaluated",
+                report.total_questions
+            )),
         ]);
 
         println!("\n{table}\n");

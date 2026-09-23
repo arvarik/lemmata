@@ -1,10 +1,10 @@
+use anyhow::{Context, Result};
+use comfy_table::{Cell, Color, Table};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use anyhow::{Context, Result};
-use comfy_table::{Cell, Color, Table};
-use serde::{Deserialize, Serialize};
 
 use crate::datasource::DataItem;
 use crate::model::DecisionResult;
@@ -76,8 +76,8 @@ impl GuardrailPolicy {
     }
 
     pub fn from_json_str(json: &str) -> Result<Self> {
-        let policy: Self = serde_json::from_str(json)
-            .context("Failed to parse policy JSON string")?;
+        let policy: Self =
+            serde_json::from_str(json).context("Failed to parse policy JSON string")?;
         Ok(policy)
     }
 }
@@ -209,7 +209,10 @@ impl GuardrailEngine {
         for op in operators {
             if let Some(pos) = pred.find(op) {
                 let left = pred[..pos].trim();
-                let right = pred[pos + op.len()..].trim().trim_matches('"').trim_matches('\'');
+                let right = pred[pos + op.len()..]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
 
                 let (actual_str, actual_num) = self.resolve_field(left, decision);
 
@@ -277,7 +280,11 @@ impl GuardrailEngine {
     }
 
     /// Extract string or numeric value from decision result given a field selector.
-    fn resolve_field(&self, field: &str, decision: &DecisionResult) -> (Option<String>, Option<f64>) {
+    fn resolve_field(
+        &self,
+        field: &str,
+        decision: &DecisionResult,
+    ) -> (Option<String>, Option<f64>) {
         let f_lower = field.to_lowercase();
 
         // Global metrics
@@ -363,9 +370,7 @@ impl GuardrailEngine {
                     quarantine_count += 1;
                     Cell::new(rec.final_action.badge()).fg(Color::DarkYellow)
                 }
-                GuardAction::Redact => {
-                    Cell::new(rec.final_action.badge()).fg(Color::Magenta)
-                }
+                GuardAction::Redact => Cell::new(rec.final_action.badge()).fg(Color::Magenta),
             };
 
             table.add_row(vec![

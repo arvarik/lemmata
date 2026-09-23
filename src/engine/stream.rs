@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use comfy_table::{Cell, Color, Table};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::datasource::{DataItem, StreamSink, StreamingDataSource};
 use crate::engine::attest::AttestationEngine;
@@ -125,7 +125,9 @@ impl StreamPipeline {
             self.attest_engine = Some(AttestationEngine::new(&config.attest_secret));
         }
         if config.enable_cache && self.cache.is_none() {
-            self.cache = Some(Arc::new(Mutex::new(DecisionCache::new(SemanticCacheConfig::default()))));
+            self.cache = Some(Arc::new(Mutex::new(DecisionCache::new(
+                SemanticCacheConfig::default(),
+            ))));
         }
         self.config = config;
         self
@@ -164,10 +166,10 @@ impl StreamPipeline {
         let flush_timeout = Duration::from_millis(self.config.max_flush_interval_ms);
 
         while !source.is_exhausted() {
-            if let Some(limit) = self.config.limit {
-                if total_classified >= limit {
-                    break;
-                }
+            if let Some(limit) = self.config.limit
+                && total_classified >= limit
+            {
+                break;
             }
 
             let remaining_budget = if let Some(limit) = self.config.limit {
@@ -194,7 +196,8 @@ impl StreamPipeline {
             total_ingested += batch.len();
 
             // 1. Process items (leveraging DecisionCache and Rayon parallel evaluation)
-            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = if batch.len() > 1 {
+            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = if batch.len() > 1
+            {
                 // Rayon parallel map for micro-batch
                 batch
                     .par_iter()
@@ -237,23 +240,23 @@ impl StreamPipeline {
                 }
 
                 // Cryptographic Merkle chain attestation receipt
-                if let (Some(attest), Some(decision)) = (&mut self.attest_engine, &opt_decision) {
-                    if let Some(item) = batch.iter().find(|i| i.id == record.item_id) {
-                        let action = if record.escalated {
-                            GuardAction::Escalate
-                        } else {
-                            GuardAction::Allow
-                        };
-                        let receipt = attest.create_receipt(
-                            item,
-                            decision,
-                            Some("STREAM_COMPLIANCE_2026"),
-                            action,
-                            &schema_hash,
-                        )?;
-                        record.receipt_digest = Some(receipt.receipt_digest);
-                        total_attested += 1;
-                    }
+                if let (Some(attest), Some(decision)) = (&mut self.attest_engine, &opt_decision)
+                    && let Some(item) = batch.iter().find(|i| i.id == record.item_id)
+                {
+                    let action = if record.escalated {
+                        GuardAction::Escalate
+                    } else {
+                        GuardAction::Allow
+                    };
+                    let receipt = attest.create_receipt(
+                        item,
+                        decision,
+                        Some("STREAM_COMPLIANCE_2026"),
+                        action,
+                        &schema_hash,
+                    )?;
+                    record.receipt_digest = Some(receipt.receipt_digest);
+                    total_attested += 1;
                 }
 
                 let record_json = serde_json::to_string(&record)?;
@@ -274,7 +277,11 @@ impl StreamPipeline {
 
             // Flush sinks with error isolation
             let primary_flush_res = self.primary_sink.flush();
-            let esc_flush_res = self.escalate_sink.as_mut().map(|s| s.flush()).unwrap_or(Ok(()));
+            let esc_flush_res = self
+                .escalate_sink
+                .as_mut()
+                .map(|s| s.flush())
+                .unwrap_or(Ok(()));
             primary_flush_res?;
             esc_flush_res?;
 
@@ -341,27 +348,27 @@ impl StreamPipeline {
         };
 
         // Cache lookup
-        if let Some(cache_arc) = &self.cache {
-            if let Ok(mut c) = cache_arc.lock() {
-                match c.lookup(&item_text, schema_hash) {
-                    crate::engine::cache::CacheLookupResult::ExactHit(hit)
-                    | crate::engine::cache::CacheLookupResult::SemanticHit { result: hit, .. } => {
-                        let (answers, escalated, reason) = self.build_answers_from_decision(&hit);
-                        let record = StreamRecord {
-                            item_id: item.id.clone(),
-                            source_uri: item.source_uri.clone(),
-                            answers,
-                            escalated,
-                            escalation_reason: reason,
-                            latency_ms: 0.05, // Sub-millisecond cache hit
-                            receipt_digest: None,
-                            cached: true,
-                            timestamp,
-                        };
-                        return Ok((record, Some(hit)));
-                    }
-                    crate::engine::cache::CacheLookupResult::Miss => {}
+        if let Some(cache_arc) = &self.cache
+            && let Ok(mut c) = cache_arc.lock()
+        {
+            match c.lookup(&item_text, schema_hash) {
+                crate::engine::cache::CacheLookupResult::ExactHit(hit)
+                | crate::engine::cache::CacheLookupResult::SemanticHit { result: hit, .. } => {
+                    let (answers, escalated, reason) = self.build_answers_from_decision(&hit);
+                    let record = StreamRecord {
+                        item_id: item.id.clone(),
+                        source_uri: item.source_uri.clone(),
+                        answers,
+                        escalated,
+                        escalation_reason: reason,
+                        latency_ms: 0.05, // Sub-millisecond cache hit
+                        receipt_digest: None,
+                        cached: true,
+                        timestamp,
+                    };
+                    return Ok((record, Some(hit)));
                 }
+                crate::engine::cache::CacheLookupResult::Miss => {}
             }
         }
 
@@ -488,8 +495,7 @@ impl StreamPipeline {
         ]);
         table.add_row(vec![
             Cell::new("Stream Throughput"),
-            Cell::new(format!("{:.1} events/sec", metrics.throughput_qps))
-                .fg(Color::Green),
+            Cell::new(format!("{:.1} events/sec", metrics.throughput_qps)).fg(Color::Green),
         ]);
         table.add_row(vec![
             Cell::new("Average Item Latency"),
@@ -516,29 +522,46 @@ mod tests {
         let mut questions = BTreeMap::new();
         questions.insert(
             "dept".into(),
-            Question::new_choice("Route department", vec!["billing".into(), "technical".into()]),
+            Question::new_choice(
+                "Route department",
+                vec!["billing".into(), "technical".into()],
+            ),
         );
 
         let items = vec![
-            DataItem::new("e1", serde_json::json!({"text": "urgent billing invoice refund"}), "kafka"),
-            DataItem::new("e2", serde_json::json!({"text": "server crash null pointer exception"}), "kafka"),
-            DataItem::new("e3", serde_json::json!({"text": "refund invoice billing"}), "kafka"),
+            DataItem::new(
+                "e1",
+                serde_json::json!({"text": "urgent billing invoice refund"}),
+                "kafka",
+            ),
+            DataItem::new(
+                "e2",
+                serde_json::json!({"text": "server crash null pointer exception"}),
+                "kafka",
+            ),
+            DataItem::new(
+                "e3",
+                serde_json::json!({"text": "refund invoice billing"}),
+                "kafka",
+            ),
         ];
 
-        let mut source = KafkaSource::new("localhost:9092", "tickets", "test_group").with_items(items);
+        let mut source =
+            KafkaSource::new("localhost:9092", "tickets", "test_group").with_items(items);
 
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let sink = StreamSink::from_target("target/test_stream_out.jsonl").unwrap();
 
-        let mut pipeline = StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
-            batch_size: 2,
-            max_flush_interval_ms: 10,
-            escalate_threshold: 0.60,
-            enable_cache: true,
-            enable_attest: true,
-            attest_secret: "test_secret".into(),
-            limit: None,
-        });
+        let mut pipeline =
+            StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
+                batch_size: 2,
+                max_flush_interval_ms: 10,
+                escalate_threshold: 0.60,
+                enable_cache: true,
+                enable_attest: true,
+                attest_secret: "test_secret".into(),
+                limit: None,
+            });
 
         let metrics = pipeline.run(&mut source).unwrap();
         assert_eq!(metrics.total_classified, 3);

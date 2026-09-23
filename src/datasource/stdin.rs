@@ -1,5 +1,5 @@
-use std::io::{self, BufRead};
 use anyhow::Result;
+use std::io::{self, BufRead};
 
 use super::traits::{DataItem, DataSource};
 
