@@ -1,0 +1,6 @@
+id,text,target
+fb_01,"The invoice was charged to the wrong company credit card",billing
+fb_02,"Server crashed with out of memory error during database migration",technical
+fb_03,"We need custom pricing and enterprise SLA terms for 500 seats",sales
+fb_04,"Love the product keep up the good work",other
+fb_05,"Please refund the duplicate debit immediately",billing

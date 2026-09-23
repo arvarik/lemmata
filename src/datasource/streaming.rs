@@ -759,9 +759,16 @@ mod tests {
 
     #[test]
     fn test_lakehouse_columnar_projection() {
-        let source =
-            LakehouseColumnarSource::new("data/customer_support.jsonl", vec!["body".into()])
-                .unwrap();
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let path = std::path::PathBuf::from(manifest_dir).join("data/customer_support.jsonl");
+        let path_str = if path.exists() {
+            path.to_str().unwrap().to_string()
+        } else {
+            let tmp = std::env::temp_dir().join("lemma_test_support.jsonl");
+            std::fs::write(&tmp, "{\"body\":\"test message\",\"label\":\"test\"}\n").unwrap();
+            tmp.to_str().unwrap().to_string()
+        };
+        let source = LakehouseColumnarSource::new(&path_str, vec!["body".into()]).unwrap();
         assert!(!source.is_exhausted());
         assert_eq!(source.name(), "LakehouseColumnarSource");
     }
