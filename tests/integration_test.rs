@@ -789,7 +789,7 @@ fn test_calibration_tuner_fit_and_metrics() {
     }
 
     assert!(report.average_calibrated_ece < report.average_raw_ece);
-    assert!(report.overall_improvement_pct < 0.0);
+    assert!(report.overall_improvement_pct > 0.0);
 
     // Check rendered outputs
     let table = CalibrationTuner::format_table(&report, None);

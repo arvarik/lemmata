@@ -171,17 +171,25 @@ impl FileSource {
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .unwrap_or(default_id);
 
-                let gt = map.remove("ground_truth").or_else(|| map.remove("target")).and_then(|v| {
-                    if let serde_json::Value::Object(obj) = v {
-                        Some(obj.into_iter().collect::<BTreeMap<_, _>>())
-                    } else if let serde_json::Value::String(s) = v {
-                        let mut m = BTreeMap::new();
-                        m.insert("default".to_string(), serde_json::Value::String(s));
-                        Some(m)
-                    } else {
-                        None
-                    }
-                });
+                let gt = map
+                    .remove("ground_truth")
+                    .or_else(|| map.remove("target"))
+                    .or_else(|| map.remove("label"))
+                    .and_then(|v| {
+                        if let serde_json::Value::Object(obj) = v {
+                            Some(obj.into_iter().collect::<BTreeMap<_, _>>())
+                        } else if let serde_json::Value::String(s) = v {
+                            let mut m = BTreeMap::new();
+                            m.insert("default".to_string(), serde_json::Value::String(s));
+                            Some(m)
+                        } else if let serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v {
+                            let mut m = BTreeMap::new();
+                            m.insert("default".to_string(), v);
+                            Some(m)
+                        } else {
+                            None
+                        }
+                    });
 
                 // If "state" is explicitly provided as a field, use that; otherwise use the whole object
                 let state = if let Some(st) = map.remove("state") {
@@ -211,5 +219,50 @@ impl DataSource for FileSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         Self::parse_file(&self.path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_json_value_to_item_with_label_variants() {
+        // String label
+        let val_str = serde_json::json!({
+            "id": "item1",
+            "text": "sample query",
+            "label": "billing"
+        });
+        let item_str = FileSource::json_value_to_item("default".into(), val_str, "test");
+        assert_eq!(item_str.id, "item1");
+        assert_eq!(
+            item_str.ground_truth.unwrap().get("default").unwrap().as_str().unwrap(),
+            "billing"
+        );
+
+        // Numeric label
+        let val_num = serde_json::json!({
+            "id": "item2",
+            "text": "score query",
+            "label": 3
+        });
+        let item_num = FileSource::json_value_to_item("default".into(), val_num, "test");
+        assert_eq!(
+            item_num.ground_truth.unwrap().get("default").unwrap().as_u64().unwrap(),
+            3
+        );
+
+        // Boolean label
+        let val_bool = serde_json::json!({
+            "id": "item3",
+            "text": "bool query",
+            "label": true
+        });
+        let item_bool = FileSource::json_value_to_item("default".into(), val_bool, "test");
+        assert_eq!(
+            item_bool.ground_truth.unwrap().get("default").unwrap().as_bool().unwrap(),
+            true
+        );
     }
 }

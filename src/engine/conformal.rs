@@ -40,6 +40,9 @@ impl ConformalEngine {
         question: &Question,
         alpha: f64,
     ) -> Result<(ConformalReport, Vec<ConformalPredictionItem>)> {
+        if !(0.0..=1.0).contains(&alpha) || alpha.is_nan() {
+            bail!("Conformal significance level alpha must be between 0.0 and 1.0 (received: {})", alpha);
+        }
         if items.is_empty() {
             bail!("No calibration items provided for conformal prediction");
         }
@@ -60,7 +63,7 @@ impl ConformalEngine {
                 .iter()
                 .map(|(k, &v)| (k.clone(), v))
                 .collect();
-            sorted_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            sorted_probs.sort_by(|a, b| b.1.total_cmp(&a.1));
 
             let gt_label = item.ground_truth.as_ref().and_then(|gt| {
                 gt.get(qid)
@@ -70,29 +73,37 @@ impl ConformalEngine {
 
             if let Some(ref target) = gt_label {
                 let mut cum_p = 0.0;
+                let mut matched = false;
                 for (lbl, p) in &sorted_probs {
                     cum_p += p;
                     if lbl.eq_ignore_ascii_case(target) {
+                        matched = true;
                         break;
                     }
                 }
-                scores.push(cum_p);
+                if matched {
+                    scores.push(cum_p);
+                }
             }
 
             predictions_cache.push((item.id.clone(), sorted_probs, gt_label));
         }
 
         if scores.is_empty() {
-            bail!("No labeled ground-truth targets found in calibration dataset");
+            bail!("No labeled ground-truth targets found matching question options in calibration dataset");
         }
 
         // 2. Compute conformal empirical quantile
-        scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        scores.sort_by(|a, b| a.total_cmp(b));
         let n = scores.len();
-        let quantile_idx = (((n + 1) as f64 * (1.0 - alpha)).ceil() as usize)
-            .min(n)
-            .saturating_sub(1);
-        let q_hat = scores[quantile_idx];
+        let raw_rank = ((n + 1) as f64 * (1.0 - alpha)).ceil() as usize;
+        let q_hat = if raw_rank > n {
+            1.0
+        } else if raw_rank == 0 {
+            0.0
+        } else {
+            scores[raw_rank - 1]
+        };
 
         // 3. Construct prediction sets on items
         let mut conformal_items = Vec::new();
@@ -106,11 +117,13 @@ impl ConformalEngine {
             let mut set = Vec::new();
             let mut cum_p = 0.0;
 
-            for (lbl, p) in sorted_probs {
-                set.push(lbl);
-                cum_p += p;
-                if cum_p >= q_hat {
-                    break;
+            if q_hat > 0.0 {
+                for (lbl, p) in sorted_probs {
+                    set.push(lbl);
+                    cum_p += p;
+                    if cum_p >= q_hat {
+                        break;
+                    }
                 }
             }
 

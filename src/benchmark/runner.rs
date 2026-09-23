@@ -26,6 +26,7 @@ pub struct BenchmarkReport {
 pub struct BenchmarkRunner {
     classifier: LayaClassifier,
     warmup_runs: usize,
+    silent: bool,
 }
 
 impl BenchmarkRunner {
@@ -33,11 +34,17 @@ impl BenchmarkRunner {
         Self {
             classifier,
             warmup_runs: 5,
+            silent: false,
         }
     }
 
     pub fn with_warmup(mut self, warmup: usize) -> Self {
         self.warmup_runs = warmup;
+        self
+    }
+
+    pub fn with_silent(mut self, silent: bool) -> Self {
+        self.silent = silent;
         self
     }
 
@@ -54,8 +61,10 @@ impl BenchmarkRunner {
             bail!("No questions provided for benchmark");
         }
 
-        println!("🚀 Preparing benchmark: {} items, {} questions, {} iterations (warmup: {})",
-            items.len(), questions.len(), iterations, self.warmup_runs);
+        if !self.silent {
+            println!("🚀 Preparing benchmark: {} items, {} questions, {} iterations (warmup: {})",
+                items.len(), questions.len(), iterations, self.warmup_runs);
+        }
 
         // Warmup runs
         for _ in 0..self.warmup_runs {
@@ -107,7 +116,9 @@ impl BenchmarkRunner {
             latency_avg_ms: avg,
         };
 
-        Self::print_report(&report);
+        if !self.silent {
+            Self::print_report(&report);
+        }
         Ok(report)
     }
 

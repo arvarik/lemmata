@@ -129,9 +129,9 @@ impl ConsensusEngine {
                         let pred_str = if let Some(c) = &ans.choice {
                             c.clone()
                         } else if let Some(s) = ans.score {
-                            format!("{:.2}", s)
+                            format!("{:.0}", s.round())
                         } else if let Some(n) = ans.noul {
-                            format!("{:.4}", n)
+                            if n > 0.5 { "true".into() } else { "false".into() }
                         } else {
                             "N/A".into()
                         };

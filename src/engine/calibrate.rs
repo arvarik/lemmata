@@ -203,17 +203,33 @@ impl CalibrationTuner {
                         } else {
                             options.clone()
                         };
-                        let target_str = target_val.as_str().unwrap_or("");
-                        let idx = keys.iter().position(|k| k.eq_ignore_ascii_case(target_str)).unwrap_or(0);
-                        (idx, target_str.to_string())
+                        let target_str = match target_val {
+                            serde_json::Value::String(s) => s.as_str(),
+                            _ => "",
+                        };
+                        let opt_idx = keys
+                            .iter()
+                            .position(|k| k.eq_ignore_ascii_case(target_str))
+                            .or_else(|| options.iter().position(|opt| opt.eq_ignore_ascii_case(target_str)));
+                        match opt_idx {
+                            Some(idx) => (idx, target_str.to_string()),
+                            None => continue, // Skip sample if target label does not match schema options
+                        }
                     }
                     QuestionType::Score => {
-                        let score_val = target_val.as_u64().unwrap_or(0) as usize;
+                        let score_val = target_val
+                            .as_u64()
+                            .or_else(|| target_val.as_str().and_then(|s| s.parse::<u64>().ok()))
+                            .unwrap_or(0) as usize;
                         let clamped = score_val.min(raw_logits.len().saturating_sub(1));
                         (clamped, clamped.to_string())
                     }
                     QuestionType::Noul => {
-                        let b = target_val.as_bool().unwrap_or(false);
+                        let b = target_val
+                            .as_bool()
+                            .or_else(|| target_val.as_str().map(|s| s.eq_ignore_ascii_case("true") || s == "1"))
+                            .or_else(|| target_val.as_u64().map(|n| n != 0))
+                            .unwrap_or(false);
                         let idx = if b { 1 } else { 0 };
                         (idx, if b { "true".into() } else { "false".into() })
                     }
@@ -243,8 +259,14 @@ impl CalibrationTuner {
         baseline_temps.insert("choice:3-5".into(), 1.760);
         baseline_temps.insert("choice:6-10".into(), 1.000);
         baseline_temps.insert("choice:11+".into(), 0.101);
+        baseline_temps.insert("score:2".into(), 1.500);
         baseline_temps.insert("score:3-5".into(), 1.251);
+        baseline_temps.insert("score:6-10".into(), 1.000);
+        baseline_temps.insert("score:11+".into(), 0.800);
         baseline_temps.insert("noul:2".into(), 1.983);
+        baseline_temps.insert("noul:3-5".into(), 1.500);
+        baseline_temps.insert("noul:6-10".into(), 1.000);
+        baseline_temps.insert("noul:11+".into(), 0.800);
 
         let mut bucket_reports = Vec::new();
         let mut fitted_temperatures = BTreeMap::new();
@@ -269,7 +291,7 @@ impl CalibrationTuner {
             let optimal_t = (optimal_t * 1000.0).round() / 1000.0;
             let (cal_ece, cal_nll, cal_brier) = compute_bucket_metrics(samples, optimal_t, self.bins);
 
-            let ece_diff = cal_ece - raw_ece;
+            let ece_diff = raw_ece - cal_ece;
             let improvement_pct = if raw_ece > 1e-6 {
                 (ece_diff / raw_ece) * 100.0
             } else {
@@ -316,7 +338,7 @@ impl CalibrationTuner {
         };
 
         let overall_improvement = if avg_raw_ece > 1e-6 {
-            ((avg_cal_ece - avg_raw_ece) / avg_raw_ece) * 100.0
+            ((avg_raw_ece - avg_cal_ece) / avg_raw_ece) * 100.0
         } else {
             0.0
         };

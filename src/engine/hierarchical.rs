@@ -421,7 +421,10 @@ impl HierarchicalRouter {
         reason: &mut Option<String>,
     ) -> Result<()> {
         if level > 10 {
-            return Ok(()); // Guard against cycle/deep recursion
+            *escalated = true;
+            *status = "ESCALATED_DEPTH_LIMIT".to_string();
+            *reason = Some("Hierarchical traversal exceeded maximum depth limit of 10".to_string());
+            return Ok(());
         }
 
         let step_start = Instant::now();
@@ -465,6 +468,7 @@ impl HierarchicalRouter {
                     let leaf_latency = leaf_start.elapsed().as_secs_f64() * 1000.0;
                     let leaf_choice = leaf_ans.choice.clone().unwrap_or_else(|| "unknown".to_string());
                     let leaf_conf = leaf_ans.confidence;
+                    let leaf_act = leaf_ans.act_probability.unwrap_or(0.0);
 
                     steps.push(HierarchicalStep {
                         level: level + 1,
@@ -481,6 +485,15 @@ impl HierarchicalRouter {
                     *compound_confidence = ((*compound_confidence * leaf_conf) * 10000.0).round() / 10000.0;
                     *last_fine_conf = Some(leaf_conf);
                     *final_choice = leaf_choice;
+
+                    if leaf_act > self.escalate_threshold {
+                        *escalated = true;
+                        *status = "ESCALATED_AT_LEAF".to_string();
+                        *reason = Some(format!(
+                            "Leaf act probability {:.4} exceeds threshold {:.4}",
+                            leaf_act, self.escalate_threshold
+                        ));
+                    }
                 }
                 HierarchicalNode::Subtree(sub) => {
                     self.traverse_subtree(
@@ -513,9 +526,16 @@ impl HierarchicalRouter {
             return Some(node);
         }
         let clean = key.trim().to_lowercase();
+        let clean_prefix = clean.split(':').next().unwrap_or(&clean).trim();
+
         for (k, node) in branches {
             let k_clean = k.trim().to_lowercase();
-            if k_clean == clean || clean.contains(&k_clean) || k_clean.contains(&clean) {
+            let k_prefix = k_clean.split(':').next().unwrap_or(&k_clean).trim();
+            if k_clean == clean
+                || k_prefix == clean_prefix
+                || clean.starts_with(k_prefix)
+                || k_clean.starts_with(clean_prefix)
+            {
                 return Some(node);
             }
         }
@@ -538,8 +558,8 @@ impl HierarchicalRouter {
 
     /// Benchmark hierarchical routing over a test dataset.
     pub fn benchmark(&self, items: &[DataItem], iterations: usize) -> Result<HierarchicalBenchResult> {
-        if items.is_empty() {
-            anyhow::bail!("Cannot benchmark with 0 items");
+        if items.is_empty() || iterations == 0 {
+            anyhow::bail!("Cannot benchmark with 0 items or 0 iterations");
         }
 
         let total_samples = items.len() * iterations;
@@ -548,6 +568,7 @@ impl HierarchicalRouter {
         let mut total_lat = 0.0;
         let mut coarse_escalations = 0;
         let mut completions = 0;
+        let mut fine_stage_count = 0;
         let mut compound_conf_sum = 0.0;
 
         let bench_start = Instant::now();
@@ -563,6 +584,7 @@ impl HierarchicalRouter {
                 }
                 if let Some(s1) = res.steps.get(1) {
                     total_fine_lat += s1.latency_ms;
+                    fine_stage_count += 1;
                 }
 
                 if res.status == "ESCALATED_AT_COARSE" {
@@ -584,8 +606,8 @@ impl HierarchicalRouter {
             total_samples,
             iterations,
             avg_coarse_latency_ms: total_coarse_lat / total_samples as f64,
-            avg_fine_latency_ms: if completions > 0 {
-                total_fine_lat / completions as f64
+            avg_fine_latency_ms: if fine_stage_count > 0 {
+                total_fine_lat / fine_stage_count as f64
             } else {
                 0.0
             },
@@ -621,11 +643,13 @@ impl HierarchicalRouter {
                 .steps
                 .first()
                 .map(|s| format!("{}:{:.2}", s.chosen_option, s.confidence))
+                .or_else(|| r.path.first().map(|p| format!("{}:{:.2}", p, r.coarse_confidence)))
                 .unwrap_or_else(|| "-".into());
             let fine = r
                 .steps
                 .get(1)
                 .map(|s| format!("{}:{:.2}", s.chosen_option, s.confidence))
+                .or_else(|| r.path.get(1).map(|p| format!("{}:{:.2}", p, r.fine_confidence.unwrap_or(r.compound_confidence))))
                 .unwrap_or_else(|| "-".into());
 
             out.push_str(&format!(
@@ -650,9 +674,19 @@ impl HierarchicalRouter {
         for (i, r) in results.iter().enumerate() {
             let id = r.item_id.clone().unwrap_or_else(|| format!("item_{}", i));
             let clean_snip = r.input_text.replace('\"', "\"\"").replace('\n', " ");
-            let coarse_opt = r.steps.first().map(|s| s.chosen_option.as_str()).unwrap_or("");
+            let coarse_opt = r
+                .steps
+                .first()
+                .map(|s| s.chosen_option.as_str())
+                .or_else(|| r.path.first().map(|s| s.as_str()))
+                .unwrap_or("");
             let coarse_conf = r.coarse_confidence;
-            let fine_opt = r.steps.get(1).map(|s| s.chosen_option.as_str()).unwrap_or("");
+            let fine_opt = r
+                .steps
+                .get(1)
+                .map(|s| s.chosen_option.as_str())
+                .or_else(|| r.path.get(1).map(|s| s.as_str()))
+                .unwrap_or("");
             let fine_conf = r.fine_confidence.unwrap_or(0.0);
 
             out.push_str(&format!(
@@ -681,5 +715,69 @@ impl HierarchicalRouter {
             out.push('\n');
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Checkpoint, HierarchicalNode, Question};
+
+    #[test]
+    fn test_hierarchical_benchmark_zero_iterations() {
+        let schema = HierarchicalSchema {
+            coarse: Question::new_choice("Dept", vec!["billing".into()]),
+            branches: BTreeMap::new(),
+        };
+        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+        let router = HierarchicalRouter::new(schema, classifier);
+        let items = vec![DataItem::new("1", serde_json::json!({"text": "test"}), "test")];
+        assert!(router.benchmark(&items, 0).is_err());
+    }
+
+    #[test]
+    fn test_hierarchical_formatters_cache_hit_fallback() {
+        let res = HierarchicalDecisionResult {
+            item_id: Some("cached_1".into()),
+            input_text: "Need payment assistance".into(),
+            path: vec!["billing".into(), "invoices".into()],
+            formatted_path: "billing -> invoices".into(),
+            final_choice: "invoices".into(),
+            compound_confidence: 0.95,
+            coarse_confidence: 0.95,
+            fine_confidence: Some(0.95),
+            steps: vec![],
+            total_latency_ms: 0.5,
+            escalated: false,
+            status: "COMPLETED (CACHED)".into(),
+            escalation_reason: None,
+            cache_hit: true,
+        };
+
+        let table = HierarchicalRouter::format_table(&[res.clone()]);
+        assert!(table.contains("billing:0.95"));
+        assert!(table.contains("invoices:0.95"));
+
+        let csv = HierarchicalRouter::format_csv(&[res]);
+        assert!(csv.contains("\"billing\""));
+        assert!(csv.contains("\"invoices\""));
+    }
+
+    #[test]
+    fn test_hierarchical_find_branch_prefix_match() {
+        let mut branches = BTreeMap::new();
+        branches.insert(
+            "cards: card issues".into(),
+            HierarchicalNode::Leaf(Question::new_choice("Card Inquiry", vec!["lost".into()])),
+        );
+        let schema = HierarchicalSchema {
+            coarse: Question::new_choice("Dept", vec!["cards".into()]),
+            branches,
+        };
+        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+        let router = HierarchicalRouter::new(schema, classifier);
+
+        assert!(router.find_branch("cards", &router.schema.branches).is_some());
+        assert!(router.find_branch("cards: card issues", &router.schema.branches).is_some());
     }
 }

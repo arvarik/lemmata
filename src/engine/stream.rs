@@ -193,8 +193,6 @@ impl StreamPipeline {
             batches_processed += 1;
             total_ingested += batch.len();
 
-            let batch_start = Instant::now();
-
             // 1. Process items (leveraging DecisionCache and Rayon parallel evaluation)
             let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = if batch.len() > 1 {
                 // Rayon parallel map for micro-batch
@@ -206,11 +204,9 @@ impl StreamPipeline {
                 vec![self.process_single_item(&batch[0], &schema_hash)?]
             };
 
-            let batch_duration_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
-            cumulative_latency_ms += batch_duration_ms;
-
             // 2. Cryptographic Attestation & Cache Insertion on the sequential sink-emission step
             for (mut record, opt_decision) in processed_records {
+                cumulative_latency_ms += record.latency_ms;
                 if record.cached {
                     total_cached += 1;
                 }
@@ -219,14 +215,14 @@ impl StreamPipeline {
                     total_escalated += 1;
                 }
 
-                // If cache is enabled and we had a fresh decision with high confidence, insert into cache
+                // If cache is enabled and we had a fresh non-empty decision with high confidence, insert into cache
                 if let (Some(cache_arc), Some(decision)) = (&self.cache, &opt_decision) {
                     let min_conf = decision
                         .answers
                         .values()
                         .map(|a| a.confidence)
                         .fold(1.0, f64::min);
-                    if !record.cached && min_conf >= 0.70 {
+                    if !record.cached && !decision.answers.is_empty() && min_conf >= 0.70 {
                         let text_val = match &batch.iter().find(|i| i.id == record.item_id) {
                             Some(item) => match &item.state {
                                 serde_json::Value::String(s) => s.clone(),

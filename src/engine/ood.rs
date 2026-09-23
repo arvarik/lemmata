@@ -201,9 +201,9 @@ impl OodDetector {
         let dist_factor = 1.0 / (1.0 + (-(min_dist - self.profile.distance_threshold) * 2.0).exp());
         let anomaly_score = (0.5 * energy_factor + 0.5 * dist_factor).clamp(0.0, 1.0);
 
-        let is_ood = anomaly_score >= 0.60 || energy >= self.profile.energy_threshold;
+        let is_ood = anomaly_score >= 0.55 || energy >= self.profile.energy_threshold || min_dist >= self.profile.distance_threshold;
 
-        let action = if anomaly_score >= 0.80 {
+        let action = if anomaly_score >= 0.75 || min_dist >= self.profile.distance_threshold * 1.5 {
             GuardAction::Quarantine
         } else if is_ood {
             GuardAction::Escalate
@@ -243,25 +243,16 @@ impl OodDetector {
     }
 }
 
-/// Compute Helmholtz Free Energy: E(x) = -T * ln(sum exp(logit/T)).
-/// When probabilities P_k are available, this is equivalent to: -T * (ln(p_max) + logit_shift).
+/// Compute Helmholtz Free Energy surrogate: E(x) = -T * ln(p_max).
+/// For in-distribution inputs with confident predictions (p_max ~ 1.0), energy is low (~0.0).
+/// For out-of-distribution inputs with diffuse/uncertain predictions, energy is high.
 pub fn compute_free_energy(probs: &BTreeMap<String, f64>, temperature: f64) -> f64 {
     if probs.is_empty() {
         return 0.0;
     }
     let temp = temperature.max(0.01);
-    // Pseudo-logits z_k = ln(p_k + 1e-12) * temp
-    let max_log_p = probs
-        .values()
-        .map(|&p| p.max(1e-9).ln())
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    let sum_exp: f64 = probs
-        .values()
-        .map(|&p| (p.max(1e-9).ln() - max_log_p).exp())
-        .sum();
-
-    -temp * (max_log_p + sum_exp.ln())
+    let p_max = probs.values().copied().fold(0.0, f64::max).max(1e-9);
+    -temp * p_max.ln()
 }
 
 pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {

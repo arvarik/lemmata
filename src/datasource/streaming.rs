@@ -74,7 +74,7 @@ impl StreamSourceKind {
             if parts.is_empty() {
                 bail!("Invalid Kafka URI. Expected format: kafka://broker:port/topic?group_id=...");
             }
-            let broker = parts[0].to_string();
+            let broker = parts[0].split('?').next().unwrap_or(parts[0]).to_string();
             let topic_and_query = parts.get(1).unwrap_or(&"default_topic");
             let topic_parts: Vec<&str> = topic_and_query.splitn(2, '?').collect();
             let topic = topic_parts[0].to_string();
@@ -115,7 +115,8 @@ impl StreamSourceKind {
             let path_part = &trimmed[prefix_len..];
             let parts: Vec<&str> = path_part.splitn(2, '/').collect();
             let bucket = parts[0].to_string();
-            let key = parts.get(1).unwrap_or(&"").to_string();
+            let raw_key = parts.get(1).unwrap_or(&"");
+            let key = raw_key.split('?').next().unwrap_or(raw_key).to_string();
 
             return Ok(StreamSourceKind::ObjectStore {
                 provider: provider.to_string(),
@@ -595,7 +596,8 @@ impl StreamSink {
             });
         }
 
-        let path = PathBuf::from(trimmed);
+        let clean_target = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+        let path = PathBuf::from(clean_target);
         if let Some(p) = path.parent() {
             if !p.as_os_str().is_empty() {
                 std::fs::create_dir_all(p)?;

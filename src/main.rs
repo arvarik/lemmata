@@ -529,7 +529,9 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
     }
 
     let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let runner = BenchmarkRunner::new(classifier).with_warmup(args.warmup);
+    let runner = BenchmarkRunner::new(classifier)
+        .with_warmup(args.warmup)
+        .with_silent(args.json);
 
     let report = runner.run(&items, &questions, args.iterations)?;
 
@@ -1967,6 +1969,8 @@ fn handle_stats(args: StatsArgs) -> Result<()> {
 
     let questions = if args.schema.exists() {
         load_questions_from_file(&args.schema)?
+    } else if args.schema.to_string_lossy() != "schema/questions.json" {
+        bail!("Schema file not found: {}", args.schema.display());
     } else {
         create_inline_question(
             "choice",

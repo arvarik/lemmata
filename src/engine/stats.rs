@@ -232,19 +232,23 @@ impl StatsEngine {
                 let item_text = item.preview_text(250);
                 let t0 = Instant::now();
 
-                let (decision, was_cached) = if let Some(cache) = &mut opt_cache {
+                let (decision, was_cached, pure_inf_ms) = if let Some(cache) = &mut opt_cache {
                     match cache.lookup(&item_text, &schema_hash) {
-                        CacheLookupResult::ExactHit(cached_res) => (cached_res, true),
-                        CacheLookupResult::SemanticHit { result, .. } => (result, true),
+                        CacheLookupResult::ExactHit(cached_res) => (cached_res, true, None),
+                        CacheLookupResult::SemanticHit { result, .. } => (result, true, None),
                         CacheLookupResult::Miss => {
+                            let t_inf = Instant::now();
                             let res = self.classifier.classify(&item.state, questions)?;
+                            let inf_ms = t_inf.elapsed().as_secs_f64() * 1000.0;
                             cache.insert(&item_text, &schema_hash, &res);
-                            (res, false)
+                            (res, false, Some(inf_ms))
                         }
                     }
                 } else {
+                    let t_inf = Instant::now();
                     let res = self.classifier.classify(&item.state, questions)?;
-                    (res, false)
+                    let inf_ms = t_inf.elapsed().as_secs_f64() * 1000.0;
+                    (res, false, Some(inf_ms))
                 };
 
                 let elapsed_item_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -253,7 +257,7 @@ impl StatsEngine {
                 if was_cached {
                     cached_latencies_ms.push(elapsed_item_ms);
                 } else {
-                    uncached_latencies_ms.push(elapsed_item_ms);
+                    uncached_latencies_ms.push(pure_inf_ms.unwrap_or(elapsed_item_ms));
                 }
 
                 // Suppress unused decision warning
@@ -336,6 +340,7 @@ impl StatsEngine {
 
         struct QuestionAccumulator {
             sample_count: usize,
+            gt_count: usize,
             correct_count: usize,
             soft_acc_sum: f64,
             conf_sum: f64,
@@ -351,6 +356,7 @@ impl StatsEngine {
                 qid.clone(),
                 QuestionAccumulator {
                     sample_count: 0,
+                    gt_count: 0,
                     correct_count: 0,
                     soft_acc_sum: 0.0,
                     conf_sum: 0.0,
@@ -400,7 +406,7 @@ impl StatsEngine {
                     }
 
                     // Check ground truth for this question
-                    let opt_gt = gt_map.and_then(|m| m.get(qid).cloned().or_else(|| m.get("default").cloned()));
+                    let opt_gt = gt_map.and_then(|m| m.get(qid).or_else(|| m.get("default")));
 
                     if let Some(acc) = q_accumulators.get_mut(qid) {
                         acc.sample_count += 1;
@@ -413,14 +419,24 @@ impl StatsEngine {
 
                         if let Some(target_val) = opt_gt {
                             acc.has_gt = true;
+                            acc.gt_count += 1;
                             overall_evaluated += 1;
                             confidences_all.push(ans.confidence);
 
                             let (is_correct, soft_acc) = match question.qtype {
                                 QuestionType::Choice => {
                                     let pred_str = ans.choice.as_deref().unwrap_or("");
-                                    let target_str = target_val.as_str().unwrap_or("");
-                                    let correct = pred_str.eq_ignore_ascii_case(target_str);
+                                    let target_str = match target_val {
+                                        serde_json::Value::String(s) => s.as_str(),
+                                        _ => "",
+                                    };
+                                    let correct = !target_str.is_empty()
+                                        && (pred_str.eq_ignore_ascii_case(target_str)
+                                            || ans
+                                                .selected_labels
+                                                .as_ref()
+                                                .map(|v| v.iter().any(|s| s.eq_ignore_ascii_case(target_str)))
+                                                .unwrap_or(false));
                                     let soft = ans.probabilities.get(target_str).copied().unwrap_or(0.0);
 
                                     // Collect Brier score vectors
@@ -447,16 +463,19 @@ impl StatsEngine {
                                     (correct, soft)
                                 }
                                 QuestionType::Noul => {
-                                    let target_bool = target_val.as_bool().unwrap_or_else(|| {
-                                        target_val
-                                            .as_str()
-                                            .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
-                                            .unwrap_or(false)
-                                    });
+                                    let target_bool = target_val
+                                        .as_bool()
+                                        .or_else(|| target_val.as_str().map(|s| s.eq_ignore_ascii_case("true") || s == "1"))
+                                        .or_else(|| target_val.as_u64().map(|n| n != 0))
+                                        .unwrap_or(false);
                                     let pred_prob = ans.noul.unwrap_or(0.0);
                                     let pred_bool = pred_prob > 0.5;
                                     let correct = pred_bool == target_bool;
                                     let soft = if target_bool { pred_prob } else { 1.0 - pred_prob };
+
+                                    probs_all.push(vec![1.0 - pred_prob, pred_prob]);
+                                    targets_all.push(if target_bool { 1 } else { 0 });
+
                                     (correct, soft)
                                 }
                             };
@@ -484,14 +503,15 @@ impl StatsEngine {
 
             let acc = q_accumulators.get(qid).unwrap();
             let count = acc.sample_count.max(1);
+            let gt_count = acc.gt_count;
 
-            let accuracy = if acc.has_gt {
-                Some(acc.correct_count as f64 / count as f64)
+            let accuracy = if gt_count > 0 {
+                Some(acc.correct_count as f64 / gt_count as f64)
             } else {
                 None
             };
-            let soft_accuracy = if acc.has_gt {
-                Some(acc.soft_acc_sum / count as f64)
+            let soft_accuracy = if gt_count > 0 {
+                Some(acc.soft_acc_sum / gt_count as f64)
             } else {
                 None
             };
