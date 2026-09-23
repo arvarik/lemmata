@@ -3,7 +3,9 @@ use comfy_table::{Cell, Color, Table};
 use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
-use super::metrics::{EvaluationMetrics, calculate_brier_score, calculate_ece};
+use super::metrics::{
+    EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
+};
 use crate::datasource::DataItem;
 use crate::model::{Question, QuestionType};
 
@@ -49,7 +51,16 @@ impl Evaluator {
             let result = self.classifier.classify(&item.state, questions)?;
 
             for (qid, answer) in &result.answers {
-                let target_val = match gt_map.get(qid).or_else(|| gt_map.get("default")) {
+                let question = match questions.get(qid) {
+                    Some(q) => q,
+                    None => continue,
+                };
+                let target_val = match resolve_ground_truth_for_question(
+                    Some(gt_map),
+                    qid,
+                    question,
+                    questions.len(),
+                ) {
                     Some(v) => v,
                     None => continue,
                 };

@@ -42,7 +42,9 @@ pub use guardrail::{AuditRecord, GuardAction, GuardrailEngine, GuardrailPolicy, 
 pub use hierarchical::{
     HierarchicalBenchResult, HierarchicalDecisionResult, HierarchicalRouter, HierarchicalStep,
 };
-pub use metrics::{EvaluationMetrics, calculate_brier_score, calculate_ece};
+pub use metrics::{
+    EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
+};
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
 pub use stats::{
     AccuracyStats, CacheStatsSummary, PerformanceStats, QuestionStats, SpeedStats, StatsEngine,

@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::model::{Question, QuestionType};
 
 /// Comprehensive statistical metrics for evaluating Laya System 1 decision models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +94,76 @@ pub fn calculate_brier_score(probabilities: &[Vec<f64>], targets: &[usize]) -> f
     sum_squared_errors / probabilities.len() as f64
 }
 
+/// Resolves the ground-truth value for a specific question from the item's ground-truth map.
+/// If an exact key exists (e.g. "department"), it is returned.
+/// If only a "default" key exists (e.g. from a single-column CSV "target"):
+/// - In a 1-question schema, it is used directly.
+/// - In a multi-question schema, it is only matched to a question whose schema type and options
+///   are compatible with the value, avoiding false zero-accuracy or spurious evaluations on unrelated questions.
+pub fn resolve_ground_truth_for_question<'a>(
+    gt_map: Option<&'a BTreeMap<String, serde_json::Value>>,
+    qid: &str,
+    question: &Question,
+    total_questions: usize,
+) -> Option<&'a serde_json::Value> {
+    let map = gt_map?;
+    if let Some(val) = map.get(qid).or_else(|| map.get(&qid.to_ascii_lowercase())) {
+        return Some(val);
+    }
+    let default_val = map.get("default")?;
+    if total_questions == 1 {
+        return Some(default_val);
+    }
+    match question.qtype {
+        QuestionType::Choice => {
+            let target_str = match default_val {
+                serde_json::Value::String(s) => s.as_str(),
+                _ => return None,
+            };
+            let options = question.render_options();
+            let matches_option = options.iter().any(|opt| {
+                let opt_key = opt.split(':').next().unwrap_or(opt).trim();
+                opt_key.eq_ignore_ascii_case(target_str) || opt.eq_ignore_ascii_case(target_str)
+            });
+            if matches_option {
+                Some(default_val)
+            } else {
+                None
+            }
+        }
+        QuestionType::Score => {
+            if default_val.is_number() {
+                Some(default_val)
+            } else if let Some(s) = default_val.as_str() {
+                if s.parse::<f64>().is_ok() {
+                    Some(default_val)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        QuestionType::Noul => {
+            if default_val.is_boolean() {
+                Some(default_val)
+            } else if let Some(s) = default_val.as_str() {
+                if s.eq_ignore_ascii_case("true")
+                    || s.eq_ignore_ascii_case("false")
+                    || s == "1"
+                    || s == "0"
+                {
+                    Some(default_val)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +182,33 @@ mod tests {
         let targets = vec![0, 1];
         let brier = calculate_brier_score(&probs, &targets);
         assert_eq!(brier, 0.0);
+    }
+
+    #[test]
+    fn test_resolve_ground_truth_for_question() {
+        let q_choice = Question::new_choice(
+            "Department",
+            vec!["billing".to_string(), "tech".to_string()],
+        );
+        let q_score = Question::new_score("Urgency", vec!["low".to_string(), "high".to_string()]);
+
+        let mut gt = BTreeMap::new();
+        gt.insert("default".to_string(), serde_json::json!("billing"));
+
+        // Multi-question schema: "billing" matches dept, but NOT urgency
+        assert_eq!(
+            resolve_ground_truth_for_question(Some(&gt), "dept", &q_choice, 2),
+            Some(&serde_json::json!("billing"))
+        );
+        assert_eq!(
+            resolve_ground_truth_for_question(Some(&gt), "urgency", &q_score, 2),
+            None
+        );
+
+        // Single-question schema: fallback matches directly
+        assert_eq!(
+            resolve_ground_truth_for_question(Some(&gt), "dept", &q_choice, 1),
+            Some(&serde_json::json!("billing"))
+        );
     }
 }
