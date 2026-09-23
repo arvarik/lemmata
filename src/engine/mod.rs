@@ -14,6 +14,7 @@ pub mod guardrail;
 pub mod hierarchical;
 pub mod metrics;
 pub mod ood;
+pub mod stats;
 pub mod stream;
 pub mod synthesis;
 
@@ -41,6 +42,10 @@ pub use hierarchical::{
 };
 pub use metrics::{EvaluationMetrics, calculate_brier_score, calculate_ece};
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
+pub use stats::{
+    AccuracyStats, CacheStatsSummary, PerformanceStats, QuestionStats, SpeedStats, StatsEngine,
+    StatsEngineConfig, SystemStatsReport, UncertaintyStats,
+};
 pub use stream::{StreamMetrics, StreamPipeline, StreamPipelineConfig, StreamRecord};
 pub use synthesis::{InferredSchemaResult, SchemaKnapsackOptimizer, SchemaOptimizationResult, SchemaSynthesizer};
 

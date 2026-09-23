@@ -77,6 +77,9 @@ pub enum Commands {
 
     /// Active learning uncertainty sampling, supervisor review queue, and RLCD contrastive distillation
     Active(ActiveArgs),
+
+    /// Comprehensive system speed, throughput performance, and classification accuracy statistics
+    Stats(StatsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -1132,6 +1135,69 @@ pub struct ActiveStatsArgs {
     /// Output report format (table, json, compact)
     #[arg(long, default_value = "table")]
     pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct StatsArgs {
+    /// Directory to ingest data from (default: data)
+    #[arg(long, default_value = "data")]
+    pub data_dir: PathBuf,
+
+    /// Specific file to evaluate (JSON, JSONL, CSV)
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+
+    /// Read inputs from standard input (stdin)
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Inline text string to classify and evaluate
+    #[arg(short, long)]
+    pub text: Option<String>,
+
+    /// Path to question schema JSON file
+    #[arg(short, long, default_value = "schema/questions.json")]
+    pub schema: PathBuf,
+
+    /// Checkpoint to evaluate: english, multilingual, or typed-decisions
+    #[arg(short, long, default_value = "english")]
+    pub checkpoint: String,
+
+    /// Number of benchmark passes for timing stability (default: 3)
+    #[arg(short, long, default_value_t = 3)]
+    pub iterations: usize,
+
+    /// Number of warmup passes before recording timing metrics (default: 2)
+    #[arg(short, long, default_value_t = 2)]
+    pub warmup: usize,
+
+    /// Enable semantic decision cache to evaluate caching speedup and hit rates
+    #[arg(long)]
+    pub cache: bool,
+
+    /// Similarity threshold for semantic cache match (default: 0.92)
+    #[arg(long, default_value_t = 0.92)]
+    pub similarity_threshold: f32,
+
+    /// Supervisor escalation probability threshold (default: 0.50)
+    #[arg(long, default_value_t = 0.50)]
+    pub escalate_threshold: f64,
+
+    /// Comma-separated file extensions to ingest from directory
+    #[arg(long)]
+    pub extensions: Option<String>,
+
+    /// Do not recursively traverse subdirectories
+    #[arg(long)]
+    pub no_recursive: bool,
+
+    /// Output report format: table, json, compact, or csv
+    #[arg(long, default_value = "table")]
+    pub format: OutputFormat,
+
+    /// Export statistics report to output file (JSON or CSV)
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

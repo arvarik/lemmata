@@ -413,6 +413,44 @@ lemma active stats \
   --data data/customer_support.jsonl \
   --schema schema/questions.json \
   --format table
+### 25. Unified Speed, Performance & Accuracy Diagnostics (`lemma stats`)
+Evaluates end-to-end system telemetry across three unified pillars: **Speed & Latency Distributions**, **Throughput & Cache Efficiency**, and **Decision Accuracy & Calibration Quality**:
+
+```bash
+# 1. Full diagnostic report across speed, throughput, and accuracy with ANSI table format
+lemma stats \
+  --file data/customer_support.jsonl \
+  --schema schema/questions.json \
+  --format table
+
+# 2. Measure semantic cache hit rates and sub-millisecond retrieval speedup across 5 iterations
+lemma stats \
+  --file data/customer_support.jsonl \
+  --schema schema/questions.json \
+  --cache \
+  --iterations 5 \
+  --format table
+
+# 3. Compact single-line summary for CI/CD assertions and deployment health checks
+lemma stats \
+  --file data/customer_support.jsonl \
+  --schema schema/questions.json \
+  --format compact
+# Output:
+# ⚡ SPEED: 0.13ms p50 (p95: 0.15ms, avg: 0.13ms) | 🚀 PERF: 7,404.0 items/s (22,211.9 dec/s, 18.1% head) | 🎯 ACC: 72.2% (Soft: 57.6%, ECE: 0.441, Brier: 0.167) | 🛡️ RISK: 83.3% escalate (conf: 36.1%)
+
+# 4. Profile raw inline text or unstructured streams
+lemma stats \
+  --text "Please cancel my subscription and refund invoice #4411" \
+  --schema schema/questions.json \
+  --format compact
+
+# 5. Export comprehensive telemetry to JSON or CSV for analytics pipelines
+lemma stats \
+  --file data/customer_support.jsonl \
+  --schema schema/questions.json \
+  --output target/system_stats_report.json \
+  --format json
 ```
 
 ---
@@ -451,6 +489,9 @@ Custom connectors (Kafka, S3, Snowflake, Iceberg) can easily implement this trai
 
 4. **Active Learning & Distillation Pipeline (`lemma active`, `lemma cascade`)**  
    Harvests high-entropy items flagged by Laya's internal Act/Escalate head into human-in-the-loop review queues and synthesizes contrastive datasets for continuous RLCD fine-tuning.
+
+5. **Unified System Diagnostics & Stats Engine (`lemma stats`)**  
+   Measures sub-millisecond percentile latencies (P50/P90/P95/P99), ingestion/decision throughput, cache hit rate speedups, head token budget utilization, top-1 & soft accuracy, ECE, Brier score, and per-question breakdowns.
 
 ---
 

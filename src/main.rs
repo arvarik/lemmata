@@ -11,14 +11,14 @@ use lemma::cli::{
     CascadeCommands, Cli, Commands, ConformalArgs, ConsensusArgs, DownloadArgs, DriftArgs,
     ExplainArgs, ExperimentArgs, ExperimentMode, GuardArgs, HierarchicalCommands, InfoArgs,
     InspectArgs, OodArgs, OodCommands, OutputFormat, SchemaArgs, SchemaCommands, SchemaInferArgs,
-    SchemaOptimizeArgs, SchemaValidateArgs, StreamArgs, TestArgs,
+    SchemaOptimizeArgs, SchemaValidateArgs, StatsArgs, StreamArgs, TestArgs,
 };
 use lemma::engine::{
     ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner,
     CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine, DecisionCache,
     DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy,
     HierarchicalRouter, LayaClassifier, OodDetector, OodProfile, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, SemanticCacheConfig, StreamPipeline, StreamPipelineConfig,
+    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
     UncertaintyStrategy,
 };
 use lemma::datasource::{DataSource, StreamSink};
@@ -53,6 +53,7 @@ fn main() -> Result<()> {
         Commands::Calibrate(args) => handle_calibrate(args),
         Commands::Stream(args) => handle_stream(args),
         Commands::Active(args) => handle_active(args),
+        Commands::Stats(args) => handle_stats(args),
     }
 }
 
@@ -1961,6 +1962,68 @@ fn handle_active_stats(args: ActiveStatsArgs) -> Result<()> {
     Ok(())
 }
 
+fn handle_stats(args: StatsArgs) -> Result<()> {
+    let checkpoint = Checkpoint::from_str(&args.checkpoint).map_err(|e| anyhow::anyhow!(e))?;
 
+    let questions = if args.schema.exists() {
+        load_questions_from_file(&args.schema)?
+    } else {
+        create_inline_question(
+            "choice",
+            "Classify topic and sentiment",
+            "billing,technical,sales,other",
+        )?
+    };
 
+    let source = resolve_data_source_filtered(
+        &args.data_dir,
+        args.file.as_deref(),
+        args.stdin,
+        args.text.as_deref(),
+        args.extensions.as_deref(),
+        args.no_recursive,
+    )?;
 
+    let items = source.read_items()?;
+    if items.is_empty() {
+        eprintln!("⚠️  No data items found for stats evaluation.");
+        return Ok(());
+    }
+
+    let config = ClassifierConfig {
+        checkpoint,
+        escalate_threshold: args.escalate_threshold,
+        ..Default::default()
+    };
+    let classifier = LayaClassifier::new(config);
+
+    let stats_engine = StatsEngine::new(classifier)
+        .with_iterations(args.iterations)
+        .with_warmup(args.warmup)
+        .with_cache(args.cache, args.similarity_threshold)
+        .with_escalate_threshold(args.escalate_threshold);
+
+    let report = stats_engine.evaluate(&items, &questions)?;
+
+    if let Some(dest) = &args.output {
+        StatsEngine::export_report(&report, dest)?;
+        println!("💾 Statistics report exported to: {}", dest.display());
+    }
+
+    match args.format {
+        OutputFormat::Table | OutputFormat::Pretty => {
+            println!("{}", StatsEngine::format_table(&report));
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!("{}", StatsEngine::format_json(&report)?);
+        }
+        OutputFormat::Compact => {
+            println!("{}", StatsEngine::format_compact(&report));
+        }
+        OutputFormat::Csv => {
+            print!("{}", StatsEngine::format_csv(&report));
+        }
+    }
+
+    Ok(())
+}
