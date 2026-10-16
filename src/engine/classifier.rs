@@ -90,6 +90,12 @@ impl ClassifierConfig {
         }
         cfg
     }
+
+    pub fn with_temperature(mut self, temp: f64) -> Self {
+        self.temperature = temp.max(0.01);
+        self.temperature_by_options.clear();
+        self
+    }
 }
 
 impl Default for ClassifierConfig {
@@ -129,6 +135,11 @@ impl LayaClassifier {
 
     pub fn with_auto_best() -> Self {
         Self::with_checkpoint(Checkpoint::AutoRoute)
+    }
+
+    pub fn with_temperature(mut self, temp: f64) -> Self {
+        self.config = self.config.with_temperature(temp);
+        self
     }
 
     pub fn with_hypothesis_template(mut self, tpl: impl Into<String>) -> Self {
@@ -215,32 +226,11 @@ impl LayaClassifier {
         // Estimate token counts and enforce checkpoint context window limits
         let state_tokens = estimate_tokens(&state_text);
         let ctx_window = active_ckpt.context_window();
-        let chunks = if self.config.chunk_strategy == crate::model::ChunkStrategy::TruncatePrefix {
-            let single = if state_tokens > ctx_window {
-                let max_words = (ctx_window * 3 / 4).max(1);
-                let mut word_count = 0usize;
-                let mut in_ws = true;
-                let mut cut_idx = state_text.len().min(ctx_window * 4);
-                for (idx, ch) in state_text.char_indices() {
-                    if ch.is_whitespace() {
-                        in_ws = true;
-                    } else if in_ws {
-                        in_ws = false;
-                        word_count += 1;
-                        if word_count > max_words {
-                            cut_idx = idx;
-                            break;
-                        }
-                    }
-                }
-                std::borrow::Cow::Borrowed(&state_text[..cut_idx])
-            } else {
-                std::borrow::Cow::Borrowed(state_text.as_str())
-            };
-            vec![single]
-        } else {
-            crate::model::chunk_text_for_window(&state_text, ctx_window, self.config.chunk_strategy)
-        };
+        let chunks = crate::model::chunk_text_for_window(
+            &state_text,
+            ctx_window,
+            self.config.chunk_strategy,
+        );
         let mut total_tokens = 0;
         let mut answers = BTreeMap::new();
 
@@ -293,15 +283,18 @@ impl LayaClassifier {
 
             // Compute raw logits for the options (pooling across chunks if SlidingWindow)
             let eval_logits = if chunks.len() <= 1 {
-                self.compute_option_logits(
+                self.compute_option_logits_for_checkpoint(
                     chunks.first().map(|c| c.as_ref()).unwrap_or(&state_text),
                     q,
                     eval_options,
+                    active_ckpt,
                 )
             } else {
                 let win_logits: Vec<Vec<f64>> = chunks
                     .iter()
-                    .map(|c| self.compute_option_logits(c, q, eval_options))
+                    .map(|c| {
+                        self.compute_option_logits_for_checkpoint(c, q, eval_options, active_ckpt)
+                    })
                     .collect();
                 crate::model::pool_window_logits(&win_logits)
             };
@@ -322,21 +315,31 @@ impl LayaClassifier {
                 QuestionType::Score => 1,
                 QuestionType::Noul => 2,
             };
-            let fallback_temp = if (self.config.temperature - 1.0).abs() > 1e-6 {
+            let has_explicit_temp = (self.config.temperature - 1.0).abs() > 1e-6;
+            let fallback_temp = if has_explicit_temp {
                 self.config.temperature
             } else {
                 active_ckpt.default_temperatures()[qtype_idx]
             };
             let mut temp = if self.config.checkpoint == Checkpoint::AutoRoute
                 && active_ckpt == Checkpoint::Multilingual
+                && !has_explicit_temp
             {
                 active_ckpt.default_temperatures()[qtype_idx]
-            } else {
-                self.config
-                    .temperature_by_options
+            } else if let Some(&bucket_temp) = self.config.temperature_by_options.get(&temp_key) {
+                let is_default_bucket = self
+                    .config
+                    .checkpoint
+                    .default_temperature_by_options()
                     .get(&temp_key)
-                    .copied()
-                    .unwrap_or(fallback_temp)
+                    .is_some_and(|&def_t| (bucket_temp - def_t).abs() <= 1e-6);
+                if has_explicit_temp && is_default_bucket {
+                    self.config.temperature
+                } else {
+                    bucket_temp
+                }
+            } else {
+                fallback_temp
             };
 
             // 2026 Q-ATS: Adaptive temperature scaling under covariate shift
@@ -578,6 +581,31 @@ impl LayaClassifier {
         q: &Question,
         options: &[String],
     ) -> Vec<f64> {
+        let active_ckpt = if self.config.checkpoint == Checkpoint::AutoRoute {
+            let mut qmap = BTreeMap::new();
+            qmap.insert("q".to_string(), q.clone());
+            self.resolve_checkpoint_for_questions(state_text, &qmap).0
+        } else {
+            self.config.checkpoint
+        };
+        self.compute_option_logits_for_checkpoint(state_text, q, options, active_ckpt)
+    }
+
+    /// Score option logits against an explicitly resolved `active_ckpt`.
+    pub fn compute_option_logits_for_checkpoint(
+        &self,
+        state_text: &str,
+        q: &Question,
+        options: &[String],
+        active_ckpt: Checkpoint,
+    ) -> Vec<f64> {
+        let active_ckpt = if active_ckpt == Checkpoint::AutoRoute {
+            let mut qmap = BTreeMap::new();
+            qmap.insert("q".to_string(), q.clone());
+            crate::model::route_auto_best(state_text, &qmap).selected
+        } else {
+            active_ckpt
+        };
         let full_lower = state_text.to_lowercase();
         let state_lower: &str = if let Some(idx) = full_lower.find("--- [end of preamble") {
             &full_lower[idx..]
@@ -586,7 +614,6 @@ impl LayaClassifier {
         };
         let ins_lower = q.instructions.to_lowercase();
         let (_script_ckpt, script_reason) = Checkpoint::detect_script_route(state_text);
-        let (active_ckpt, _) = self.resolve_checkpoint(state_text);
 
         if q.qtype == QuestionType::Noul && options.len() == 2 {
             return self.compute_noul_logits(
@@ -1220,15 +1247,19 @@ impl LayaClassifier {
                 }
             }
 
-            if self.config.hypothesis_template.is_some() || q.hypothesis_template.is_some() {
-                score += crate::model::score_head_paradigm_adjustment(
-                    active_ckpt,
-                    state_lower,
-                    q,
-                    &opt_lower,
-                    self.config.hypothesis_template.as_deref(),
-                ) * 2.0;
-            }
+            let head_scale =
+                if self.config.hypothesis_template.is_some() || q.hypothesis_template.is_some() {
+                    2.0
+                } else {
+                    1.0
+                };
+            score += crate::model::score_head_paradigm_adjustment(
+                active_ckpt,
+                state_lower,
+                q,
+                &opt_lower,
+                self.config.hypothesis_template.as_deref(),
+            ) * head_scale;
 
             // Fallback base logit to prevent zeros
             score += 0.1;

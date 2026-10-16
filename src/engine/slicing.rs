@@ -197,6 +197,27 @@ pub fn compute_arena_slice_matrix(
     checkpoints: &[Checkpoint],
     mode: &SliceBy,
 ) -> Result<(Vec<String>, Vec<ArenaSliceRow>)> {
+    compute_arena_slice_matrix_with_options(
+        items,
+        questions,
+        checkpoints,
+        mode,
+        crate::model::ChunkStrategy::default(),
+        None,
+        0,
+    )
+}
+
+/// Compute a Checkpoint × Slice accuracy matrix with configurable chunking strategy, hypothesis template, and bi-encoder shortlisting.
+pub fn compute_arena_slice_matrix_with_options(
+    items: &[DataItem],
+    questions: &BTreeMap<String, Question>,
+    checkpoints: &[Checkpoint],
+    mode: &SliceBy,
+    chunk_strategy: crate::model::ChunkStrategy,
+    hypothesis_template: Option<&str>,
+    shortlist_k: usize,
+) -> Result<(Vec<String>, Vec<ArenaSliceRow>)> {
     if items.is_empty() {
         bail!("No items provided for arena slice matrix");
     }
@@ -216,16 +237,23 @@ pub fn compute_arena_slice_matrix(
     let mut rows = Vec::with_capacity(checkpoints.len());
 
     for &ckpt in checkpoints {
-        let overall_accuracy = Evaluator::new(LayaClassifier::with_checkpoint(ckpt))
+        let make_cls = || {
+            let mut c = LayaClassifier::with_checkpoint(ckpt)
+                .with_chunk_strategy(chunk_strategy)
+                .with_shortlist_k(shortlist_k);
+            if let Some(tpl) = hypothesis_template {
+                c = c.with_hypothesis_template(tpl);
+            }
+            c
+        };
+        let overall_accuracy = Evaluator::new(make_cls())
             .evaluate(items, questions)
             .map(|m| m.accuracy)
             .unwrap_or(0.0);
 
         let mut slice_accuracies = BTreeMap::new();
         for (slice, slice_items) in &grouped {
-            if let Ok(m) = Evaluator::new(LayaClassifier::with_checkpoint(ckpt))
-                .evaluate(slice_items, questions)
-            {
+            if let Ok(m) = Evaluator::new(make_cls()).evaluate(slice_items, questions) {
                 slice_accuracies.insert(slice.clone(), m.accuracy);
             }
         }

@@ -136,17 +136,15 @@ impl Downloader {
         checkpoint: Checkpoint,
         target_dir: &Path,
     ) -> Result<VerificationReport> {
+        if target_dir == Path::new("models/laya") {
+            let ckpt_dir = checkpoint.local_dir();
+            return self.verify(&ckpt_dir);
+        }
         let sub = checkpoint.local_subdir();
-        if !sub.is_empty() {
+        if !sub.is_empty() && !target_dir.ends_with(sub) {
             let candidate = target_dir.join(sub);
             if candidate.exists() {
                 return self.verify(&candidate);
-            }
-        }
-        if target_dir == Path::new("models/laya") {
-            let ckpt_dir = checkpoint.local_dir();
-            if ckpt_dir != target_dir && ckpt_dir.exists() {
-                return self.verify(&ckpt_dir);
             }
         }
         self.verify(target_dir)
@@ -154,7 +152,8 @@ impl Downloader {
 
     /// Verify that essential model files (Laya or standard Hugging Face Safetensors layout) are present.
     pub fn verify(&self, target_dir: &Path) -> Result<VerificationReport> {
-        let resolved_dir = if !target_dir.join("rl_agent_config.json").exists()
+        let resolved_dir = if target_dir.exists()
+            && !target_dir.join("rl_agent_config.json").exists()
             && !target_dir.join("config.json").exists()
         {
             ["multilingual", "typed-decisions"]
