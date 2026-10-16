@@ -311,6 +311,10 @@ pub struct CompareArgs {
     #[arg(long, default_value_t = 5)]
     pub top_disagreements: usize,
 
+    /// Disaggregate accuracy by diagnostic slice (auto, prefix, script, length, or field:<name>)
+    #[arg(long)]
+    pub slice_by: Option<String>,
+
     /// Output arena report as JSON
     #[arg(long)]
     pub json: bool,
@@ -377,6 +381,10 @@ pub struct TestArgs {
     /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
     #[arg(long)]
     pub hypothesis_template: Option<String>,
+
+    /// Disaggregate evaluation metrics by diagnostic slice (auto, prefix, script, length, or field:<name>)
+    #[arg(long)]
+    pub slice_by: Option<String>,
 }
 
 #[derive(Args, Debug)]

@@ -646,10 +646,38 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
 
     let report =
         ExperimentRunner::run_arena(&items, &questions, &checkpoints, args.top_disagreements)?;
+    let slice_matrix = if let Some(slice_str) = &args.slice_by {
+        let mode = slice_str
+            .parse::<lemma::engine::SliceBy>()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Some(lemma::engine::compute_arena_slice_matrix(
+            &items,
+            &questions,
+            &checkpoints,
+            &mode,
+        )?)
+    } else {
+        None
+    };
+
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        if let Some((slices, rows)) = &slice_matrix {
+            let mut val = serde_json::to_value(&report)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "slice_matrix".into(),
+                    serde_json::json!({ "slices": slices, "rows": rows }),
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
     } else {
         ExperimentRunner::print_arena_report(&report);
+        if let Some((slices, rows)) = &slice_matrix {
+            lemma::engine::print_arena_slice_matrix(slices, rows);
+        }
     }
     Ok(())
 }
@@ -683,6 +711,19 @@ fn handle_test(args: TestArgs) -> Result<()> {
     if let Some(t) = args.temperature {
         cfg.temperature = t;
     }
+    let slice_entries = if let Some(slice_str) = &args.slice_by {
+        let mode = slice_str
+            .parse::<lemma::engine::SliceBy>()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Some(lemma::engine::evaluate_slices(
+            &LayaClassifier::new(cfg.clone()),
+            &items,
+            &questions,
+            &mode,
+        )?)
+    } else {
+        None
+    };
     let evaluator = Evaluator::new(LayaClassifier::new(cfg));
 
     log_status(
@@ -717,10 +758,15 @@ fn handle_test(args: TestArgs) -> Result<()> {
     };
 
     if args.json {
-        if let Some(diff) = &baseline_diff {
+        if baseline_diff.is_some() || slice_entries.is_some() {
             let mut val = serde_json::to_value(&metrics)?;
             if let Some(obj) = val.as_object_mut() {
-                obj.insert("baseline_diff".into(), serde_json::to_value(diff)?);
+                if let Some(diff) = &baseline_diff {
+                    obj.insert("baseline_diff".into(), serde_json::to_value(diff)?);
+                }
+                if let Some(slices) = &slice_entries {
+                    obj.insert("slices".into(), serde_json::to_value(slices)?);
+                }
             }
             println!("{}", serde_json::to_string_pretty(&val)?);
         } else {
@@ -728,6 +774,9 @@ fn handle_test(args: TestArgs) -> Result<()> {
         }
     } else {
         Evaluator::print_report(&metrics);
+        if let Some(slices) = &slice_entries {
+            lemma::engine::print_slice_report(slices);
+        }
         if let Some(diff) = &baseline_diff {
             Evaluator::print_baseline_diff(diff);
         }
