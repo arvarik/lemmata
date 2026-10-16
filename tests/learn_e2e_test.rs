@@ -3,8 +3,9 @@ use std::str::FromStr;
 
 use lemma::engine::learn::{
     CurriculumPhase, build_all_quiz_questions, build_glossary, build_phase_lesson,
-    build_workflow_recipes, print_curriculum_overview, print_glossary, print_phase_lesson,
-    print_workflow_guide, run_interactive_session_with_reader, run_quiz_non_interactive,
+    build_reading_list, build_workflow_recipes, print_curriculum_overview, print_glossary,
+    print_phase_lesson, print_reading_list, print_workflow_guide,
+    run_interactive_session_with_reader, run_quiz_non_interactive,
 };
 
 #[test]
@@ -110,16 +111,26 @@ fn test_build_all_five_phase_lessons_and_live_labs() {
         assert!(!lesson.mental_model.is_empty());
         assert!(!lesson.ascii_diagram.is_empty());
         assert!(lesson.core_concepts.len() >= 3);
+        assert!(
+            lesson.deep_intuitions.len() >= 2,
+            "Phase {} should include at least 2 deep pedagogical intuitions",
+            lesson.phase
+        );
+        assert!(
+            lesson.further_reading.len() >= 3,
+            "Phase {} should include at least 3 curated reading resources",
+            lesson.phase
+        );
         assert!(!lesson.under_the_hood_math.is_empty());
         assert!(!lesson.live_lab.title.is_empty());
         assert!(!lesson.live_lab.explanation.is_empty());
         assert!(
-            lesson.live_lab.metrics_summary.len() >= 4,
-            "Phase {} live lab should compute at least 4 runtime metrics",
+            lesson.live_lab.metrics_summary.len() >= 5,
+            "Phase {} live lab should compute at least 5 runtime metrics",
             lesson.phase
         );
         assert!(lesson.live_lab.try_command.starts_with("lemma "));
-        assert_eq!(lesson.quiz.len(), 2);
+        assert_eq!(lesson.quiz.len(), 3);
         for q in &lesson.quiz {
             assert_eq!(q.phase, phase.number());
             assert_eq!(q.options.len(), 4);
@@ -129,7 +140,30 @@ fn test_build_all_five_phase_lessons_and_live_labs() {
         assert!(!lesson.next_step_commands.is_empty());
     }
 
-    // Verify Phase 3 HeadTail vs TruncatePrefix live lab captures the tail security alert
+    // Verify Phase 1 Contrastive Attribution Top Driver metric
+    let p1 = build_phase_lesson(CurriculumPhase::Phase1Foundations);
+    assert!(
+        p1.live_lab
+            .metrics_summary
+            .iter()
+            .any(|(k, _)| k == "Contrastive Attribution Top Driver")
+    );
+
+    // Verify Phase 2 Minimal-Pair Counterfactual Flip metric
+    let p2 = build_phase_lesson(CurriculumPhase::Phase2HeadParadigms);
+    let cf_metric = p2
+        .live_lab
+        .metrics_summary
+        .iter()
+        .find(|(k, _)| k == "Minimal-Pair Counterfactual Flip")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    assert!(
+        cf_metric.contains("technical") && cf_metric.contains("billing"),
+        "Counterfactual flip should demonstrate technical vs billing flip, got: {cf_metric}"
+    );
+
+    // Verify Phase 3 HeadTail vs TruncatePrefix live lab captures the tail security alert + Knapsack compression
     let p3 = build_phase_lesson(CurriculumPhase::Phase3ScalingContextAndTaxonomies);
     let ht_metric = p3
         .live_lab
@@ -141,6 +175,29 @@ fn test_build_all_five_phase_lessons_and_live_labs() {
     assert!(
         ht_metric.contains("pred=security"),
         "HeadTail live lab should recover the tail security alert, got: {ht_metric}"
+    );
+    assert!(
+        p3.live_lab
+            .metrics_summary
+            .iter()
+            .any(|(k, _)| k == "Knapsack Schema Compression")
+    );
+
+    // Verify Phase 4 Free-Energy Translation Proof (ID vs OOD)
+    let p4 = build_phase_lesson(CurriculumPhase::Phase4CalibrationAndUncertainty);
+    assert!(
+        p4.live_lab
+            .metrics_summary
+            .iter()
+            .any(|(k, _)| k == "Free-Energy Translation Proof (ID vs OOD)")
+    );
+
+    // Verify Phase 5 Cascade Unit Economics (80% Sys1 Retention)
+    let p5 = build_phase_lesson(CurriculumPhase::Phase5ProductionCascadingAndOps);
+    assert!(
+        p5.live_lab.metrics_summary.iter().any(|(k, v)| k
+            == "Cascade Unit Economics (80% Sys1 Retention)"
+            && v.contains("$1,016"))
     );
 }
 
@@ -174,12 +231,21 @@ fn test_glossary_and_workflow_recipes_and_quizzes() {
     );
 
     let quizzes = build_all_quiz_questions();
-    assert_eq!(quizzes.len(), 10);
+    assert_eq!(quizzes.len(), 15);
+
+    let reading = build_reading_list(None);
+    assert!(reading.len() >= 18);
+    for p in 1..=5 {
+        let p_reading = build_reading_list(Some(p));
+        assert!(p_reading.len() >= 3);
+    }
 
     // Smoke-test terminal printing helpers
     print_curriculum_overview();
     print_phase_lesson(CurriculumPhase::Phase1Foundations);
     print_glossary(Some("conformal"));
+    print_reading_list(None);
+    print_reading_list(Some(1));
     print_workflow_guide(Some("calibration"));
     run_quiz_non_interactive(Some(2));
 }
@@ -197,14 +263,14 @@ fn test_interactive_session_handles_eof_and_graded_answers() {
     assert_eq!(correct_eof, 0);
     assert_eq!(attempted_eof, 0);
 
-    // 2. Simulated quiz_only session for Phase 5 (answers: option 2, option 2)
-    let mut simulated_input = Cursor::new(b"2\n2\n" as &[u8]);
+    // 2. Simulated quiz_only session for Phase 5 (answers: option 2, option 2, option 2)
+    let mut simulated_input = Cursor::new(b"2\n2\n2\n" as &[u8]);
     let (correct, attempted) = run_interactive_session_with_reader(
         &mut simulated_input,
         Some(CurriculumPhase::Phase5ProductionCascadingAndOps),
         true,
     )
     .expect("Quiz session should succeed");
-    assert_eq!(attempted, 2);
-    assert_eq!(correct, 2);
+    assert_eq!(attempted, 3);
+    assert_eq!(correct, 3);
 }
