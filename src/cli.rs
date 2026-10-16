@@ -252,6 +252,10 @@ pub struct ClassifyArgs {
     /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
     #[arg(long)]
     pub hypothesis_template: Option<String>,
+
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
 }
 
 #[derive(Args, Debug)]
@@ -385,6 +389,10 @@ pub struct TestArgs {
     /// Disaggregate evaluation metrics by diagnostic slice (auto, prefix, script, length, or field:<name>)
     #[arg(long)]
     pub slice_by: Option<String>,
+
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
 }
 
 #[derive(Args, Debug)]
