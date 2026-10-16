@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::process::Command;
 
 use super::traits::{DataItem, DataSource};
+use super::web::curl_fetch;
 use crate::model::schema::Question;
 
 /// Hugging Face Datasets Server API response data structures
@@ -310,28 +311,13 @@ impl HuggingFaceSource {
             dataset_id, self.config, self.split, offset, length
         );
 
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sSL",
-            "--max-time",
-            "20",
-            "-H",
-            "Accept: application/json",
-            &url,
-        ]);
-        if let Some(token) = &self.token {
-            cmd.args(["-H", &format!("Authorization: Bearer {}", token)]);
+        let auth = self.token.as_ref().map(|t| format!("Bearer {}", t));
+        let mut headers = vec![("Accept", "application/json")];
+        if let Some(a) = &auth {
+            headers.push(("Authorization", a.as_str()));
         }
 
-        let output = cmd
-            .output()
-            .context("Failed to execute curl request to HF Datasets Server")?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            bail!("HF Datasets Server request failed: {}", err);
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = curl_fetch(&url, &headers, 20)?;
         let resp: HfRowsResponse = serde_json::from_str(&stdout)
             .with_context(|| format!("Failed to parse HF response JSON: {}", stdout))?;
         Ok(resp)
@@ -509,24 +495,21 @@ impl DataSource for HackerNewsSource {
         };
 
         let list_url = format!("https://hacker-news.firebaseio.com/v0/{}.json", feed_name);
-        let output = Command::new("curl")
-            .args(["-sSL", "--max-time", "10", &list_url])
-            .output()
-            .context("Failed to query Hacker News story list")?;
+        let list_body =
+            curl_fetch(&list_url, &[], 10).context("Failed to query Hacker News story list")?;
+        let ids: Vec<u64> = serde_json::from_str(&list_body).unwrap_or_default();
+        let target_ids: Vec<u64> = ids.into_iter().take(self.limit).collect();
 
-        let ids: Vec<u64> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let items: Vec<DataItem> = target_ids
+            .into_par_iter()
+            .filter_map(|id| {
+                let item_url = format!("https://hacker-news.firebaseio.com/v0/item/{}.json", id);
+                let body = curl_fetch(&item_url, &[], 5).ok()?;
+                let val: serde_json::Value = serde_json::from_str(&body).ok()?;
+                if val.is_null() {
+                    return None;
+                }
 
-        let mut items = Vec::new();
-        for id in ids.into_iter().take(self.limit) {
-            let item_url = format!("https://hacker-news.firebaseio.com/v0/item/{}.json", id);
-            let item_output = Command::new("curl")
-                .args(["-sSL", "--max-time", "5", &item_url])
-                .output();
-
-            if let Ok(out) = item_output
-                && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-                && !val.is_null()
-            {
                 let title = val
                     .get("title")
                     .and_then(|t| t.as_str())
@@ -543,13 +526,13 @@ impl DataSource for HackerNewsSource {
                     "type": val.get("type").and_then(|t| t.as_str()).unwrap_or("story"),
                 });
 
-                items.push(DataItem::new(
+                Some(DataItem::new(
                     format!("hn:{}", id),
                     state,
                     format!("hn:{}", self.category),
-                ));
-            }
-        }
+                ))
+            })
+            .collect();
 
         Ok(items)
     }
@@ -567,6 +550,31 @@ impl WikipediaSource {
             article_or_random: article,
             count,
         }
+    }
+
+    fn parse_summary(
+        val: &serde_json::Value,
+        fallback_title: Option<&str>,
+        uri_suffix: Option<&str>,
+    ) -> Option<DataItem> {
+        let title_str = val
+            .get("title")
+            .and_then(|t| t.as_str())
+            .or(fallback_title)?;
+        let page_id = val
+            .get("pageid")
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| title_str.to_string());
+        let state = serde_json::json!({
+            "title": title_str,
+            "text": val.get("extract").and_then(|e| e.as_str()).unwrap_or_default(),
+            "description": val.get("description").and_then(|d| d.as_str()).unwrap_or_default(),
+        });
+        Some(DataItem::new(
+            format!("wiki:{}", page_id),
+            state,
+            format!("wiki:{}", uri_suffix.unwrap_or(title_str)),
+        ))
     }
 }
 
@@ -590,85 +598,32 @@ impl DataSource for WikipediaSource {
             }
         }
 
-        let user_agent = "LemmaBot/0.1 (https://github.com/arvarik/lemma; pair@lemma.ai)";
-        let mut items = Vec::new();
+        let headers = [(
+            "User-Agent",
+            "LemmaBot/0.1 (https://github.com/arvarik/lemma; pair@lemma.ai)",
+        )];
 
         if let Some(title) = &self.article_or_random {
             let enc = title.replace(' ', "_");
             let url = format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", enc);
-            let output = Command::new("curl")
-                .args(["-sSL", "--max-time", "10", "-A", user_agent, &url])
-                .output()
+            let body = curl_fetch(&url, &headers, 10)
                 .context("Failed to fetch Wikipedia article summary")?;
-
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                let page_id = val
-                    .get("pageid")
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| title.clone());
-                let title_str = val.get("title").and_then(|t| t.as_str()).unwrap_or(title);
-                let extract = val
-                    .get("extract")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or_default();
-                let desc = val
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or_default();
-
-                let state = serde_json::json!({
-                    "title": title_str,
-                    "text": extract,
-                    "description": desc,
-                });
-
-                items.push(DataItem::new(
-                    format!("wiki:{}", page_id),
-                    state,
-                    format!("wiki:{}", enc),
-                ));
-            }
+            let val: serde_json::Value = serde_json::from_str(&body)?;
+            Ok(Self::parse_summary(&val, Some(title), Some(&enc))
+                .into_iter()
+                .collect())
         } else {
-            // Random summaries
-            for _ in 0..self.count {
-                let url = "https://en.wikipedia.org/api/rest_v1/page/random/summary";
-                let output = Command::new("curl")
-                    .args(["-sSL", "--max-time", "10", "-A", user_agent, url])
-                    .output();
-
-                if let Ok(out) = output
-                    && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-                    && let Some(title) = val.get("title").and_then(|t| t.as_str())
-                {
-                    let page_id = val
-                        .get("pageid")
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| title.to_string());
-                    let extract = val
-                        .get("extract")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or_default();
-                    let desc = val
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or_default();
-
-                    let state = serde_json::json!({
-                        "title": title,
-                        "text": extract,
-                        "description": desc,
-                    });
-
-                    items.push(DataItem::new(
-                        format!("wiki:{}", page_id),
-                        state,
-                        format!("wiki:{}", title),
-                    ));
-                }
-            }
+            let url = "https://en.wikipedia.org/api/rest_v1/page/random/summary";
+            let items: Vec<DataItem> = (0..self.count)
+                .into_par_iter()
+                .filter_map(|_| {
+                    let body = curl_fetch(url, &headers, 10).ok()?;
+                    let val: serde_json::Value = serde_json::from_str(&body).ok()?;
+                    Self::parse_summary(&val, None, None)
+                })
+                .collect();
+            Ok(items)
         }
-
-        Ok(items)
     }
 }
 
@@ -700,12 +655,9 @@ impl DataSource for RedditSource {
             self.subreddit, self.limit
         );
 
-        let output = Command::new("curl")
-            .args(["-sSL", "--max-time", "10", "-A", ua, &url])
-            .output()
+        let body = curl_fetch(&url, &[("User-Agent", ua)], 10)
             .context("Failed to query Reddit JSON API")?;
-
-        let val: serde_json::Value = serde_json::from_slice(&output.stdout)
+        let val: serde_json::Value = serde_json::from_str(&body)
             .context("Failed to parse Reddit response as JSON (may be rate-limited or blocked)")?;
 
         if let Some(err) = val.get("error").or_else(|| val.get("message")) {
