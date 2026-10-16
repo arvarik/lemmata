@@ -315,7 +315,7 @@ pub struct CompareArgs {
     #[arg(long, default_value_t = 5)]
     pub top_disagreements: usize,
 
-    /// Disaggregate accuracy by diagnostic slice (auto, prefix, script, length, or field:<name>)
+    /// Disaggregate accuracy by diagnostic slice (auto, prefix, script, length, or `field:<name>`)
     #[arg(long)]
     pub slice_by: Option<String>,
 
@@ -386,7 +386,7 @@ pub struct TestArgs {
     #[arg(long)]
     pub hypothesis_template: Option<String>,
 
-    /// Disaggregate evaluation metrics by diagnostic slice (auto, prefix, script, length, or field:<name>)
+    /// Disaggregate evaluation metrics by diagnostic slice (auto, prefix, script, length, or `field:<name>`)
     #[arg(long)]
     pub slice_by: Option<String>,
 
