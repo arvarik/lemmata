@@ -1136,6 +1136,10 @@ pub struct CalibrateArgs {
     #[arg(short = 'e', long, alias = "output", visible_alias = "export")]
     pub export_config: Option<PathBuf>,
 
+    /// Persist calibrated profile directly into <checkpoint_local_dir>/lemma_calibration.json for auto-loading
+    #[arg(long)]
+    pub persist_to_model: bool,
+
     /// Enable 2026 Quantile-Adaptive Temperature Scaling (Q-ATS) under covariate shift
     #[arg(long)]
     pub adaptive: bool,
