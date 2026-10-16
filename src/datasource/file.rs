@@ -232,10 +232,9 @@ impl FileSource {
                         .or_else(|| key_lower.strip_prefix("label:"))
                         .or_else(|| key_lower.strip_prefix("target_"))
                         .or_else(|| key_lower.strip_prefix("target:"))
+                        && let Some(val) = map.remove(&key)
                     {
-                        if let Some(val) = map.remove(&key) {
-                            prefixed_gt.insert(qid.to_string(), val);
-                        }
+                        prefixed_gt.insert(qid.to_string(), val);
                     }
                 }
 

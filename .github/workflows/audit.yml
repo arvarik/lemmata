@@ -12,6 +12,10 @@ on:
     paths:
       - 'Cargo.lock'
       - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   audit:
