@@ -39,13 +39,14 @@ impl std::str::FromStr for CalibrationLoss {
     }
 }
 
+use comfy_table::Table;
+
 /// A single validation instance used for temperature optimization.
 #[derive(Debug, Clone)]
 pub struct ValidationSample {
     pub raw_logits: Vec<f64>,
     pub target_index: usize,
     pub target_label: String,
-    pub feature_vector: Vec<f64>,
 }
 
 /// Detailed calibration outcome for a single question bucket (e.g. choice:3-5).
@@ -75,6 +76,16 @@ pub struct QatsProfile {
     pub class_centroids: BTreeMap<String, Vec<f64>>,
 }
 
+/// Per-question calibration summary row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QuestionCalibrationSummary {
+    pub question_id: String,
+    pub bucket_key: String,
+    pub optimal_temperature: f64,
+    pub ece_before: f64,
+    pub ece_after: f64,
+}
+
 /// Overall calibration run report across all buckets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationReport {
@@ -88,6 +99,20 @@ pub struct CalibrationReport {
     pub tuning_duration_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qats_profile: Option<QatsProfile>,
+    #[serde(default)]
+    pub uncalibrated_ece: f64,
+    #[serde(default)]
+    pub calibrated_ece: f64,
+    #[serde(default)]
+    pub ece_reduction_pct: f64,
+    #[serde(default)]
+    pub uncalibrated_brier: f64,
+    #[serde(default)]
+    pub calibrated_brier: f64,
+    #[serde(default)]
+    pub global_temperature: f64,
+    #[serde(default)]
+    pub per_question: Vec<QuestionCalibrationSummary>,
 }
 
 /// Calibration metadata serialized into rl_agent_config.json.
@@ -166,37 +191,33 @@ impl CalibrationTuner {
         let start_time = Instant::now();
         let classifier = LayaClassifier::with_checkpoint(self.checkpoint);
 
-        // 1. Group validation instances into calibration buckets
         let mut bucket_samples: BTreeMap<String, Vec<ValidationSample>> = BTreeMap::new();
         let mut class_features: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
+        let mut item_features: Vec<Vec<f64>> = Vec::new();
         let mut total_samples_collected = 0;
 
         for item in items {
-            let gt_map = match &item.ground_truth {
-                Some(gt) => gt,
-                None => continue, // Skip unlabeled items
+            let Some(gt_map) = &item.ground_truth else {
+                continue;
             };
-
             let state_text = match &item.state {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other)?,
             };
-
-            let feat_vec = vectorize_text(&state_text);
+            let feat_vec = self.enable_qats.then(|| vectorize_text(&state_text));
+            if let Some(ref fv) = feat_vec {
+                item_features.push(fv.clone());
+            }
 
             for (qid, q) in questions {
-                let target_val = match gt_map.get(qid).or_else(|| gt_map.get("default")) {
-                    Some(v) => v,
-                    None => continue,
+                let Some(target_val) = gt_map.get(qid).or_else(|| gt_map.get("default")) else {
+                    continue;
                 };
-
                 let options = q.render_options();
                 let k = options.len().max(2);
                 let bucket_key = classifier.get_temperature_bucket(q.qtype, k);
-
                 let raw_logits = classifier.compute_option_logits(&state_text, q, &options);
 
-                // Determine target index and label
                 let (target_idx, target_label) = match q.qtype {
                     QuestionType::Choice => {
                         let keys: Vec<String> =
@@ -204,15 +225,12 @@ impl CalibrationTuner {
                                 map.keys().cloned().collect()
                             } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
                                 arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .filter_map(|v| v.as_str().map(str::to_string))
                                     .collect()
                             } else {
                                 options.clone()
                             };
-                        let target_str = match target_val {
-                            serde_json::Value::String(s) => s.as_str(),
-                            _ => "",
-                        };
+                        let target_str = target_val.as_str().unwrap_or("");
                         let opt_idx = keys
                             .iter()
                             .position(|k| k.eq_ignore_ascii_case(target_str))
@@ -223,7 +241,7 @@ impl CalibrationTuner {
                             });
                         match opt_idx {
                             Some(idx) => (idx, target_str.to_string()),
-                            None => continue, // Skip sample if target label does not match schema options
+                            None => continue,
                         }
                     }
                     QuestionType::Score => {
@@ -244,16 +262,17 @@ impl CalibrationTuner {
                             })
                             .or_else(|| target_val.as_u64().map(|n| n != 0))
                             .unwrap_or(false);
-                        let idx = if b { 1 } else { 0 };
-                        (idx, if b { "true".into() } else { "false".into() })
+                        (usize::from(b), if b { "true" } else { "false" }.into())
                     }
                 };
 
-                if self.enable_qats && !target_label.is_empty() {
+                if let Some(ref fv) = feat_vec
+                    && !target_label.is_empty()
+                {
                     class_features
-                        .entry(target_label.clone())
+                        .entry(format!("{qid}:{target_label}"))
                         .or_default()
-                        .push(feat_vec.clone());
+                        .push(fv.clone());
                 }
 
                 bucket_samples
@@ -263,7 +282,6 @@ impl CalibrationTuner {
                         raw_logits,
                         target_index: target_idx,
                         target_label,
-                        feature_vector: feat_vec.clone(),
                     });
                 total_samples_collected += 1;
             }
@@ -275,54 +293,103 @@ impl CalibrationTuner {
             );
         }
 
-        // 2. Standard Laya baseline bucket templates
-        let mut baseline_temps: BTreeMap<String, f64> = BTreeMap::new();
-        baseline_temps.insert("choice:2".into(), 1.906);
-        baseline_temps.insert("choice:3-5".into(), 1.760);
-        baseline_temps.insert("choice:6-10".into(), 1.000);
-        baseline_temps.insert("choice:11+".into(), 0.101);
-        baseline_temps.insert("score:2".into(), 1.500);
-        baseline_temps.insert("score:3-5".into(), 1.251);
-        baseline_temps.insert("score:6-10".into(), 1.000);
-        baseline_temps.insert("score:11+".into(), 0.800);
-        baseline_temps.insert("noul:2".into(), 1.983);
-        baseline_temps.insert("noul:3-5".into(), 1.500);
-        baseline_temps.insert("noul:6-10".into(), 1.000);
-        baseline_temps.insert("noul:11+".into(), 0.800);
+        let baseline_temps: BTreeMap<String, f64> = [
+            ("choice:2", 1.906),
+            ("choice:3-5", 1.760),
+            ("choice:6-10", 1.000),
+            ("choice:11+", 0.101),
+            ("score:2", 1.500),
+            ("score:3-5", 1.251),
+            ("score:6-10", 1.000),
+            ("score:11+", 0.800),
+            ("noul:2", 1.983),
+            ("noul:3-5", 1.500),
+            ("noul:6-10", 1.000),
+            ("noul:11+", 0.800),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
 
         let mut bucket_reports = Vec::new();
         let mut fitted_temperatures = BTreeMap::new();
 
-        // 3. Optimize temperature T* per bucket
         for (bucket_name, samples) in &bucket_samples {
             let (raw_ece, raw_nll, raw_brier) = compute_bucket_metrics(samples, 1.0, self.bins);
 
-            let (optimal_t, _best_loss, iterations) = if samples.len() >= 2 {
-                golden_section_search(
+            let (optimal_t, iterations) = if samples.len() >= 2 {
+                // Evaluate log-spaced grid in [0.05, 5.0] to handle non-smooth ECE step plateaus
+                let grid_n = 40usize;
+                let ln_min = 0.05f64.ln();
+                let ln_max = 5.0f64.ln();
+                let mut grid: Vec<f64> = (0..grid_n)
+                    .map(|i| (ln_min + (ln_max - ln_min) * (i as f64 / (grid_n - 1) as f64)).exp())
+                    .collect();
+                grid.push(1.0);
+                grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                let mut best_grid_idx = 0;
+                let mut best_grid_loss = f64::INFINITY;
+                for (i, &t) in grid.iter().enumerate() {
+                    let l = compute_bucket_loss(samples, t, self.loss, self.bins);
+                    if l < best_grid_loss {
+                        best_grid_loss = l;
+                        best_grid_idx = i;
+                    }
+                }
+                let lo = grid[best_grid_idx.saturating_sub(1)];
+                let hi = grid[(best_grid_idx + 1).min(grid.len() - 1)];
+                let (gss_t, _, iters) = golden_section_search(
                     |t| compute_bucket_loss(samples, t, self.loss, self.bins),
-                    0.05,
-                    10.0,
+                    lo,
+                    hi,
                     1e-4,
                     30,
-                )
+                );
+                let (full_gss_t, _, _) = golden_section_search(
+                    |t| compute_bucket_loss(samples, t, self.loss, self.bins),
+                    0.05,
+                    5.0,
+                    1e-4,
+                    30,
+                );
+                grid.push(gss_t);
+                grid.push(full_gss_t);
+
+                // Select candidate minimizing target loss without degrading raw ECE
+                let mut best_t = 1.0;
+                let mut best_tuple = (
+                    compute_bucket_loss(samples, 1.0, self.loss, self.bins),
+                    raw_ece,
+                );
+                for cand in grid {
+                    let t_round = (cand * 1000.0).round() / 1000.0;
+                    let (c_ece, _, _) = compute_bucket_metrics(samples, t_round, self.bins);
+                    if c_ece <= raw_ece + 1e-9 {
+                        let c_loss = compute_bucket_loss(samples, t_round, self.loss, self.bins);
+                        if c_loss < best_tuple.0 - 1e-9
+                            || ((c_loss - best_tuple.0).abs() <= 1e-9 && c_ece < best_tuple.1)
+                        {
+                            best_tuple = (c_loss, c_ece);
+                            best_t = t_round;
+                        }
+                    }
+                }
+                (best_t, iters)
             } else {
                 let fallback = baseline_temps.get(bucket_name).copied().unwrap_or(1.0);
-                (fallback, raw_nll, 0)
+                ((fallback * 1000.0).round() / 1000.0, 0)
             };
 
-            let optimal_t = (optimal_t * 1000.0).round() / 1000.0;
             let (cal_ece, cal_nll, cal_brier) =
                 compute_bucket_metrics(samples, optimal_t, self.bins);
-
-            let ece_diff = raw_ece - cal_ece;
             let improvement_pct = if raw_ece > 1e-6 {
-                (ece_diff / raw_ece) * 100.0
+                ((raw_ece - cal_ece) / raw_ece) * 100.0
             } else {
                 0.0
             };
 
             fitted_temperatures.insert(bucket_name.clone(), optimal_t);
-
             bucket_reports.push(BucketCalibrationReport {
                 bucket: bucket_name.clone(),
                 sample_count: samples.len(),
@@ -339,34 +406,27 @@ impl CalibrationTuner {
             });
         }
 
-        // Fill in missing standard buckets from defaults if not in validation set
         for (std_b, &def_t) in &baseline_temps {
-            if !fitted_temperatures.contains_key(std_b) {
-                fitted_temperatures.insert(std_b.clone(), def_t);
-            }
+            fitted_temperatures.entry(std_b.clone()).or_insert(def_t);
         }
 
-        // 4. Calculate macro-averaged ECE and overall improvement
         let total_b = bucket_reports.len() as f64;
         let avg_raw_ece = if total_b > 0.0 {
             bucket_reports.iter().map(|b| b.raw_ece).sum::<f64>() / total_b
         } else {
             0.0
         };
-
         let avg_cal_ece = if total_b > 0.0 {
             bucket_reports.iter().map(|b| b.calibrated_ece).sum::<f64>() / total_b
         } else {
             0.0
         };
-
         let overall_improvement = if avg_raw_ece > 1e-6 {
             ((avg_raw_ece - avg_cal_ece) / avg_raw_ece) * 100.0
         } else {
             0.0
         };
 
-        // 5. Fit Q-ATS profile if requested
         let qats_profile = if self.enable_qats && !class_features.is_empty() {
             let mut centroids = BTreeMap::new();
             for (cls, feats) in &class_features {
@@ -387,25 +447,17 @@ impl CalibrationTuner {
                 centroids.insert(cls.clone(), mean);
             }
 
-            // Compute distance statistics to nearest centroids
-            let mut distances = Vec::new();
-            for item in items {
-                let state_text = match &item.state {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
-                let feat = vectorize_text(&state_text);
-                let mut min_d = f64::INFINITY;
-                for centroid in centroids.values() {
-                    let d = euclidean_distance(&feat, centroid);
-                    if d < min_d {
-                        min_d = d;
-                    }
-                }
-                if min_d.is_finite() {
-                    distances.push(min_d);
-                }
-            }
+            let distances: Vec<f64> = item_features
+                .iter()
+                .filter_map(|feat| {
+                    centroids
+                        .values()
+                        .map(|c| euclidean_distance(feat, c))
+                        .fold(f64::INFINITY, f64::min)
+                        .into()
+                })
+                .filter(|d: &f64| d.is_finite())
+                .collect();
 
             let n_dist = distances.len() as f64;
             let mean_d = if n_dist > 0.0 {
@@ -431,6 +483,35 @@ impl CalibrationTuner {
         };
 
         let tuning_duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+        let avg_raw_brier = if total_b > 0.0 {
+            bucket_reports.iter().map(|b| b.raw_brier).sum::<f64>() / total_b
+        } else {
+            0.0
+        };
+        let avg_cal_brier = if total_b > 0.0 {
+            bucket_reports
+                .iter()
+                .map(|b| b.calibrated_brier)
+                .sum::<f64>()
+                / total_b
+        } else {
+            0.0
+        };
+        let per_question: Vec<QuestionCalibrationSummary> = questions
+            .iter()
+            .map(|(qid, q)| {
+                let bkey =
+                    classifier.get_temperature_bucket(q.qtype, q.render_options().len().max(2));
+                let brep = bucket_reports.iter().find(|b| b.bucket == bkey);
+                QuestionCalibrationSummary {
+                    question_id: qid.clone(),
+                    bucket_key: bkey.clone(),
+                    optimal_temperature: fitted_temperatures.get(&bkey).copied().unwrap_or(1.0),
+                    ece_before: brep.map_or(avg_raw_ece, |b| b.raw_ece),
+                    ece_after: brep.map_or(avg_cal_ece, |b| b.calibrated_ece),
+                }
+            })
+            .collect();
 
         let report = CalibrationReport {
             dataset_name: dataset_name.to_string(),
@@ -442,6 +523,13 @@ impl CalibrationTuner {
             overall_improvement_pct: overall_improvement,
             tuning_duration_ms,
             qats_profile: qats_profile.clone(),
+            uncalibrated_ece: avg_raw_ece,
+            calibrated_ece: avg_cal_ece,
+            ece_reduction_pct: overall_improvement,
+            uncalibrated_brier: avg_raw_brier,
+            calibrated_brier: avg_cal_brier,
+            global_temperature: 1.0,
+            per_question,
         };
 
         let config = CalibratedAgentConfig {
@@ -455,7 +543,7 @@ impl CalibrationTuner {
                 raw_mean_ece: avg_raw_ece,
                 calibrated_mean_ece: avg_cal_ece,
                 improvement_pct: overall_improvement,
-                calibrated_at: "2026-09-22T20:00:00Z".to_string(),
+                calibrated_at: crate::engine::metrics::format_utc_iso8601(),
             },
             qats: qats_profile,
         };
@@ -465,84 +553,55 @@ impl CalibrationTuner {
 
     /// Format calibration report as a readable ASCII table.
     pub fn format_table(report: &CalibrationReport, export_path: Option<&Path>) -> String {
-        let mut out = String::new();
-
-        out.push_str("\n🌡️  Lemma Temperature Calibration Tuner\n");
-        out.push_str(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-        );
-        out.push_str(&format!(
-            "Dataset:       {} ({} samples)\n",
-            report.dataset_name, report.total_samples
-        ));
-        out.push_str(&format!("Loss Function: {:?} Loss\n", report.loss_function));
-        out.push_str(&format!(
-            "Optimization:  Golden-Section / Brent Convergence ({:.1}ms)\n\n",
-            report.tuning_duration_ms
-        ));
-
-        out.push_str(&format!(
-            "{:<12} | {:<7} | {:<8} | {:<16} | {:<14} | {:<11}\n",
-            "Bucket", "Samples", "Raw ECE", "Fitted Temp (T*)", "Calibrated ECE", "Improvement"
-        ));
-        out.push_str(&format!(
-            "{:-<12}-+-{:-<7}-+-{:-<8}-+-{:-<16}-+-{:-<14}-+-{:-<11}\n",
-            "", "", "", "", "", ""
-        ));
-
-        for b in &report.buckets {
-            out.push_str(&format!(
-                "{:<12} | {:<7} | {:<8.4} | {:<16.3} | {:<14.4} | {:>+9.1}%\n",
-                b.bucket,
-                b.sample_count,
-                b.raw_ece,
-                b.optimal_temperature,
-                b.calibrated_ece,
-                b.ece_improvement_pct
-            ));
-        }
-
-        out.push_str(&format!(
-            "{:-<12}-+-{:-<7}-+-{:-<8}-+-{:-<16}-+-{:-<14}-+-{:-<11}\n",
-            "", "", "", "", "", ""
-        ));
-        out.push_str(&format!(
-            "{:<12} | {:<7} | {:<8.4} | {:<16} | {:<14.4} | {:>+9.1}%\n",
-            "Average",
+        let mut out = format!(
+            "\n🌡️  Lemma Temperature Calibration Tuner\nDataset:       {} ({} samples)\nLoss Function: {:?} Loss ({:.1}ms)\n\n",
+            report.dataset_name,
             report.total_samples,
-            report.average_raw_ece,
-            "-",
-            report.average_calibrated_ece,
-            report.overall_improvement_pct
-        ));
+            report.loss_function,
+            report.tuning_duration_ms
+        );
+
+        let mut table = Table::new();
+        table.set_header(vec![
+            "Bucket",
+            "Samples",
+            "Raw ECE",
+            "Fitted Temp (T*)",
+            "Calibrated ECE",
+            "Improvement",
+        ]);
+        for b in &report.buckets {
+            table.add_row(vec![
+                b.bucket.clone(),
+                b.sample_count.to_string(),
+                format!("{:.4}", b.raw_ece),
+                format!("{:.3}", b.optimal_temperature),
+                format!("{:.4}", b.calibrated_ece),
+                format!("{:+.1}%", b.ece_improvement_pct),
+            ]);
+        }
+        table.add_row(vec![
+            "Average".to_string(),
+            report.total_samples.to_string(),
+            format!("{:.4}", report.average_raw_ece),
+            "-".to_string(),
+            format!("{:.4}", report.average_calibrated_ece),
+            format!("{:+.1}%", report.overall_improvement_pct),
+        ]);
+        out.push_str(&table.to_string());
+        out.push('\n');
 
         if let Some(qats) = &report.qats_profile {
-            out.push_str("\n📡 2026 Q-ATS Profile:\n");
             out.push_str(&format!(
-                "   • Adaptive scaling factor gamma: {:.2}\n",
-                qats.gamma
-            ));
-            out.push_str(&format!(
-                "   • In-distribution mean distance:  {:.3}\n",
-                qats.mean_distance
-            ));
-            out.push_str(&format!(
-                "   • Distance standard deviation:    {:.3}\n",
-                qats.std_distance
-            ));
-            out.push_str(&format!(
-                "   • Tracked class centroids:        {}\n",
-                qats.class_centroids.len()
+                "\n📡 2026 Q-ATS Profile:\n   • Adaptive scaling factor gamma: {:.2}\n   • In-distribution mean distance:  {:.3}\n   • Distance standard deviation:    {:.3}\n   • Tracked class centroids:        {}\n",
+                qats.gamma, qats.mean_distance, qats.std_distance, qats.class_centroids.len()
             ));
         }
 
         if let Some(path) = export_path {
             out.push_str(&format!(
-                "\n✅ Saved calibrated configuration to {}\n",
-                path.display()
-            ));
-            out.push_str(&format!(
-                "Use with: lemma classify --config {}\n",
+                "\n✅ Saved calibrated configuration to {}\nUse with: lemma classify --config {}\n",
+                path.display(),
                 path.display()
             ));
         }
@@ -565,53 +624,9 @@ fn compute_bucket_loss(
 ) -> f64 {
     let t_safe = t.max(0.01);
     match loss {
-        CalibrationLoss::Nll => {
-            let mut total_nll = 0.0;
-            for s in samples {
-                if s.raw_logits.is_empty() {
-                    continue;
-                }
-                let max_z = s
-                    .raw_logits
-                    .iter()
-                    .cloned()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let exp_sum: f64 = s
-                    .raw_logits
-                    .iter()
-                    .map(|&z| ((z - max_z) / t_safe).exp())
-                    .sum();
-                let lse = max_z + t_safe * exp_sum.max(1e-12).ln();
-                let target_logit = s.raw_logits.get(s.target_index).copied().unwrap_or(0.0);
-                total_nll += (lse - target_logit) / t_safe;
-            }
-            total_nll / samples.len().max(1) as f64
-        }
-        CalibrationLoss::Brier => {
-            let mut total_brier = 0.0;
-            for s in samples {
-                let max_z = s
-                    .raw_logits
-                    .iter()
-                    .cloned()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let exp_sum: f64 = s
-                    .raw_logits
-                    .iter()
-                    .map(|&z| ((z - max_z) / t_safe).exp())
-                    .sum();
-                for (k, &z) in s.raw_logits.iter().enumerate() {
-                    let prob = ((z - max_z) / t_safe).exp() / exp_sum.max(1e-12);
-                    let target_val = if k == s.target_index { 1.0 } else { 0.0 };
-                    total_brier += (prob - target_val).powi(2);
-                }
-            }
-            total_brier / samples.len().max(1) as f64
-        }
-        CalibrationLoss::Ece => {
-            let (ece, _, _) = compute_bucket_metrics(samples, t_safe, bins);
-            ece
-        }
+        CalibrationLoss::Nll => compute_bucket_metrics(samples, t_safe, bins).1,
+        CalibrationLoss::Brier => compute_bucket_metrics(samples, t_safe, bins).2,
+        CalibrationLoss::Ece => compute_bucket_metrics(samples, t_safe, bins).0,
     }
 }
 
@@ -652,7 +667,13 @@ fn compute_bucket_metrics(samples: &[ValidationSample], t: f64, bins: usize) -> 
             }
         }
 
-        confs.push(max_p);
+        let k = probs.len().max(2);
+        let conf = if k > 1 {
+            ((max_p - (1.0 - max_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round() / 10000.0
+        } else {
+            max_p
+        };
+        confs.push(conf);
         corr.push(best_idx == s.target_index);
 
         let target_p = probs.get(s.target_index).copied().unwrap_or(1e-12);
@@ -681,7 +702,7 @@ pub fn golden_section_search<F>(
 where
     F: FnMut(f64) -> f64,
 {
-    let phi = (5.0f64.sqrt() - 1.0) / 2.0; // ~0.6180339887
+    let phi = (5.0f64.sqrt() - 1.0) / 2.0;
     let mut c = b - phi * (b - a);
     let mut d = a + phi * (b - a);
     let mut fc = f(c);
@@ -716,7 +737,6 @@ mod tests {
 
     #[test]
     fn test_golden_section_parabola_minimum() {
-        // Minimum of f(x) = (x - 2.5)^2 + 1 is at x = 2.5
         let (min_x, min_y, iters) =
             golden_section_search(|x| (x - 2.5).powi(2) + 1.0, 0.0, 5.0, 1e-5, 30);
         assert!((min_x - 2.5).abs() < 1e-4);
@@ -730,7 +750,6 @@ mod tests {
             raw_logits: vec![2.0, 0.5, -0.5],
             target_index: 0,
             target_label: "class_a".into(),
-            feature_vector: vec![0.1, 0.2],
         };
         let (ece, nll, brier) = compute_bucket_metrics(&[sample], 1.0, 5);
         assert!(ece >= 0.0);

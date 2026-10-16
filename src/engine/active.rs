@@ -6,7 +6,6 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
@@ -177,11 +176,7 @@ impl ActiveLearningEngine {
             bail!("No items provided for active learning sampling");
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let timestamp = format!("{}Z", now);
+        let timestamp = crate::engine::metrics::format_utc_iso8601();
 
         let mut scored_items = Vec::new();
         let mut total_entropy_sum = 0.0;
@@ -191,14 +186,16 @@ impl ActiveLearningEngine {
         let mut total_evaluations = 0;
 
         for item in items {
-            let item_text = item.preview_text(250);
+            let item_text = match &item.state {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_else(|_| item.preview_text(250)),
+            };
             let decision = classifier.classify(&item.state, questions)?;
 
             for (qid, question) in questions {
                 if let Some(ans) = decision.answers.get(qid) {
                     total_evaluations += 1;
 
-                    // 1. Candidate Options and Probabilities
                     let candidate_options = question.render_options();
                     let k = candidate_options.len().max(2);
 
@@ -209,11 +206,9 @@ impl ActiveLearningEngine {
                     let p_top1 = sorted_probs.first().copied().unwrap_or(0.5);
                     let p_top2 = sorted_probs.get(1).copied().unwrap_or(0.0);
 
-                    // Top-2 Margin Gap
                     let margin = (p_top1 - p_top2).clamp(0.0, 1.0);
                     total_margin_sum += margin;
 
-                    // Normalized Shannon Entropy
                     let entropy: f64 = -ans
                         .probabilities
                         .values()
@@ -224,12 +219,10 @@ impl ActiveLearningEngine {
                     let normalized_entropy = entropy.clamp(0.0, 1.0);
                     total_entropy_sum += normalized_entropy;
 
-                    // Act Probability
                     let act_prob = ans
                         .act_probability
                         .unwrap_or((0.05 + 0.9 * normalized_entropy).clamp(0.0, 1.0));
 
-                    // Conformal Prediction Set
                     let threshold = 1.0 - self.conformal_alpha;
                     let mut cum_prob = 0.0;
                     let mut conformal_set = Vec::new();
@@ -250,10 +243,9 @@ impl ActiveLearningEngine {
                         multi_conformal_count += 1;
                     }
 
-                    // Free-Energy OOD Score
                     let free_energy = compute_free_energy(&ans.probabilities, 1.0);
                     let is_ood = if let Some(ood) = ood_detector {
-                        ood.evaluate(&item.id, &item_text, classifier, questions)
+                        ood.evaluate_with_decision(&item.id, &item_text, &decision)
                             .map(|res| res.is_ood)
                             .unwrap_or(false)
                     } else {
@@ -264,7 +256,6 @@ impl ActiveLearningEngine {
                         ood_count += 1;
                     }
 
-                    // Acquisition Score calculation based on selected strategy
                     let acquisition_score = match strategy {
                         UncertaintyStrategy::Entropy => normalized_entropy,
                         UncertaintyStrategy::Margin => 1.0 - margin,
@@ -286,7 +277,6 @@ impl ActiveLearningEngine {
                         }
                     };
 
-                    // Escalation decision
                     let escalated = act_prob > self.escalate_threshold
                         || ans.confidence < self.escalate_threshold
                         || is_ood
@@ -326,7 +316,7 @@ impl ActiveLearningEngine {
                         "unknown".into()
                     };
 
-                    let review_item = ReviewQueueItem {
+                    scored_items.push(ReviewQueueItem {
                         id: item.id.clone(),
                         text: item_text.clone(),
                         question_id: qid.clone(),
@@ -346,21 +336,16 @@ impl ActiveLearningEngine {
                         escalated,
                         escalation_reason,
                         timestamp: timestamp.clone(),
-                    };
-
-                    scored_items.push(review_item);
+                    });
                 }
             }
         }
 
-        // Rank by acquisition score descending (highest priority first)
         scored_items.sort_by(|a, b| {
             b.acquisition_score
                 .partial_cmp(&a.acquisition_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-
-        // Truncate to budget
         scored_items.truncate(budget);
 
         let acquired_count = scored_items.len();
@@ -373,13 +358,11 @@ impl ActiveLearningEngine {
         } else {
             0.0
         };
-
         let mean_ent = if total_evaluations > 0 {
             total_entropy_sum / total_evaluations as f64
         } else {
             0.0
         };
-
         let mean_mar = if total_evaluations > 0 {
             total_margin_sum / total_evaluations as f64
         } else {
@@ -420,13 +403,15 @@ impl ActiveLearningEngine {
         let mut max_weight = 0.0;
 
         for (idx, item) in items.iter().enumerate() {
-            let item_text = item.preview_text(300);
+            let item_text = match &item.state {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_else(|_| item.preview_text(300)),
+            };
             let decision = classifier.classify(&item.state, questions)?;
 
             for (qid, question) in questions {
                 let candidate_options = question.render_options();
 
-                // Extract ground truth target
                 let opt_gt = if let Some(gt_map) = &item.ground_truth {
                     gt_map
                         .get(qid)
@@ -440,7 +425,7 @@ impl ActiveLearningEngine {
                     Some(serde_json::Value::String(s)) => s,
                     Some(serde_json::Value::Number(n)) => n.to_string(),
                     Some(serde_json::Value::Bool(b)) => b.to_string(),
-                    _ => continue, // Skip unlabeled items
+                    _ => continue,
                 };
 
                 if let Some(ans) = decision.answers.get(qid) {
@@ -469,9 +454,6 @@ impl ActiveLearningEngine {
                         .trim()
                         .to_lowercase();
 
-                    // Determine negative label:
-                    // If model chose wrong option, negative is chosen_opt.
-                    // If model chose correctly, pick candidate with highest probability among negatives.
                     let negative_label = if clean_chosen != clean_target && !chosen_opt.is_empty() {
                         chosen_opt
                     } else {
@@ -479,13 +461,13 @@ impl ActiveLearningEngine {
                             .probabilities
                             .iter()
                             .filter(|(label, _)| {
-                                let clean_l = label
+                                label
                                     .split(':')
                                     .next()
                                     .unwrap_or(label)
                                     .trim()
-                                    .to_lowercase();
-                                clean_l != clean_target
+                                    .to_lowercase()
+                                    != clean_target
                             })
                             .collect();
                         alt_candidates.sort_by(|a, b| {
@@ -498,16 +480,14 @@ impl ActiveLearningEngine {
                                 candidate_options
                                     .iter()
                                     .find(|&c| {
-                                        let clean_c =
-                                            c.split(':').next().unwrap_or(c).trim().to_lowercase();
-                                        clean_c != clean_target
+                                        c.split(':').next().unwrap_or(c).trim().to_lowercase()
+                                            != clean_target
                                     })
                                     .cloned()
                                     .unwrap_or_else(|| "other".into())
                             })
                     };
 
-                    // Compute contrastive margin weight proportional to uncertainty
                     let entropy: f64 = -ans
                         .probabilities
                         .values()
@@ -516,15 +496,25 @@ impl ActiveLearningEngine {
                         .sum::<f64>()
                         / (candidate_options.len().max(2) as f64).ln().max(1e-9);
 
-                    let p_target = ans.probabilities.get(&target_label).copied().unwrap_or(0.0);
-                    let p_neg = ans
-                        .probabilities
-                        .get(&negative_label)
-                        .copied()
-                        .unwrap_or(0.0);
+                    let lookup_prob = |lbl: &str| -> f64 {
+                        let clean_lbl = lbl.split(':').next().unwrap_or(lbl).trim();
+                        ans.probabilities
+                            .iter()
+                            .find(|(k, _)| {
+                                k.eq_ignore_ascii_case(lbl)
+                                    || k.split(':')
+                                        .next()
+                                        .unwrap_or(k)
+                                        .trim()
+                                        .eq_ignore_ascii_case(clean_lbl)
+                            })
+                            .map(|(_, &v)| v)
+                            .unwrap_or(0.0)
+                    };
+                    let p_target = lookup_prob(&target_label);
+                    let p_neg = lookup_prob(&negative_label);
                     let margin_gap = p_target - p_neg;
 
-                    // Contrastive weight: high uncertainty and close/inverted margin yields higher weight
                     let margin_weight =
                         ((1.0 + entropy + (1.0 - margin_gap).max(0.0)) * 100.0).round() / 100.0;
                     total_weight += margin_weight;
@@ -532,7 +522,6 @@ impl ActiveLearningEngine {
                         max_weight = margin_weight;
                     }
 
-                    // Deterministic pseudo-random split
                     let split = if ((idx * 17) % 100) as f64 / 100.0 < val_split {
                         "val".to_string()
                     } else {
@@ -581,40 +570,12 @@ impl ActiveLearningEngine {
 
     /// Serializes review queue items to a JSONL file.
     pub fn export_queue(items: &[ReviewQueueItem], path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = File::create(path)
-            .with_context(|| format!("Failed to create queue file: {}", path.display()))?;
-        let mut writer = std::io::BufWriter::new(file);
-
-        for item in items {
-            let json = serde_json::to_string(item)?;
-            writeln!(writer, "{}", json)?;
-        }
-        writer.flush()?;
-        Ok(())
+        write_jsonl_slice(items, path)
     }
 
     /// Serializes RLCD distillation samples to a JSONL file.
     pub fn export_rlcd(samples: &[RlcdSample], path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = File::create(path)
-            .with_context(|| format!("Failed to create RLCD file: {}", path.display()))?;
-        let mut writer = std::io::BufWriter::new(file);
-
-        for s in samples {
-            let json = serde_json::to_string(s)?;
-            writeln!(writer, "{}", json)?;
-        }
-        writer.flush()?;
-        Ok(())
+        write_jsonl_slice(samples, path)
     }
 
     /// Formats active learning sample report as a terminal table.
@@ -626,47 +587,44 @@ impl ActiveLearningEngine {
         let mut table = Table::new();
         table.load_style(comfy_table::presets::UTF8_FULL);
         table.set_header(vec![
-            Cell::new("#").fg(Color::Cyan),
-            Cell::new("Item ID").fg(Color::Cyan),
-            Cell::new("Question").fg(Color::Cyan),
-            Cell::new("Model Prediction").fg(Color::Cyan),
-            Cell::new("Confidence").fg(Color::Cyan),
-            Cell::new("Act Prob").fg(Color::Cyan),
-            Cell::new("Top2 Margin").fg(Color::Cyan),
-            Cell::new("Entropy").fg(Color::Cyan),
-            Cell::new("Acq Score").fg(Color::Yellow),
-            Cell::new("Reason").fg(Color::Cyan),
+            "#",
+            "Item ID",
+            "Question",
+            "Model Prediction",
+            "Confidence",
+            "Act Prob",
+            "Top2 Margin",
+            "Entropy",
+            "Acq Score",
+            "Reason",
         ]);
 
         for (idx, it) in items.iter().take(15).enumerate() {
             table.add_row(vec![
-                Cell::new(format!("{}", idx + 1)),
-                Cell::new(&it.id),
-                Cell::new(&it.question_id),
-                Cell::new(&it.prediction.chosen_option),
-                Cell::new(format!("{:.1}%", it.prediction.confidence * 100.0)),
-                Cell::new(format!("{:.1}%", it.prediction.act_probability * 100.0)),
-                Cell::new(format!("{:.3}", it.prediction.top2_margin)),
-                Cell::new(format!("{:.3}", it.prediction.normalized_entropy)),
-                Cell::new(format!("{:.4}", it.acquisition_score)).fg(Color::Yellow),
-                Cell::new(&it.escalation_reason),
+                (idx + 1).to_string(),
+                it.id.clone(),
+                it.question_id.clone(),
+                it.prediction.chosen_option.clone(),
+                format!("{:.1}%", it.prediction.confidence * 100.0),
+                format!("{:.1}%", it.prediction.act_probability * 100.0),
+                format!("{:.3}", it.prediction.top2_margin),
+                format!("{:.3}", it.prediction.normalized_entropy),
+                format!("{:.4}", it.acquisition_score),
+                it.escalation_reason.clone(),
             ]);
         }
 
-        let mut output = String::new();
-        output.push_str("\n🎯 Active Learning Uncertainty Prioritization\n");
-        output.push_str(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+        let mut output = format!(
+            "\n🎯 Active Learning Uncertainty Prioritization\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStrategy:       {:?} (Acquired {} of {} candidate decisions)\nDiagnostics:    Mean Entropy={:.3}, Mean Margin={:.3}, OOD Items={}, Multi-Conformal={}\n\n{}",
+            report.strategy,
+            report.acquired_count,
+            report.total_evaluated,
+            report.mean_entropy,
+            report.mean_margin,
+            report.ood_sample_count,
+            report.multi_label_conformal_count,
+            table
         );
-        output.push_str(&format!(
-            "Strategy:       {:?} (Acquired {} of {} candidate decisions)\n",
-            report.strategy, report.acquired_count, report.total_evaluated
-        ));
-        output.push_str(&format!(
-            "Diagnostics:    Mean Entropy={:.3}, Mean Margin={:.3}, OOD Items={}, Multi-Conformal={}\n\n",
-            report.mean_entropy, report.mean_margin, report.ood_sample_count, report.multi_label_conformal_count
-        ));
-        output.push_str(&table.to_string());
 
         if items.len() > 15 {
             output.push_str(&format!(
@@ -674,11 +632,9 @@ impl ActiveLearningEngine {
                 items.len() - 15
             ));
         }
-
         if let Some(p) = export_path {
             output.push_str(&format!("\n💾 Saved review queue to {}\n", p.display()));
         }
-
         output
     }
 
@@ -690,44 +646,38 @@ impl ActiveLearningEngine {
             Cell::new("RLCD Distillation Metric").fg(Color::Cyan),
             Cell::new("Value").fg(Color::Yellow),
         ]);
-
-        table.add_row(vec![
-            Cell::new("Total Contrastive Pairs"),
-            Cell::new(format!("{}", report.total_samples)),
-        ]);
-        table.add_row(vec![
-            Cell::new("Train Split (RLCD Training)"),
-            Cell::new(format!(
-                "{} ({:.1}%)",
-                report.train_samples,
-                (report.train_samples as f64 / report.total_samples as f64) * 100.0
-            )),
-        ]);
-        table.add_row(vec![
-            Cell::new("Validation Split (Evaluation)"),
-            Cell::new(format!(
-                "{} ({:.1}%)",
-                report.val_samples,
-                (report.val_samples as f64 / report.total_samples as f64) * 100.0
-            )),
-        ]);
-        table.add_row(vec![
-            Cell::new("Average Margin Weight"),
-            Cell::new(format!("{:.3}", report.average_margin_weight)),
-        ]);
-        table.add_row(vec![
-            Cell::new("Max Margin Weight"),
-            Cell::new(format!("{:.3}", report.max_margin_weight)),
-        ]);
-        table.add_row(vec![
-            Cell::new("Questions Covered"),
-            Cell::new(report.questions_covered.join(", ")),
-        ]);
-        table.add_row(vec![
-            Cell::new("Export Destination"),
-            Cell::new(&report.export_path).fg(Color::Green),
-        ]);
-
+        let total = report.total_samples.max(1) as f64;
+        for (k, v) in [
+            ("Total Contrastive Pairs", report.total_samples.to_string()),
+            (
+                "Train Split (RLCD Training)",
+                format!(
+                    "{} ({:.1}%)",
+                    report.train_samples,
+                    (report.train_samples as f64 / total) * 100.0
+                ),
+            ),
+            (
+                "Validation Split (Evaluation)",
+                format!(
+                    "{} ({:.1}%)",
+                    report.val_samples,
+                    (report.val_samples as f64 / total) * 100.0
+                ),
+            ),
+            (
+                "Average Margin Weight",
+                format!("{:.3}", report.average_margin_weight),
+            ),
+            (
+                "Max Margin Weight",
+                format!("{:.3}", report.max_margin_weight),
+            ),
+            ("Questions Covered", report.questions_covered.join(", ")),
+            ("Export Destination", report.export_path.clone()),
+        ] {
+            table.add_row(vec![Cell::new(k), Cell::new(v)]);
+        }
         format!(
             "\n🧪 RLCD Contrastive Distillation Corpus Ready:\n{}",
             table
@@ -739,11 +689,10 @@ impl ActiveLearningEngine {
         report: &ActiveLearningReport,
         items: &[ReviewQueueItem],
     ) -> Result<String> {
-        let val = serde_json::json!({
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
             "report": report,
             "review_queue": items,
-        });
-        Ok(serde_json::to_string_pretty(&val)?)
+        }))?)
     }
 
     /// Formats distillation report as JSON.
@@ -751,12 +700,27 @@ impl ActiveLearningEngine {
         report: &ActiveDistillReport,
         samples: &[RlcdSample],
     ) -> Result<String> {
-        let val = serde_json::json!({
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
             "report": report,
             "distillation_samples": samples,
-        });
-        Ok(serde_json::to_string_pretty(&val)?)
+        }))?)
     }
+}
+
+fn write_jsonl_slice<T: Serialize>(items: &[T], path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)
+        .with_context(|| format!("Failed to create JSONL file: {}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    for item in items {
+        writeln!(writer, "{}", serde_json::to_string(item)?)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -228,13 +228,18 @@ impl StatsEngine {
 
         let schema_hash = compute_schema_hash(questions);
         let start_total = Instant::now();
+        let mut last_decisions = Vec::with_capacity(total_items);
 
-        for _ in 0..self.config.iterations {
+        for iter_idx in 0..self.config.iterations {
+            let is_last = iter_idx + 1 == self.config.iterations;
             for item in items {
-                let item_text = item.preview_text(250);
                 let t0 = Instant::now();
 
                 let (decision, was_cached, pure_inf_ms) = if let Some(cache) = &mut opt_cache {
+                    let item_text = match &item.state {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => serde_json::to_string(other).unwrap_or_default(),
+                    };
                     match cache.lookup(&item_text, &schema_hash) {
                         CacheLookupResult::ExactHit(cached_res) => (cached_res, true, None),
                         CacheLookupResult::SemanticHit { result, .. } => (result, true, None),
@@ -262,8 +267,9 @@ impl StatsEngine {
                     uncached_latencies_ms.push(pure_inf_ms.unwrap_or(elapsed_item_ms));
                 }
 
-                // Suppress unused decision warning
-                let _ = decision;
+                if is_last {
+                    last_decisions.push(decision);
+                }
             }
         }
 
@@ -293,11 +299,8 @@ impl StatsEngine {
         let throughput_decisions_per_sec =
             total_decisions_evaluated as f64 / total_measured_elapsed_secs.max(1e-9);
 
-        // Cache summary if enabled
         let cache_summary = opt_cache.as_ref().map(|c| {
             let stats = c.stats();
-            let total_lookups = stats.total_lookups();
-            let hit_rate_pct = stats.hit_rate() * 100.0;
             let cached_avg = if !cached_latencies_ms.is_empty() {
                 cached_latencies_ms.iter().sum::<f64>() / cached_latencies_ms.len() as f64
             } else {
@@ -308,26 +311,24 @@ impl StatsEngine {
             } else {
                 latency_avg_ms
             };
-            let speedup_ratio = if cached_avg > 1e-6 {
-                uncached_avg / cached_avg
-            } else {
-                1.0
-            };
-
             CacheStatsSummary {
                 enabled: true,
-                total_lookups,
+                total_lookups: stats.total_lookups(),
                 exact_hits: stats.exact_hits,
                 semantic_hits: stats.semantic_hits,
                 misses: stats.misses,
-                hit_rate_pct,
+                hit_rate_pct: stats.hit_rate() * 100.0,
                 cached_avg_latency_ms: cached_avg,
                 uncached_avg_latency_ms: uncached_avg,
-                speedup_ratio,
+                speedup_ratio: if cached_avg > 1e-6 {
+                    uncached_avg / cached_avg
+                } else {
+                    1.0
+                },
             }
         });
 
-        // 4. Accuracy, Calibration, and Per-Question Quality Evaluation (Clean Inference Pass)
+        // 4. Accuracy, Calibration, and Per-Question Quality Evaluation (Reusing last iteration decisions)
         let mut overall_correct = 0;
         let mut overall_evaluated = 0;
         let mut overall_soft_acc_sum = 0.0;
@@ -343,6 +344,7 @@ impl StatsEngine {
         let mut escalate_sum = 0;
         let mut total_question_answers = 0;
 
+        #[derive(Default)]
         struct QuestionAccumulator {
             sample_count: usize,
             gt_count: usize,
@@ -352,29 +354,14 @@ impl StatsEngine {
             margin_sum: f64,
             entropy_sum: f64,
             escalate_count: usize,
-            has_gt: bool,
         }
 
-        let mut q_accumulators: BTreeMap<String, QuestionAccumulator> = BTreeMap::new();
-        for qid in questions.keys() {
-            q_accumulators.insert(
-                qid.clone(),
-                QuestionAccumulator {
-                    sample_count: 0,
-                    gt_count: 0,
-                    correct_count: 0,
-                    soft_acc_sum: 0.0,
-                    conf_sum: 0.0,
-                    margin_sum: 0.0,
-                    entropy_sum: 0.0,
-                    escalate_count: 0,
-                    has_gt: false,
-                },
-            );
-        }
+        let mut q_accumulators: BTreeMap<String, QuestionAccumulator> = questions
+            .keys()
+            .map(|qid| (qid.clone(), QuestionAccumulator::default()))
+            .collect();
 
-        for item in items {
-            let decision = self.classifier.classify(&item.state, questions)?;
+        for (item, decision) in items.iter().zip(last_decisions.iter()) {
             let gt_map = item.ground_truth.as_ref();
 
             for (qid, question) in questions {
@@ -382,7 +369,6 @@ impl StatsEngine {
                     total_question_answers += 1;
                     confidence_sum += ans.confidence;
 
-                    // Compute Normalized Shannon Entropy
                     let k = ans.probabilities.len().max(2);
                     let entropy: f64 = -ans
                         .probabilities
@@ -394,7 +380,6 @@ impl StatsEngine {
                     let norm_entropy = entropy.clamp(0.0, 1.0);
                     entropy_sum += norm_entropy;
 
-                    // Compute Top-2 Margin Gap
                     let mut sorted_probs: Vec<f64> = ans.probabilities.values().copied().collect();
                     sorted_probs
                         .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -403,15 +388,12 @@ impl StatsEngine {
                     let top2_margin = (p_top1 - p_top2).clamp(0.0, 1.0);
                     margin_sum += top2_margin;
 
-                    // Act / Escalate flag
                     let act_prob = ans.act_probability.unwrap_or(0.05 + 0.9 * norm_entropy);
-                    let is_escalated = act_prob > self.config.escalate_threshold
-                        || ans.confidence < self.config.escalate_threshold;
+                    let is_escalated = act_prob >= self.config.escalate_threshold;
                     if is_escalated {
                         escalate_sum += 1;
                     }
 
-                    // Check ground truth for this question
                     let opt_gt =
                         resolve_ground_truth_for_question(gt_map, qid, question, questions.len());
 
@@ -425,7 +407,6 @@ impl StatsEngine {
                         }
 
                         if let Some(target_val) = opt_gt {
-                            acc.has_gt = true;
                             acc.gt_count += 1;
                             overall_evaluated += 1;
                             confidences_all.push(ans.confidence);
@@ -433,20 +414,12 @@ impl StatsEngine {
                             let (is_correct, soft_acc) = match question.qtype {
                                 QuestionType::Choice => {
                                     let pred_str = ans.choice.as_deref().unwrap_or("");
-                                    let target_str = match target_val {
-                                        serde_json::Value::String(s) => s.as_str(),
-                                        _ => "",
-                                    };
+                                    let target_str = target_val.as_str().unwrap_or("");
                                     let correct = !target_str.is_empty()
                                         && (pred_str.eq_ignore_ascii_case(target_str)
-                                            || ans
-                                                .selected_labels
-                                                .as_ref()
-                                                .map(|v| {
-                                                    v.iter()
-                                                        .any(|s| s.eq_ignore_ascii_case(target_str))
-                                                })
-                                                .unwrap_or(false));
+                                            || ans.selected_labels.as_ref().is_some_and(|v| {
+                                                v.iter().any(|s| s.eq_ignore_ascii_case(target_str))
+                                            }));
                                     let soft = ans
                                         .probabilities
                                         .iter()
@@ -454,18 +427,20 @@ impl StatsEngine {
                                         .map(|(_, &v)| v)
                                         .unwrap_or(0.0);
 
-                                    // Collect Brier score vectors
                                     let keys: Vec<&String> = ans.probabilities.keys().collect();
                                     if let Some(t_idx) =
                                         keys.iter().position(|k| k.eq_ignore_ascii_case(target_str))
                                     {
-                                        let p_vec: Vec<f64> = keys
-                                            .iter()
-                                            .map(|k| {
-                                                ans.probabilities.get(*k).copied().unwrap_or(0.0)
-                                            })
-                                            .collect();
-                                        probs_all.push(p_vec);
+                                        probs_all.push(
+                                            keys.iter()
+                                                .map(|k| {
+                                                    ans.probabilities
+                                                        .get(*k)
+                                                        .copied()
+                                                        .unwrap_or(0.0)
+                                                })
+                                                .collect(),
+                                        );
                                         targets_all.push(t_idx);
                                     }
 
@@ -480,9 +455,7 @@ impl StatsEngine {
                                             .unwrap_or(0.0)
                                     });
                                     let err = (pred_num - target_num).abs();
-                                    let correct = err < 0.5;
-                                    let soft = (1.0 - err).clamp(0.0, 1.0);
-                                    (correct, soft)
+                                    (err < 0.5, 1.0 - (err / 5.0).min(1.0))
                                 }
                                 QuestionType::Noul => {
                                     let target_bool = target_val
@@ -495,7 +468,7 @@ impl StatsEngine {
                                         .or_else(|| target_val.as_u64().map(|n| n != 0))
                                         .unwrap_or(false);
                                     let pred_prob = ans.noul.unwrap_or(0.0);
-                                    let pred_bool = pred_prob > 0.5;
+                                    let pred_bool = pred_prob >= 0.5;
                                     let correct = pred_bool == target_bool;
                                     let soft = if target_bool {
                                         pred_prob
@@ -504,7 +477,7 @@ impl StatsEngine {
                                     };
 
                                     probs_all.push(vec![1.0 - pred_prob, pred_prob]);
-                                    targets_all.push(if target_bool { 1 } else { 0 });
+                                    targets_all.push(usize::from(target_bool));
 
                                     (correct, soft)
                                 }
@@ -523,7 +496,6 @@ impl StatsEngine {
             }
         }
 
-        // Aggregate question level stats
         let mut questions_stats = BTreeMap::new();
         for (qid, q) in questions {
             let (options_count, est_head_tokens, head_util_pct) = question_token_utils
@@ -535,35 +507,23 @@ impl StatsEngine {
             let count = acc.sample_count.max(1);
             let gt_count = acc.gt_count;
 
-            let accuracy = if gt_count > 0 {
-                Some(acc.correct_count as f64 / gt_count as f64)
-            } else {
-                None
-            };
-            let soft_accuracy = if gt_count > 0 {
-                Some(acc.soft_acc_sum / gt_count as f64)
-            } else {
-                None
-            };
-
-            let q_type_str = match q.qtype {
-                QuestionType::Choice => "choice",
-                QuestionType::Score => "score",
-                QuestionType::Noul => "noul",
-            };
-
             questions_stats.insert(
                 qid.clone(),
                 QuestionStats {
                     question_id: qid.clone(),
-                    question_type: q_type_str.to_string(),
+                    question_type: match q.qtype {
+                        QuestionType::Choice => "choice",
+                        QuestionType::Score => "score",
+                        QuestionType::Noul => "noul",
+                    }
+                    .to_string(),
                     options_count,
                     est_head_tokens,
                     head_budget,
                     head_utilization_pct: head_util_pct,
                     evaluated_samples: acc.sample_count,
-                    accuracy,
-                    soft_accuracy,
+                    accuracy: (gt_count > 0).then(|| acc.correct_count as f64 / gt_count as f64),
+                    soft_accuracy: (gt_count > 0).then(|| acc.soft_acc_sum / gt_count as f64),
                     mean_confidence: acc.conf_sum / count as f64,
                     mean_top2_margin: acc.margin_sum / count as f64,
                     mean_entropy: acc.entropy_sum / count as f64,
@@ -572,45 +532,19 @@ impl StatsEngine {
             );
         }
 
-        // Aggregate overall accuracy stats if ground truth was present
-        let accuracy_stats = if overall_evaluated > 0 {
-            let overall_acc = overall_correct as f64 / overall_evaluated as f64;
-            let soft_acc = overall_soft_acc_sum / overall_evaluated as f64;
-            let ece = calculate_ece(&confidences_all, &correctness_all, self.config.ece_bins);
-            let brier = calculate_brier_score(&probs_all, &targets_all);
+        let accuracy_stats = (overall_evaluated > 0).then(|| AccuracyStats {
+            labeled_sample_count: overall_evaluated,
+            overall_accuracy: overall_correct as f64 / overall_evaluated as f64,
+            soft_accuracy: overall_soft_acc_sum / overall_evaluated as f64,
+            expected_calibration_error: calculate_ece(
+                &confidences_all,
+                &correctness_all,
+                self.config.ece_bins,
+            ),
+            brier_score: calculate_brier_score(&probs_all, &targets_all),
+        });
 
-            Some(AccuracyStats {
-                labeled_sample_count: overall_evaluated,
-                overall_accuracy: overall_acc,
-                soft_accuracy: soft_acc,
-                expected_calibration_error: ece,
-                brier_score: brier,
-            })
-        } else {
-            None
-        };
-
-        let mean_conf = if total_question_answers > 0 {
-            confidence_sum / total_question_answers as f64
-        } else {
-            0.0
-        };
-        let mean_ent = if total_question_answers > 0 {
-            entropy_sum / total_question_answers as f64
-        } else {
-            0.0
-        };
-        let mean_mar = if total_question_answers > 0 {
-            margin_sum / total_question_answers as f64
-        } else {
-            0.0
-        };
-        let act_rate = if total_question_answers > 0 {
-            escalate_sum as f64 / total_question_answers as f64
-        } else {
-            0.0
-        };
-
+        let denom = total_question_answers.max(1) as f64;
         let report = SystemStatsReport {
             checkpoint: checkpoint.repo_id().to_string(),
             head_budget,
@@ -638,10 +572,10 @@ impl StatsEngine {
             },
             accuracy: accuracy_stats,
             uncertainty: UncertaintyStats {
-                mean_confidence: mean_conf,
-                mean_top2_margin: mean_mar,
-                mean_entropy: mean_ent,
-                act_escalate_rate: act_rate,
+                mean_confidence: confidence_sum / denom,
+                mean_top2_margin: margin_sum / denom,
+                mean_entropy: entropy_sum / denom,
+                act_escalate_rate: escalate_sum as f64 / denom,
             },
             questions: questions_stats,
         };
@@ -651,90 +585,79 @@ impl StatsEngine {
 
     /// Renders the statistics report as a formatted ANSI table.
     pub fn format_table(report: &SystemStatsReport) -> String {
-        let mut out = String::new();
-
-        out.push_str("\n📊 Lemma System 1 Diagnostics & Performance Report\n");
-        out.push_str(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-        );
-        out.push_str(&format!(
-            "Model Checkpoint : {} (Head Budget: {} tokens)\n",
-            report.checkpoint, report.head_budget
-        ));
-        out.push_str(&format!(
-            "Dataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n",
+        let mut out = format!(
+            "\n📊 Lemma System 1 Diagnostics & Performance Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nModel Checkpoint : {} (Head Budget: {} tokens)\nDataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n⚡ Speed & Latency Distribution\n",
+            report.checkpoint,
+            report.head_budget,
             report.dataset_items,
             report.questions.len(),
             report.benchmark_iterations,
             report.warmup_runs
-        ));
+        );
 
-        // 1. Speed & Latency Table
-        out.push_str("⚡ Speed & Latency Distribution\n");
-        let mut speed_table = Table::new();
-        speed_table
-            .load_style(comfy_table::presets::UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic);
+        let new_utf8_table = |headers: &[(&str, Color)]| {
+            let mut t = Table::new();
+            t.load_style(comfy_table::presets::UTF8_FULL)
+                .set_content_arrangement(ContentArrangement::Dynamic);
+            t.set_header(
+                headers
+                    .iter()
+                    .map(|(h, c)| Cell::new(*h).fg(*c))
+                    .collect::<Vec<_>>(),
+            );
+            t
+        };
 
-        speed_table.set_header(vec![
-            Cell::new("Latency Metric").fg(Color::Cyan),
-            Cell::new("Duration (ms)").fg(Color::Green),
-            Cell::new("Operational Reference / SLA").fg(Color::DarkGrey),
+        let mut speed_table = new_utf8_table(&[
+            ("Latency Metric", Color::Cyan),
+            ("Duration (ms)", Color::Green),
+            ("Operational Reference / SLA", Color::DarkGrey),
         ]);
-
-        speed_table.add_row(vec![
-            Cell::new("P50 (Median Response)"),
-            Cell::new(format!("{:.3} ms", report.speed.latency_p50_ms)).fg(Color::Green),
-            Cell::new("Sub-35ms non-autoregressive target"),
-        ]);
-        speed_table.add_row(vec![
-            Cell::new("P90 Latency"),
-            Cell::new(format!("{:.3} ms", report.speed.latency_p90_ms)),
-            Cell::new("High-load tail latency boundary"),
-        ]);
-        speed_table.add_row(vec![
-            Cell::new("P95 Latency"),
-            Cell::new(format!("{:.3} ms", report.speed.latency_p95_ms)),
-            Cell::new("95th percentile SLA threshold"),
-        ]);
-        speed_table.add_row(vec![
-            Cell::new("P99 Latency"),
-            Cell::new(format!("{:.3} ms", report.speed.latency_p99_ms)),
-            Cell::new("Extreme tail latency"),
-        ]);
-        speed_table.add_row(vec![
-            Cell::new("Average (Mean)"),
-            Cell::new(format!("{:.3} ms", report.speed.latency_avg_ms)),
-            Cell::new(format!(
-                "Std Dev (σ): ±{:.3} ms",
-                report.speed.latency_std_dev_ms
-            )),
-        ]);
-        speed_table.add_row(vec![
-            Cell::new("Min / Max Bounds"),
-            Cell::new(format!(
-                "{:.3} / {:.3} ms",
-                report.speed.latency_min_ms, report.speed.latency_max_ms
-            )),
-            Cell::new("Observed execution envelope"),
-        ]);
-
+        for (label, val, note) in [
+            (
+                "P50 (Median Response)",
+                format!("{:.3} ms", report.speed.latency_p50_ms),
+                "Sub-35ms non-autoregressive target".to_string(),
+            ),
+            (
+                "P90 Latency",
+                format!("{:.3} ms", report.speed.latency_p90_ms),
+                "High-load tail latency boundary".to_string(),
+            ),
+            (
+                "P95 Latency",
+                format!("{:.3} ms", report.speed.latency_p95_ms),
+                "95th percentile SLA threshold".to_string(),
+            ),
+            (
+                "P99 Latency",
+                format!("{:.3} ms", report.speed.latency_p99_ms),
+                "Extreme tail latency".to_string(),
+            ),
+            (
+                "Average (Mean)",
+                format!("{:.3} ms", report.speed.latency_avg_ms),
+                format!("Std Dev (σ): ±{:.3} ms", report.speed.latency_std_dev_ms),
+            ),
+            (
+                "Min / Max Bounds",
+                format!(
+                    "{:.3} / {:.3} ms",
+                    report.speed.latency_min_ms, report.speed.latency_max_ms
+                ),
+                "Observed execution envelope".to_string(),
+            ),
+        ] {
+            speed_table.add_row(vec![Cell::new(label), Cell::new(val), Cell::new(note)]);
+        }
         out.push_str(&speed_table.to_string());
-        out.push_str("\n\n");
+        out.push_str("\n\n🚀 System Throughput & Efficiency\n");
 
-        // 2. Throughput & System Performance Table
-        out.push_str("🚀 System Throughput & Efficiency\n");
-        let mut perf_table = Table::new();
-        perf_table
-            .load_style(comfy_table::presets::UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic);
-
-        perf_table.set_header(vec![
-            Cell::new("Performance Metric").fg(Color::Cyan),
-            Cell::new("Observed Value").fg(Color::Green),
-            Cell::new("Efficiency Assessment").fg(Color::DarkGrey),
+        let mut perf_table = new_utf8_table(&[
+            ("Performance Metric", Color::Cyan),
+            ("Observed Value", Color::Green),
+            ("Efficiency Assessment", Color::DarkGrey),
         ]);
-
         perf_table.add_row(vec![
             Cell::new("Ingestion Throughput"),
             Cell::new(format!(
@@ -770,15 +693,10 @@ impl StatsEngine {
                 report.head_budget
             )),
         ]);
-
         if let Some(c) = &report.performance.cache_summary {
             perf_table.add_row(vec![
                 Cell::new("Semantic Cache Hit Rate"),
-                Cell::new(format!("{:.1}%", c.hit_rate_pct)).fg(if c.hit_rate_pct > 50.0 {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                }),
+                Cell::new(format!("{:.1}%", c.hit_rate_pct)),
                 Cell::new(format!(
                     "Exact: {}, Semantic: {}, Misses: {}",
                     c.exact_hits, c.semantic_hits, c.misses
@@ -793,53 +711,42 @@ impl StatsEngine {
                 Cell::new("Cached sub-millisecond retrieval boost"),
             ]);
         }
-
         out.push_str(&perf_table.to_string());
-        out.push_str("\n\n");
+        out.push_str("\n\n🎯 Decision Accuracy, Calibration & Safety\n");
 
-        // 3. Accuracy & Quality Table
-        out.push_str("🎯 Decision Accuracy, Calibration & Safety\n");
-        let mut acc_table = Table::new();
-        acc_table
-            .load_style(comfy_table::presets::UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic);
-
-        acc_table.set_header(vec![
-            Cell::new("Quality & Safety Metric").fg(Color::Cyan),
-            Cell::new("Value").fg(Color::Green),
-            Cell::new("Target Standard / Interpretation").fg(Color::DarkGrey),
+        let mut acc_table = new_utf8_table(&[
+            ("Quality & Safety Metric", Color::Cyan),
+            ("Value", Color::Green),
+            ("Target Standard / Interpretation", Color::DarkGrey),
         ]);
-
         if let Some(acc) = &report.accuracy {
-            acc_table.add_row(vec![
-                Cell::new("Top-1 Exact Accuracy"),
-                Cell::new(format!("{:.2}%", acc.overall_accuracy * 100.0)).fg(Color::Green),
-                Cell::new(format!(
-                    "Evaluated on {} ground-truth decisions",
-                    acc.labeled_sample_count
-                )),
-            ]);
-            acc_table.add_row(vec![
-                Cell::new("Soft Accuracy (Target Prob)"),
-                Cell::new(format!("{:.2}%", acc.soft_accuracy * 100.0)),
-                Cell::new("Average probability mass assigned to true target"),
-            ]);
-            acc_table.add_row(vec![
-                Cell::new("Expected Calibration Error (ECE)"),
-                Cell::new(format!("{:.4}", acc.expected_calibration_error)).fg(
-                    if acc.expected_calibration_error < 0.10 {
-                        Color::Green
-                    } else {
-                        Color::Yellow
-                    },
+            for (m, v, note) in [
+                (
+                    "Top-1 Exact Accuracy",
+                    format!("{:.2}%", acc.overall_accuracy * 100.0),
+                    format!(
+                        "Evaluated on {} ground-truth decisions",
+                        acc.labeled_sample_count
+                    ),
                 ),
-                Cell::new("Lower is better (ECE < 0.10 indicates strong calibration)"),
-            ]);
-            acc_table.add_row(vec![
-                Cell::new("Brier Score"),
-                Cell::new(format!("{:.4}", acc.brier_score)).fg(Color::Green),
-                Cell::new("Strictly proper mean squared error (lower is better)"),
-            ]);
+                (
+                    "Soft Accuracy (Target Prob)",
+                    format!("{:.2}%", acc.soft_accuracy * 100.0),
+                    "Average probability mass assigned to true target".to_string(),
+                ),
+                (
+                    "Expected Calibration Error (ECE)",
+                    format!("{:.4}", acc.expected_calibration_error),
+                    "Lower is better (ECE < 0.10 indicates strong calibration)".to_string(),
+                ),
+                (
+                    "Brier Score",
+                    format!("{:.4}", acc.brier_score),
+                    "Strictly proper mean squared error (lower is better)".to_string(),
+                ),
+            ] {
+                acc_table.add_row(vec![Cell::new(m), Cell::new(v), Cell::new(note)]);
+            }
         } else {
             acc_table.add_row(vec![
                 Cell::new("Classification Accuracy"),
@@ -847,84 +754,65 @@ impl StatsEngine {
                 Cell::new("Provide dataset with ground_truth to evaluate accuracy & ECE"),
             ]);
         }
-
-        acc_table.add_row(vec![
-            Cell::new("Mean Predicted Confidence"),
-            Cell::new(format!(
-                "{:.2}%",
-                report.uncertainty.mean_confidence * 100.0
-            )),
-            Cell::new("Average winning option probability"),
-        ]);
-        acc_table.add_row(vec![
-            Cell::new("Mean Top-2 Margin Gap (Δ)"),
-            Cell::new(format!("{:.3}", report.uncertainty.mean_top2_margin)),
-            Cell::new("Separation between top-1 and top-2 candidate choices"),
-        ]);
-        acc_table.add_row(vec![
-            Cell::new("Mean Normalized Entropy (H̃)"),
-            Cell::new(format!("{:.3}", report.uncertainty.mean_entropy)),
-            Cell::new("Option distribution spread (0 = decisive, 1 = uniform)"),
-        ]);
-        acc_table.add_row(vec![
-            Cell::new("Supervisor Escalation Rate"),
-            Cell::new(format!(
-                "{:.1}%",
-                report.uncertainty.act_escalate_rate * 100.0
-            ))
-            .fg(if report.uncertainty.act_escalate_rate > 0.20 {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-            Cell::new("Percentage routed to human/System 2 by Act head"),
-        ]);
-
+        for (m, v, note) in [
+            (
+                "Mean Predicted Confidence",
+                format!("{:.2}%", report.uncertainty.mean_confidence * 100.0),
+                "Average winning option probability",
+            ),
+            (
+                "Mean Top-2 Margin Gap (Δ)",
+                format!("{:.3}", report.uncertainty.mean_top2_margin),
+                "Separation between top-1 and top-2 candidate choices",
+            ),
+            (
+                "Mean Normalized Entropy (H̃)",
+                format!("{:.3}", report.uncertainty.mean_entropy),
+                "Option distribution spread (0 = decisive, 1 = uniform)",
+            ),
+            (
+                "Supervisor Escalation Rate",
+                format!("{:.1}%", report.uncertainty.act_escalate_rate * 100.0),
+                "Percentage routed to human/System 2 by Act head",
+            ),
+        ] {
+            acc_table.add_row(vec![Cell::new(m), Cell::new(v), Cell::new(note)]);
+        }
         out.push_str(&acc_table.to_string());
-        out.push_str("\n\n");
+        out.push_str("\n\n📋 Per-Question Schema Breakdown\n");
 
-        // 4. Per-Question Schema Breakdown Table
-        out.push_str("📋 Per-Question Schema Breakdown\n");
         let mut q_table = Table::new();
         q_table
             .load_style(comfy_table::presets::UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic);
-
-        q_table.set_header(vec![
-            Cell::new("Question ID").fg(Color::Cyan),
-            Cell::new("Type").fg(Color::DarkGrey),
-            Cell::new("Options"),
-            Cell::new("Head Util").fg(Color::DarkGrey),
-            Cell::new("Accuracy").fg(Color::Green),
-            Cell::new("Confidence"),
-            Cell::new("Margin (Δ)"),
-            Cell::new("Entropy (H̃)"),
-            Cell::new("Escalate %"),
-        ]);
-
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                "Question ID",
+                "Type",
+                "Options",
+                "Head Util",
+                "Accuracy",
+                "Confidence",
+                "Margin (Δ)",
+                "Entropy (H̃)",
+                "Escalate %",
+            ]);
         for (qid, q_stat) in &report.questions {
-            let acc_str = if let Some(a) = q_stat.accuracy {
-                format!("{:.1}%", a * 100.0)
-            } else {
-                "N/A".into()
-            };
-
             q_table.add_row(vec![
-                Cell::new(qid).fg(Color::Cyan),
-                Cell::new(&q_stat.question_type).fg(Color::DarkGrey),
-                Cell::new(format!("{}", q_stat.options_count)),
-                Cell::new(format!("{:.1}%", q_stat.head_utilization_pct)),
-                Cell::new(acc_str).fg(Color::Green),
-                Cell::new(format!("{:.1}%", q_stat.mean_confidence * 100.0)),
-                Cell::new(format!("{:.3}", q_stat.mean_top2_margin)),
-                Cell::new(format!("{:.3}", q_stat.mean_entropy)),
-                Cell::new(format!("{:.1}%", q_stat.act_escalate_rate * 100.0)),
+                qid.clone(),
+                q_stat.question_type.clone(),
+                q_stat.options_count.to_string(),
+                format!("{:.1}%", q_stat.head_utilization_pct),
+                q_stat
+                    .accuracy
+                    .map_or_else(|| "N/A".into(), |a| format!("{:.1}%", a * 100.0)),
+                format!("{:.1}%", q_stat.mean_confidence * 100.0),
+                format!("{:.3}", q_stat.mean_top2_margin),
+                format!("{:.3}", q_stat.mean_entropy),
+                format!("{:.1}%", q_stat.act_escalate_rate * 100.0),
             ]);
         }
-
         out.push_str(&q_table.to_string());
         out.push('\n');
-
         out
     }
 
@@ -966,143 +854,148 @@ impl StatsEngine {
         let mut wtr = csv::Writer::from_writer(vec![]);
         let _ = wtr.write_record(["category", "metric", "value", "unit"]);
 
-        let _ = wtr.write_record([
-            "speed",
-            "latency_p50",
-            &format!("{:.4}", report.speed.latency_p50_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_p90",
-            &format!("{:.4}", report.speed.latency_p90_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_p95",
-            &format!("{:.4}", report.speed.latency_p95_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_p99",
-            &format!("{:.4}", report.speed.latency_p99_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_avg",
-            &format!("{:.4}", report.speed.latency_avg_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_min",
-            &format!("{:.4}", report.speed.latency_min_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_max",
-            &format!("{:.4}", report.speed.latency_max_ms),
-            "ms",
-        ]);
-        let _ = wtr.write_record([
-            "speed",
-            "latency_std_dev",
-            &format!("{:.4}", report.speed.latency_std_dev_ms),
-            "ms",
-        ]);
-
-        let _ = wtr.write_record([
-            "performance",
-            "throughput_items",
-            &format!("{:.2}", report.performance.throughput_items_per_sec),
-            "items/sec",
-        ]);
-        let _ = wtr.write_record([
-            "performance",
-            "throughput_decisions",
-            &format!("{:.2}", report.performance.throughput_decisions_per_sec),
-            "decisions/sec",
-        ]);
-        let _ = wtr.write_record([
-            "performance",
-            "head_token_utilization",
-            &format!("{:.2}", report.performance.avg_head_token_utilization_pct),
-            "%",
-        ]);
+        let mut rows: Vec<(&str, &str, String, &str)> = vec![
+            (
+                "speed",
+                "latency_p50",
+                format!("{:.4}", report.speed.latency_p50_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_p90",
+                format!("{:.4}", report.speed.latency_p90_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_p95",
+                format!("{:.4}", report.speed.latency_p95_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_p99",
+                format!("{:.4}", report.speed.latency_p99_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_avg",
+                format!("{:.4}", report.speed.latency_avg_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_min",
+                format!("{:.4}", report.speed.latency_min_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_max",
+                format!("{:.4}", report.speed.latency_max_ms),
+                "ms",
+            ),
+            (
+                "speed",
+                "latency_std_dev",
+                format!("{:.4}", report.speed.latency_std_dev_ms),
+                "ms",
+            ),
+            (
+                "performance",
+                "throughput_items",
+                format!("{:.2}", report.performance.throughput_items_per_sec),
+                "items/sec",
+            ),
+            (
+                "performance",
+                "throughput_decisions",
+                format!("{:.2}", report.performance.throughput_decisions_per_sec),
+                "decisions/sec",
+            ),
+            (
+                "performance",
+                "head_token_utilization",
+                format!("{:.2}", report.performance.avg_head_token_utilization_pct),
+                "%",
+            ),
+        ];
 
         if let Some(c) = &report.performance.cache_summary {
-            let _ = wtr.write_record([
+            rows.push((
                 "performance",
                 "cache_hit_rate",
-                &format!("{:.2}", c.hit_rate_pct),
+                format!("{:.2}", c.hit_rate_pct),
                 "%",
-            ]);
-            let _ = wtr.write_record([
+            ));
+            rows.push((
                 "performance",
                 "cache_speedup",
-                &format!("{:.2}", c.speedup_ratio),
+                format!("{:.2}", c.speedup_ratio),
                 "x",
-            ]);
+            ));
         }
-
         if let Some(acc) = &report.accuracy {
-            let _ = wtr.write_record([
-                "accuracy",
-                "overall_accuracy",
-                &format!("{:.4}", acc.overall_accuracy),
-                "ratio",
-            ]);
-            let _ = wtr.write_record([
-                "accuracy",
-                "soft_accuracy",
-                &format!("{:.4}", acc.soft_accuracy),
-                "ratio",
-            ]);
-            let _ = wtr.write_record([
-                "accuracy",
-                "ece",
-                &format!("{:.4}", acc.expected_calibration_error),
-                "error",
-            ]);
-            let _ = wtr.write_record([
-                "accuracy",
-                "brier_score",
-                &format!("{:.4}", acc.brier_score),
-                "score",
+            rows.extend([
+                (
+                    "accuracy",
+                    "overall_accuracy",
+                    format!("{:.4}", acc.overall_accuracy),
+                    "ratio",
+                ),
+                (
+                    "accuracy",
+                    "soft_accuracy",
+                    format!("{:.4}", acc.soft_accuracy),
+                    "ratio",
+                ),
+                (
+                    "accuracy",
+                    "ece",
+                    format!("{:.4}", acc.expected_calibration_error),
+                    "error",
+                ),
+                (
+                    "accuracy",
+                    "brier_score",
+                    format!("{:.4}", acc.brier_score),
+                    "score",
+                ),
             ]);
         }
+        rows.extend([
+            (
+                "uncertainty",
+                "mean_confidence",
+                format!("{:.4}", report.uncertainty.mean_confidence),
+                "ratio",
+            ),
+            (
+                "uncertainty",
+                "mean_top2_margin",
+                format!("{:.4}", report.uncertainty.mean_top2_margin),
+                "margin",
+            ),
+            (
+                "uncertainty",
+                "mean_entropy",
+                format!("{:.4}", report.uncertainty.mean_entropy),
+                "entropy",
+            ),
+            (
+                "uncertainty",
+                "act_escalate_rate",
+                format!("{:.4}", report.uncertainty.act_escalate_rate),
+                "ratio",
+            ),
+        ]);
 
-        let _ = wtr.write_record([
-            "uncertainty",
-            "mean_confidence",
-            &format!("{:.4}", report.uncertainty.mean_confidence),
-            "ratio",
-        ]);
-        let _ = wtr.write_record([
-            "uncertainty",
-            "mean_top2_margin",
-            &format!("{:.4}", report.uncertainty.mean_top2_margin),
-            "margin",
-        ]);
-        let _ = wtr.write_record([
-            "uncertainty",
-            "mean_entropy",
-            &format!("{:.4}", report.uncertainty.mean_entropy),
-            "entropy",
-        ]);
-        let _ = wtr.write_record([
-            "uncertainty",
-            "act_escalate_rate",
-            &format!("{:.4}", report.uncertainty.act_escalate_rate),
-            "ratio",
-        ]);
-
-        let inner = wtr.into_inner().unwrap_or_default();
-        String::from_utf8(inner).unwrap_or_default()
+        for (cat, met, val, unit) in rows {
+            let _ = wtr.write_record([cat, met, &val, unit]);
+        }
+        String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
     }
 
     /// Exports the stats report to a destination file based on extension.
