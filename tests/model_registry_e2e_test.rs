@@ -15,6 +15,10 @@ fn write_minimal_safetensors(path: &Path, header_json: &str) {
 
 #[test]
 fn test_scan_all_seven_local_models_and_verify_paradigms() {
+    if !Path::new("models/laya/config.json").exists() {
+        eprintln!("Skipping local models scan on CI runner without downloaded weights");
+        return;
+    }
     let specs = scan_registered_models();
     assert_eq!(
         specs.len(),
