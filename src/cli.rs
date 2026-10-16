@@ -89,6 +89,10 @@ pub enum Commands {
     /// Comprehensive system speed, throughput performance, and classification accuracy statistics
     Stats(StatsArgs),
 
+    /// Head-to-head System 1 model arena comparing accuracy, agreement, Cohen's kappa, McNemar's chi2, and speedup
+    #[command(visible_alias = "arena")]
+    Compare(CompareArgs),
+
     /// Generate shell auto-completions for bash, elvish, fish, powershell, or zsh
     Completions(CompletionsArgs),
 }
@@ -260,15 +264,50 @@ pub struct ExperimentArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Experiment mode: order (position invariance), temp (calibration sweep), or checkpoints (compare all 3)
+    /// Experiment mode: order (position invariance), temp (calibration sweep), checkpoints (compare models), or adversarial
     #[arg(short, long, default_value = "order")]
     pub mode: ExperimentMode,
+
+    /// Run adversarial perturbation and boundary stress test (shortcut for --mode adversarial)
+    #[arg(long)]
+    pub adversarial: bool,
+
+    /// Checkpoint to evaluate for order or adversarial experiments
+    #[arg(short, long, default_value = "english")]
+    pub checkpoint: String,
 
     /// Number of permutations for option ordering experiment
     #[arg(long, default_value_t = 5)]
     pub permutations: usize,
 
     /// Output experiment results as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct CompareArgs {
+    /// Comma-separated list of System 1 checkpoints to compare (default: all)
+    #[arg(short, long, visible_alias = "models", default_value = "all")]
+    pub checkpoints: String,
+
+    /// Directory to ingest data from (default: data)
+    #[arg(long, default_value = "data")]
+    pub data_dir: PathBuf,
+
+    /// Specific file to evaluate
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+
+    /// Path to questions schema JSON file
+    #[arg(short, long)]
+    pub schema: Option<PathBuf>,
+
+    /// Number of top model disagreement examples to highlight
+    #[arg(long, default_value_t = 5)]
+    pub top_disagreements: usize,
+
+    /// Output arena report as JSON
     #[arg(long)]
     pub json: bool,
 }
@@ -295,9 +334,29 @@ pub struct TestArgs {
     #[arg(long)]
     pub temperature: Option<f64>,
 
-    /// Minimum required accuracy (exits with error if accuracy falls below this threshold, e.g. 0.85)
+    /// Path to custom JSON model/agent config (e.g. calibrated config with temperature & cost_weights)
     #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Minimum required accuracy (exits with error if accuracy falls below this threshold, e.g. 0.85)
+    #[arg(long, visible_alias = "fail-under")]
     pub min_accuracy: Option<f64>,
+
+    /// Path to baseline evaluation metrics JSON to compare against for CI regression gating
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+
+    /// Save current evaluation metrics JSON to a baseline file
+    #[arg(long)]
+    pub save_baseline: Option<PathBuf>,
+
+    /// Maximum allowed accuracy drop relative to --baseline before failing CI (default: 0.0)
+    #[arg(long, default_value_t = 0.0)]
+    pub max_regression: f64,
+
+    /// Maximum allowed Expected Calibration Error (ECE) before failing CI
+    #[arg(long)]
+    pub max_ece: Option<f64>,
 
     /// Print evaluation output as JSON instead of table
     #[arg(long)]
@@ -762,6 +821,9 @@ pub enum CascadeCommands {
     /// Tune Pareto-optimal threshold given target accuracy SLA
     Tune(CascadeTuneArgs),
 
+    /// Sweep thresholds across [0.05, 0.95] and display full Cost / Coverage / Accuracy Pareto table
+    Sweep(CascadeTuneArgs),
+
     /// Run cost-aware cascading router on inputs
     Run(CascadeRunArgs),
 }
@@ -793,6 +855,10 @@ pub struct CascadeTuneArgs {
     /// Checkpoint to use for System 1
     #[arg(short, long, default_value = "english")]
     pub checkpoint: String,
+
+    /// Sweep all candidate risk thresholds in [0.05, 0.95] and print the Pareto frontier table
+    #[arg(long)]
+    pub sweep: bool,
 
     /// Optional path to export tuned cascade policy JSON
     #[arg(long)]
@@ -1039,7 +1105,7 @@ pub struct CalibrateArgs {
     pub checkpoint: String,
 
     /// Export calibrated configuration to specified JSON file (e.g. config/laya_calibrated.json)
-    #[arg(short = 'e', long, alias = "output")]
+    #[arg(short = 'e', long, alias = "output", visible_alias = "export")]
     pub export_config: Option<PathBuf>,
 
     /// Enable 2026 Quantile-Adaptive Temperature Scaling (Q-ATS) under covariate shift
@@ -1050,9 +1116,17 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = 0.30)]
     pub adaptive_gamma: f64,
 
+    /// Asymmetric class cost weights (e.g. "billing=5.0,security=10.0" or path to JSON file)
+    #[arg(long, visible_alias = "cost-matrix")]
+    pub cost_weights: Option<String>,
+
     /// Output report format (table, json, pretty)
     #[arg(long, default_value = "table")]
     pub format: OutputFormat,
+
+    /// Output calibration report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1307,6 +1381,7 @@ pub enum ExperimentMode {
     Order,
     Temp,
     Checkpoints,
+    Adversarial,
 }
 
 #[derive(Args, Debug)]
