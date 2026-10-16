@@ -344,7 +344,7 @@ fn build_phase_1() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma classify --text \"Our April invoice was charged twice\" --labels \"billing,technical,security\" --explain".to_string(),
+        try_command: "lemma explain \"Our April invoice was charged twice\" --labels \"billing,technical,security\"".to_string(),
     };
 
     PhaseLesson {
@@ -405,8 +405,8 @@ fn build_phase_1() -> PhaseLesson {
         live_lab,
         quiz: build_phase_1_quiz(),
         next_step_commands: vec![
-            "lemma info --models".to_string(),
-            "lemma classify --text \"We did not have a technical outage; our invoice was double charged\" --labels \"billing,technical,security\" --explain".to_string(),
+            "lemma info --inventory".to_string(),
+            "lemma explain \"We did not have a technical outage; our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
             "lemma learn --phase 2".to_string(),
         ],
     }
@@ -502,7 +502,7 @@ fn build_phase_2() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma compare --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --slice-by auto".to_string(),
+        try_command: "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
     };
 
     PhaseLesson {
@@ -557,7 +557,7 @@ fn build_phase_2() -> PhaseLesson {
         quiz: build_phase_2_quiz(),
         next_step_commands: vec![
             "lemma classify --model deberta-v3 --hypothesis-template \"The customer is reporting a {label} issue ({description}).\" --text \"Invoice charged twice\" --labels \"billing,technical\"".to_string(),
-            "lemma experiment --mode adversarial --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json".to_string(),
+            "lemma experiment --mode adversarial".to_string(),
             "lemma learn --phase 3".to_string(),
         ],
     }
@@ -738,8 +738,8 @@ fn build_phase_3() -> PhaseLesson {
         live_lab,
         quiz: build_phase_3_quiz(),
         next_step_commands: vec![
-            "lemma schema --schema schemas/support_triage.json --optimize --budget 128".to_string(),
-            "lemma compare --models laya,deberta-v3,modernbert-zeroshot,auto-best --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --slice-by auto".to_string(),
+            "lemma schema optimize --schema schema/questions.json --budget 128".to_string(),
+            "lemma compare --models laya,deberta-v3,modernbert-zeroshot,auto-best --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
             "lemma learn --phase 4".to_string(),
         ],
     }
@@ -873,7 +873,7 @@ fn build_phase_4() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma conformal --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --alpha 0.05".to_string(),
+        try_command: "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
     };
 
     PhaseLesson {
@@ -909,7 +909,7 @@ fn build_phase_4() -> PhaseLesson {
                 "ECE partitions predictions into M confidence bins and measures the weighted gap |acc(B_m) - conf(B_m)|. Brier Score measures mean squared probability error 1/N sum (p_i - y_i)^2.".to_string(),
             ),
             (
-                "Persisted Model Calibration (lemma calibrate --persist)".to_string(),
+                "Persisted Model Calibration (lemma calibrate --persist-to-model)".to_string(),
                 "Tunes optimal temperatures and Q-ATS profiles on a validation dataset and writes them to <model_dir>/lemma_calibration.json, which LayaClassifier auto-loads on every future run.".to_string(),
             ),
             (
@@ -934,9 +934,9 @@ fn build_phase_4() -> PhaseLesson {
         live_lab,
         quiz: build_phase_4_quiz(),
         next_step_commands: vec![
-            "lemma calibrate --all-models --persist --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json".to_string(),
-            "lemma conformal --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --alpha 0.05".to_string(),
-            "lemma ood --baseline data/customer_support.jsonl --file data/benchmarks/system1_arena_gold.jsonl".to_string(),
+            "lemma calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
+            "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
+            "lemma ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
             "lemma learn --phase 5".to_string(),
         ],
     }
@@ -1030,7 +1030,7 @@ fn build_phase_5() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schemas/support_triage.json".to_string(),
+        try_command: "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
     };
 
     PhaseLesson {
@@ -1069,7 +1069,7 @@ fn build_phase_5() -> PhaseLesson {
                 "Aleatoric uncertainty is average within-model entropy E_m[H(p_m)] (inherently ambiguous input). Epistemic uncertainty is Jensen-Shannon Divergence H(sum w_m p_m) - sum w_m H(p_m) (models disagree and need teacher data).".to_string(),
             ),
             (
-                "Pareto Cascade Risk Score (lemma cascade --sweep)".to_string(),
+                "Pareto Cascade Risk Score (lemma cascade sweep)".to_string(),
                 "Combines 1 - confidence, conformal set size |C(x)|, and Free-Energy OOD score into a composite risk metric, sweeping thresholds tau to find the Pareto frontier of accuracy vs $/1k items.".to_string(),
             ),
             (
@@ -1092,9 +1092,9 @@ fn build_phase_5() -> PhaseLesson {
         live_lab,
         quiz: build_phase_5_quiz(),
         next_step_commands: vec![
-            "lemma cascade --file data/customer_support.jsonl --schema schemas/support_triage.json --sweep".to_string(),
-            "lemma compare --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --slice-by auto".to_string(),
-            "lemma active --file data/customer_support.jsonl --schema schemas/support_triage.json --strategy composite --budget 5".to_string(),
+            "lemma cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+            "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+            "lemma active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 5".to_string(),
             "lemma guide".to_string(),
         ],
     }
@@ -1279,7 +1279,7 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
             term: "Bidirectional Self-Attention".to_string(),
             category: "Phase 1: Foundations".to_string(),
             definition: "Attention mechanism with no causal left-to-right mask, allowing every token to attend to both preceding and succeeding context simultaneously.".to_string(),
-            cli_flag_or_cmd: "lemma info --models".to_string(),
+            cli_flag_or_cmd: "lemma info --inventory".to_string(),
         },
         GlossaryEntry {
             term: "RoPE (Rotary Position Embeddings)".to_string(),
@@ -1345,13 +1345,13 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
             term: "ECE (Expected Calibration Error)".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Weighted average gap between predicted confidence and empirical accuracy across M probability bins (0.0 = perfectly calibrated).".to_string(),
-            cli_flag_or_cmd: "lemma calibrate --persist".to_string(),
+            cli_flag_or_cmd: "lemma calibrate --persist-to-model".to_string(),
         },
         GlossaryEntry {
             term: "Q-ATS (Quantile-Adaptive Temperature Scaling)".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "2026 calibration method that dynamically inflates temperature T(x) when an input's energy/distance exceeds in-distribution quantiles.".to_string(),
-            cli_flag_or_cmd: "lemma calibrate --all-models --persist".to_string(),
+            cli_flag_or_cmd: "lemma calibrate --all-checkpoints --persist-to-model --adaptive".to_string(),
         },
         GlossaryEntry {
             term: "Split Conformal Prediction".to_string(),
@@ -1363,7 +1363,7 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
             term: "Helmholtz Free-Energy OOD".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Out-of-distribution score E(x) = -T ln sum exp(z_i/T) that catches alien inputs where all raw class logits are simultaneously low.".to_string(),
-            cli_flag_or_cmd: "lemma ood".to_string(),
+            cli_flag_or_cmd: "lemma ood fit / eval".to_string(),
         },
         GlossaryEntry {
             term: "Epistemic vs. Aleatoric Uncertainty".to_string(),
@@ -1389,19 +1389,19 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             goal: "Classify inline text or a JSONL file and see exactly which tokens drove the decision.".to_string(),
             steps: vec![
                 (
-                    "Classify inline text with token attributions".to_string(),
-                    "lemma classify --text \"We did not have an outage, our invoice was double charged\" --labels \"billing,technical,security\" --explain".to_string(),
+                    "Classify & explain inline text (auto-detects top-1 vs top-2 labels)".to_string(),
+                    "lemma explain \"We did not have an outage, our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
                 ),
                 (
                     "Run a multi-question schema (Choice + Score + Noul) on a file".to_string(),
-                    "lemma classify --file data/customer_support.jsonl --schema schemas/support_triage.json".to_string(),
+                    "lemma classify --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Auto-route heterogeneous multilingual & long-context items".to_string(),
-                    "lemma classify --model auto-best --chunk-strategy head-tail --file data/customer_support.jsonl --schema schemas/support_triage.json".to_string(),
+                    "lemma classify --model auto-best --chunk-strategy head-tail --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
-            pro_tip: "Add --Hypothesis-template \"The user needs help with {label}: {description}\" when using NLI models (deberta-v3, modernbert-zeroshot) to boost zero-shot accuracy.".to_string(),
+            pro_tip: "Add --hypothesis-template \"The user needs help with {label}: {description}\" when using NLI models (deberta-v3, modernbert-zeroshot) to boost zero-shot accuracy.".to_string(),
         },
         WorkflowRecipe {
             slug: "arena".to_string(),
@@ -1410,15 +1410,15 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Check local checkpoint inventory and head paradigms".to_string(),
-                    "lemma info --models".to_string(),
+                    "lemma info --inventory".to_string(),
                 ),
                 (
                     "Run the full System 1 Arena with disaggregated slice matrix".to_string(),
-                    "lemma compare --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --slice-by auto".to_string(),
+                    "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
                 ),
                 (
                     "Evaluate a single model disaggregated by token length or script".to_string(),
-                    "lemma test --model deberta-v3 --chunk-strategy head-tail --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --slice-by length".to_string(),
+                    "lemma test --model deberta-v3 --chunk-strategy head-tail --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by length".to_string(),
                 ),
             ],
             pro_tip: "Never rely on aggregate accuracy alone! Always pass --slice-by auto to see the Checkpoint x Slice matrix before choosing a production model.".to_string(),
@@ -1430,18 +1430,18 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Tune & persist temperatures + Q-ATS for all checkpoints".to_string(),
-                    "lemma calibrate --all-models --persist --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json".to_string(),
+                    "lemma calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
                 ),
                 (
                     "Generate Split Conformal prediction sets at 95% coverage (alpha=0.05)".to_string(),
-                    "lemma conformal --file data/benchmarks/system1_arena_gold.jsonl --schema schemas/support_triage.json --alpha 0.05".to_string(),
+                    "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
                 ),
                 (
-                    "Detect Out-of-Distribution (OOD) anomalies via Free Energy".to_string(),
-                    "lemma ood --baseline data/customer_support.jsonl --file data/benchmarks/system1_arena_gold.jsonl".to_string(),
+                    "Fit Out-of-Distribution (OOD) detector via Helmholtz Free Energy".to_string(),
+                    "lemma ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
-            pro_tip: "Once `lemma calibrate --persist` writes `lemma_calibration.json` to the model folder, every subsequent `classify`, `test`, and `compare` run automatically uses the calibrated temperatures!".to_string(),
+            pro_tip: "Once `lemma calibrate --persist-to-model` writes `lemma_calibration.json` to the model folder, every subsequent `classify`, `test`, and `compare` run automatically uses the calibrated temperatures!".to_string(),
         },
         WorkflowRecipe {
             slug: "scaling".to_string(),
@@ -1449,16 +1449,16 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             goal: "Prevent head-budget overflow on large schemas and preserve tail signals on long documents.".to_string(),
             steps: vec![
                 (
-                    "Lint & compress a large schema to fit a 192-token head budget".to_string(),
-                    "lemma schema --schema schemas/support_triage.json --optimize --budget 128".to_string(),
+                    "Lint & compress a large schema to fit a 128-token head budget".to_string(),
+                    "lemma schema optimize --schema schema/questions.json --budget 128".to_string(),
                 ),
                 (
                     "Enable O(1) Bi-Encoder candidate shortlisting for K > 10 labels".to_string(),
-                    "lemma classify --model deberta-v3 --shortlist-k 4 --file data/customer_support.jsonl --schema schemas/support_triage.json".to_string(),
+                    "lemma classify --model deberta-v3 --shortlist-k 4 --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Use coarse-to-fine hierarchical routing trees".to_string(),
-                    "lemma route --file data/customer_support.jsonl --tree schemas/hierarchical_support.json --bench-flat".to_string(),
+                    "lemma route bench --file data/customer_support.jsonl --tree schema/support_hierarchy.json".to_string(),
                 ),
             ],
             pro_tip: "Combining `--shortlist-k 5` with `--chunk-strategy head-tail` lets 512-token NLI cross-encoders handle 2,000-token documents and 30-label schemas at 5x higher speed.".to_string(),
@@ -1470,22 +1470,22 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Sweep the System 1 / System 2 Pareto cost-accuracy frontier".to_string(),
-                    "lemma cascade --file data/customer_support.jsonl --schema schemas/support_triage.json --sweep".to_string(),
+                    "lemma cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Run 3-model Mixture-of-Decisions consensus with JSD dispute detection".to_string(),
-                    "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schemas/support_triage.json".to_string(),
+                    "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Curate an active learning review queue & RLCD distillation dataset".to_string(),
-                    "lemma active --file data/customer_support.jsonl --schema schemas/support_triage.json --strategy composite --budget 10".to_string(),
+                    "lemma active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 10".to_string(),
                 ),
                 (
-                    "Monitor PSI / Jensen-Shannon distribution drift and emit Merkle receipts".to_string(),
-                    "lemma drift --baseline data/customer_support.jsonl --file data/benchmarks/system1_arena_gold.jsonl".to_string(),
+                    "Monitor PSI / Jensen-Shannon distribution drift".to_string(),
+                    "lemma drift --baseline data/customer_support.jsonl --current data/system1_golden_benchmark.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
-            pro_tip: "Use `lemma consensus` on high-stakes decisions: when `epistemic_JSD` is high, models from different paradigms disagree—escalate those items to `lemma active` for teacher labeling!".to_string(),
+            pro_tip: "Use `lemma consensus` on high-stakes decisions: when `epistemic_JSD` is high, models from different paradigms disagree—escalate those items to `lemma active sample` for teacher labeling!".to_string(),
         },
     ]
 }
