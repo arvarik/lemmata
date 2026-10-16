@@ -222,6 +222,7 @@ impl SchemaSynthesizer {
                 target_col.replace('_', " ")
             ),
             criteria: Some(serde_json::Value::Object(criteria_map)),
+            hypothesis_template: None,
         };
 
         // Iterative pruning to guarantee fitting into head_budget

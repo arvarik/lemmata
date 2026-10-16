@@ -21,6 +21,8 @@ pub struct Question {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub criteria: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hypothesis_template: Option<String>,
 }
 
 impl Question {
@@ -33,6 +35,7 @@ impl Question {
             qtype: QuestionType::Choice,
             instructions: instructions.into(),
             criteria: Some(serde_json::Value::Object(map)),
+            hypothesis_template: None,
         }
     }
 
@@ -42,6 +45,7 @@ impl Question {
             qtype: QuestionType::Score,
             instructions: instructions.into(),
             criteria: Some(serde_json::Value::Array(arr)),
+            hypothesis_template: None,
         }
     }
 
@@ -50,7 +54,13 @@ impl Question {
             qtype: QuestionType::Noul,
             instructions: instructions.into(),
             criteria: None,
+            hypothesis_template: None,
         }
+    }
+
+    pub fn with_hypothesis_template(mut self, tpl: impl Into<String>) -> Self {
+        self.hypothesis_template = Some(tpl.into());
+        self
     }
 
     /// Extract rendered option texts for this question.
@@ -568,6 +578,7 @@ pub fn email_questions() -> BTreeMap<String, Question> {
                     "hr": "hiring, leave, payroll",
                     "other": "none of the above"
                 })),
+                hypothesis_template: None,
             },
         ),
         (
@@ -583,6 +594,7 @@ pub fn email_questions() -> BTreeMap<String, Question> {
                     "true": "phishing, scam, or fraud",
                     "false": "a legitimate email"
                 })),
+                hypothesis_template: None,
             },
         ),
         (

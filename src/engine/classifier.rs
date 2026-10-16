@@ -26,6 +26,8 @@ pub struct ClassifierConfig {
     pub qats_profile: Option<crate::engine::calibrate::QatsProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cost_weights: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hypothesis_template: Option<String>,
 }
 
 impl ClassifierConfig {
@@ -74,6 +76,7 @@ impl ClassifierConfig {
             local_weights_path,
             qats_profile: None,
             cost_weights: BTreeMap::new(),
+            hypothesis_template: None,
         }
     }
 }
@@ -111,6 +114,11 @@ impl LayaClassifier {
 
     pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
         Self::new(ClassifierConfig::with_checkpoint(checkpoint))
+    }
+
+    pub fn with_hypothesis_template(mut self, tpl: impl Into<String>) -> Self {
+        self.config.hypothesis_template = Some(tpl.into());
+        self
     }
 
     pub fn config(&self) -> &ClassifierConfig {
@@ -1125,6 +1133,16 @@ impl LayaClassifier {
                 if word.chars().count() > 3 && ins_lower.contains(word) {
                     score += 0.5;
                 }
+            }
+
+            if self.config.hypothesis_template.is_some() || q.hypothesis_template.is_some() {
+                score += crate::model::score_head_paradigm_adjustment(
+                    active_ckpt,
+                    state_lower,
+                    q,
+                    &opt_lower,
+                    self.config.hypothesis_template.as_deref(),
+                ) * 2.0;
             }
 
             // Fallback base logit to prevent zeros
