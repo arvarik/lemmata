@@ -13,6 +13,7 @@ pub mod explain;
 pub mod guardrail;
 pub mod hierarchical;
 pub mod learn;
+pub mod learn_visuals;
 pub mod metrics;
 pub mod model_calibration;
 pub mod ood;
@@ -57,6 +58,12 @@ pub use learn::{
     print_all_phases, print_curriculum_overview, print_glossary, print_phase_lesson,
     print_workflow_guide, run_interactive_session, run_interactive_session_with_reader,
     run_quiz_non_interactive,
+};
+pub use learn_visuals::{
+    c_blue, c_bold, c_cyan, c_dim, c_green, c_magenta, c_red, c_strike_red, c_yellow,
+    colorize_ascii_diagram, colorize_math_block, pill_cyan, pill_green, pill_magenta, pill_red,
+    pill_yellow, render_callout_card, render_phase_breadcrumb, render_phase_visual_demonstration,
+    render_prob_bar, render_token_attribution_heatmap, strip_ansi_codes, styled_table,
 };
 pub use metrics::{
     EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
