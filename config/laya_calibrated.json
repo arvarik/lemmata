@@ -15,7 +15,7 @@
     "samples_evaluated": 18,
     "raw_mean_ece": 0.2780388888888889,
     "calibrated_mean_ece": 0.1553111111111111,
-    "improvement_pct": -44.14050792255281,
+    "improvement_pct": 44.14050792255281,
     "calibrated_at": "2026-09-22T20:00:00Z"
   }
 }

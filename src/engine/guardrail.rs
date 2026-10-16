@@ -127,9 +127,12 @@ impl GuardrailEngine {
             }
         }
 
-        // Generate synthetic cryptographic hash and audit ID
+        // Generate cryptographic hash and audit ID
         let state_str = serde_json::to_string(&item.state).unwrap_or_default();
-        let input_hash = simple_hash_hex(&state_str);
+        let input_hash = format!(
+            "{:016x}",
+            crate::engine::metrics::fnv1a64(state_str.as_bytes())
+        );
         let audit_id = format!("aud_{}", &input_hash[..12]);
 
         let input_preview = if final_action == GuardAction::Redact {
@@ -173,9 +176,9 @@ impl GuardrailEngine {
             .collect()
     }
 
-    /// Internal condition evaluator supporting clauses joined by OR / AND.
+    /// Internal condition evaluator supporting parenthesized clauses joined by OR / AND.
     fn evaluate_condition(&self, cond_str: &str, decision: &DecisionResult) -> bool {
-        let trimmed = cond_str.trim();
+        let trimmed = strip_outer_parens(cond_str);
         if trimmed.eq_ignore_ascii_case("true") || trimmed == "1" {
             return true;
         }
@@ -183,28 +186,23 @@ impl GuardrailEngine {
             return false;
         }
 
-        // Split top-level OR clauses
-        let or_clauses: Vec<&str> = trimmed.split(" OR ").collect();
-        for or_c in or_clauses {
-            // Split AND clauses
-            let and_clauses: Vec<&str> = or_c.split(" AND ").collect();
-            let mut and_match = true;
-            for clause in and_clauses {
-                if !self.evaluate_single_predicate(clause.trim(), decision) {
-                    and_match = false;
-                    break;
-                }
-            }
-            if and_match {
-                return true;
-            }
+        if let Some(or_clauses) = split_top_level(trimmed, " or ") {
+            return or_clauses
+                .into_iter()
+                .any(|c| self.evaluate_condition(c, decision));
         }
 
-        false
+        if let Some(and_clauses) = split_top_level(trimmed, " and ") {
+            return and_clauses
+                .into_iter()
+                .all(|c| self.evaluate_condition(c, decision));
+        }
+
+        self.evaluate_single_predicate(trimmed, decision)
     }
 
     fn evaluate_single_predicate(&self, pred: &str, decision: &DecisionResult) -> bool {
-        // Operators to match in precedence order: ==, !=, >=, <=, >, <
+        let pred = strip_outer_parens(pred);
         let operators = ["==", "!=", ">=", "<=", ">", "<"];
         for op in operators {
             if let Some(pos) = pred.find(op) {
@@ -220,12 +218,8 @@ impl GuardrailEngine {
                     "==" => {
                         if let Some(s) = &actual_str {
                             s.eq_ignore_ascii_case(right)
-                        } else if let Some(n) = actual_num {
-                            if let Ok(r_num) = right.parse::<f64>() {
-                                (n - r_num).abs() < 1e-4
-                            } else {
-                                false
-                            }
+                        } else if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
+                            (n - r_num).abs() < 1e-4
                         } else {
                             false
                         }
@@ -233,44 +227,24 @@ impl GuardrailEngine {
                     "!=" => {
                         if let Some(s) = &actual_str {
                             !s.eq_ignore_ascii_case(right)
-                        } else if let Some(n) = actual_num {
-                            if let Ok(r_num) = right.parse::<f64>() {
-                                (n - r_num).abs() >= 1e-4
-                            } else {
-                                true
-                            }
+                        } else if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
+                            (n - r_num).abs() >= 1e-4
                         } else {
                             true
                         }
                     }
-                    ">=" => {
-                        if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
-                            n >= r_num - 1e-6
-                        } else {
-                            false
-                        }
-                    }
-                    "<=" => {
-                        if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
-                            n <= r_num + 1e-6
-                        } else {
-                            false
-                        }
-                    }
-                    ">" => {
-                        if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
-                            n > r_num + 1e-6
-                        } else {
-                            false
-                        }
-                    }
-                    "<" => {
-                        if let (Some(n), Ok(r_num)) = (actual_num, right.parse::<f64>()) {
-                            n < r_num - 1e-6
-                        } else {
-                            false
-                        }
-                    }
+                    ">=" => actual_num
+                        .zip(right.parse::<f64>().ok())
+                        .is_some_and(|(n, r)| n >= r - 1e-6),
+                    "<=" => actual_num
+                        .zip(right.parse::<f64>().ok())
+                        .is_some_and(|(n, r)| n <= r + 1e-6),
+                    ">" => actual_num
+                        .zip(right.parse::<f64>().ok())
+                        .is_some_and(|(n, r)| n > r),
+                    "<" => actual_num
+                        .zip(right.parse::<f64>().ok())
+                        .is_some_and(|(n, r)| n < r),
                     _ => false,
                 };
             }
@@ -395,12 +369,128 @@ impl GuardrailEngine {
     }
 }
 
-/// Lightweight deterministic 64-bit FNV-1a hex digest for audit hashing.
-fn simple_hash_hex(data: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in data.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+fn strip_outer_parens(mut s: &str) -> &str {
+    loop {
+        s = s.trim();
+        if s.starts_with('(') && s.ends_with(')') {
+            let inner = &s[1..s.len() - 1];
+            let mut depth = 0i32;
+            let mut in_quotes = false;
+            let mut balanced = true;
+            for c in inner.chars() {
+                if c == '"' || c == '\'' {
+                    in_quotes = !in_quotes;
+                } else if !in_quotes {
+                    if c == '(' {
+                        depth += 1;
+                    } else if c == ')' {
+                        depth -= 1;
+                        if depth < 0 {
+                            balanced = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if balanced && depth == 0 {
+                s = inner;
+                continue;
+            }
+        }
+        return s;
     }
-    format!("{:016x}", hash)
+}
+
+fn split_top_level<'a>(s: &'a str, sep_lower: &str) -> Option<Vec<&'a str>> {
+    let bytes = s.as_bytes();
+    let sep_len = sep_lower.len();
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+    let mut parts = Vec::new();
+    let mut last = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes {
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth = (depth - 1).max(0);
+            } else if depth == 0
+                && i + sep_len <= bytes.len()
+                && s.get(i..i + sep_len)
+                    .is_some_and(|sub| sub.eq_ignore_ascii_case(sep_lower))
+            {
+                parts.push(s[last..i].trim());
+                i += sep_len;
+                last = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        parts.push(s[last..].trim());
+        Some(parts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DecisionAnswer, QuestionType};
+
+    #[test]
+    fn test_parenthesized_boolean_and_strict_inequalities() {
+        let policy = GuardrailPolicy {
+            name: "test".into(),
+            version: "1.0".into(),
+            default_action: GuardAction::Allow,
+            rules: vec![PolicyRule {
+                id: "R1".into(),
+                description: None,
+                condition: "(department.choice == \"billing\" OR churn_risk.noul > 0.70) AND urgency.score > 1.0".into(),
+                action: GuardAction::Escalate,
+                target: None,
+                reason: None,
+            }],
+        };
+        let engine = GuardrailEngine::new(policy);
+        let item = DataItem::new("1", serde_json::json!({"text": "hi"}), "test");
+        let make_ans =
+            |choice: Option<&str>, score: Option<f64>, noul: Option<f64>| DecisionAnswer {
+                qtype: QuestionType::Choice,
+                choice: choice.map(str::to_string),
+                selected_labels: None,
+                score,
+                noul,
+                probabilities: BTreeMap::new(),
+                confidence: 0.9,
+                act_probability: Some(0.1),
+            };
+        let mut answers = BTreeMap::new();
+        answers.insert("department".into(), make_ans(Some("sales"), None, None));
+        answers.insert("churn_risk".into(), make_ans(None, None, Some(0.85)));
+        answers.insert("urgency".into(), make_ans(None, Some(1.0), None));
+        let mut dec = DecisionResult {
+            model: "laya".into(),
+            answers,
+            input_tokens: 5,
+            latency_ms: 1.0,
+        };
+        // urgency.score == 1.0 must NOT satisfy strict `> 1.0`
+        assert_eq!(engine.evaluate(&item, &dec).matched_rule, None);
+        // Raising urgency.score to 1.2 satisfies `(false OR true) AND true`
+        dec.answers.get_mut("urgency").unwrap().score = Some(1.2);
+        assert_eq!(
+            engine.evaluate(&item, &dec).matched_rule.as_deref(),
+            Some("R1")
+        );
+    }
 }
