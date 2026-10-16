@@ -28,15 +28,20 @@ pub use cache::{
 };
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
-    CalibrationReport, CalibrationTuner, QatsProfile,
+    CalibrationReport, CalibrationTuner, QatsProfile, parse_cost_weights,
 };
-pub use cascade::{CascadeConfig, CascadeDecision, CascadePolicy, CascadeRouter, SystemTier};
+pub use cascade::{
+    CascadeConfig, CascadeDecision, CascadePolicy, CascadeRouter, CascadeSweepPoint, SystemTier,
+};
 pub use classifier::{ClassifierConfig, LayaClassifier};
 pub use conformal::{ConformalEngine, ConformalReport};
 pub use consensus::{ConsensusEngine, ConsensusResult, ConsensusStatus};
 pub use drift::{DriftEngine, DriftReport, DriftSeverity};
-pub use evaluator::Evaluator;
-pub use experiment::ExperimentRunner;
+pub use evaluator::{BaselineComparison, Evaluator};
+pub use experiment::{
+    AdversarialPerturbationStat, AdversarialReport, ArenaDisagreement, ExperimentRunner,
+    ModelArenaEntry, ModelArenaReport,
+};
 pub use explain::AttributionEngine;
 pub use guardrail::{AuditRecord, GuardAction, GuardrailEngine, GuardrailPolicy, PolicyRule};
 pub use hierarchical::{

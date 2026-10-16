@@ -24,6 +24,8 @@ pub struct ClassifierConfig {
     pub local_weights_path: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qats_profile: Option<crate::engine::calibrate::QatsProfile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cost_weights: BTreeMap<String, f64>,
 }
 
 impl ClassifierConfig {
@@ -68,6 +70,7 @@ impl ClassifierConfig {
             multi_label_threshold: 0.40,
             local_weights_path: None,
             qats_profile: None,
+            cost_weights: BTreeMap::new(),
         }
     }
 }
@@ -322,8 +325,15 @@ impl LayaClassifier {
                         let mut best_p = -1.0;
                         for (i, (&p, key)) in probs.iter().zip(keys.iter()).enumerate() {
                             prob_map.insert(key.clone(), (p * 10000.0).round() / 10000.0);
-                            if p > best_p {
-                                best_p = p;
+                            let w = self
+                                .config
+                                .cost_weights
+                                .get(&key.to_lowercase())
+                                .or_else(|| self.config.cost_weights.get(key))
+                                .copied()
+                                .unwrap_or(1.0);
+                            if p * w > best_p {
+                                best_p = p * w;
                                 best_idx = i;
                             }
                         }
@@ -370,7 +380,22 @@ impl LayaClassifier {
                     );
                 }
                 QuestionType::Noul => {
-                    let p_true = probs.get(1).copied().unwrap_or(0.5);
+                    let raw_p_true = probs.get(1).copied().unwrap_or(0.5);
+                    let w_true = self
+                        .config
+                        .cost_weights
+                        .get("true")
+                        .or_else(|| self.config.cost_weights.get(qid))
+                        .copied()
+                        .unwrap_or(1.0);
+                    let w_false = self
+                        .config
+                        .cost_weights
+                        .get("false")
+                        .copied()
+                        .unwrap_or(1.0);
+                    let denom = (w_true * raw_p_true + w_false * (1.0 - raw_p_true)).max(1e-12);
+                    let p_true = (w_true * raw_p_true / denom).clamp(0.0, 1.0);
                     prob_map.insert("false".into(), ((1.0 - p_true) * 10000.0).round() / 10000.0);
                     prob_map.insert("true".into(), (p_true * 10000.0).round() / 10000.0);
 

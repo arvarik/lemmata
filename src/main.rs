@@ -10,8 +10,8 @@ use lemma::benchmark::BenchmarkRunner;
 use lemma::cli::{
     ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
     AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
-    CascadeCommands, Cli, Commands, CompletionsArgs, ConformalArgs, ConsensusArgs, DownloadArgs,
-    DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
+    CascadeCommands, Cli, Commands, CompareArgs, CompletionsArgs, ConformalArgs, ConsensusArgs,
+    DownloadArgs, DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
     HierarchicalCommands, InfoArgs, InspectArgs, OodArgs, OodCommands, OutputFormat, SchemaArgs,
     SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs, SchemaValidateArgs, ScrapeArgs, StatsArgs,
     StreamArgs, TestArgs,
@@ -23,7 +23,7 @@ use lemma::engine::{
     DecisionCache, DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine,
     GuardrailPolicy, HierarchicalRouter, LayaClassifier, OodDetector, OodProfile,
     SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline,
-    StreamPipelineConfig, UncertaintyStrategy, compute_schema_hash,
+    StreamPipelineConfig, UncertaintyStrategy, compute_schema_hash, parse_cost_weights,
 };
 use lemma::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
 use lemma::{
@@ -49,6 +49,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Download(args) => handle_download(args),
         Commands::Classify(args) => handle_classify(args),
         Commands::Experiment(args) => handle_experiment(args),
+        Commands::Compare(args) => handle_compare(args),
         Commands::Test(args) => handle_test(args),
         Commands::Bench(args) => handle_bench(args),
         Commands::Info(args) => handle_info(args),
@@ -197,6 +198,13 @@ fn apply_calibrated_config(
         && let Ok(profile) = serde_json::from_value::<lemma::engine::QatsProfile>(qats_val.clone())
     {
         config.qats_profile = Some(profile);
+    }
+    if let Some(cw_obj) = val.get("cost_weights").and_then(|v| v.as_object()) {
+        for (k, v) in cw_obj {
+            if let Some(w) = v.as_f64() {
+                config.cost_weights.insert(k.to_lowercase(), w);
+            }
+        }
     }
     Ok(())
 }
@@ -531,11 +539,17 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
         return Ok(());
     }
 
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let ckpt = parse_checkpoint(&args.checkpoint)?;
+    let classifier = LayaClassifier::with_checkpoint(ckpt);
     let temps = [0.5, 0.8, 1.0, 1.25, 1.5, 1.76, 2.0, 2.5];
+    let mode = if args.adversarial {
+        ExperimentMode::Adversarial
+    } else {
+        args.mode
+    };
 
     if args.json {
-        let out = match args.mode {
+        let out = match mode {
             ExperimentMode::Order => {
                 let (qid, _) = questions
                     .iter()
@@ -563,24 +577,25 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
                 serde_json::json!({ "mode": "temp", "sweep": rows })
             }
             ExperimentMode::Checkpoints => {
-                let mut rows = Vec::new();
-                for &ckpt in Checkpoint::all() {
-                    let m = Evaluator::new(LayaClassifier::with_checkpoint(ckpt))
-                        .evaluate(&items, &questions)?;
-                    rows.push(serde_json::json!({
-                        "checkpoint": ckpt.repo_id(), "backbone": ckpt.backbone(),
-                        "accuracy": m.accuracy, "ece": m.ece,
-                        "brier_score": m.brier_score, "act_escalate_rate": m.act_escalate_rate,
-                    }));
-                }
-                serde_json::json!({ "mode": "checkpoints", "results": rows })
+                let arena = ExperimentRunner::run_arena(&items, &questions, Checkpoint::all(), 5)?;
+                serde_json::json!({
+                    "mode": "checkpoints",
+                    "reference_model": arena.reference_model,
+                    "results": arena.models,
+                    "top_disagreements": arena.top_disagreements,
+                })
+            }
+            ExperimentMode::Adversarial => {
+                let report =
+                    ExperimentRunner::test_adversarial_robustness(&classifier, &items, &questions)?;
+                serde_json::to_value(report)?
             }
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
 
-    match args.mode {
+    match mode {
         ExperimentMode::Order => {
             let (qid, question) = questions
                 .iter()
@@ -600,6 +615,46 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
         ExperimentMode::Checkpoints => {
             ExperimentRunner::compare_checkpoints(&items, &questions)?;
         }
+        ExperimentMode::Adversarial => {
+            let report =
+                ExperimentRunner::test_adversarial_robustness(&classifier, &items, &questions)?;
+            ExperimentRunner::print_adversarial_report(&report);
+        }
+    }
+    Ok(())
+}
+
+fn handle_compare(args: CompareArgs) -> Result<()> {
+    let questions =
+        load_questions_or_inline(args.schema.as_deref(), "Classify the topic or sentiment")?;
+    let items =
+        resolve_data_source(&args.data_dir, args.file.as_deref(), false, None)?.read_items()?;
+    if items.is_empty() {
+        bail!("No data items found for Model Arena comparison.");
+    }
+
+    let checkpoints: Vec<Checkpoint> = if args.checkpoints.eq_ignore_ascii_case("all") {
+        Checkpoint::all().to_vec()
+    } else {
+        let list: Vec<Checkpoint> = args
+            .checkpoints
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_checkpoint)
+            .collect::<Result<_>>()?;
+        if list.is_empty() {
+            bail!("At least one checkpoint must be specified for comparison");
+        }
+        list
+    };
+
+    let report =
+        ExperimentRunner::run_arena(&items, &questions, &checkpoints, args.top_disagreements)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        ExperimentRunner::print_arena_report(&report);
     }
     Ok(())
 }
@@ -626,6 +681,9 @@ fn handle_test(args: TestArgs) -> Result<()> {
         checkpoint,
         ..Default::default()
     };
+    if let Some(config_path) = &args.config {
+        apply_calibrated_config(&mut cfg, config_path, args.temperature.is_none())?;
+    }
     if let Some(t) = args.temperature {
         cfg.temperature = t;
     }
@@ -641,10 +699,42 @@ fn handle_test(args: TestArgs) -> Result<()> {
     );
     let metrics = evaluator.evaluate(&items, &questions)?;
 
+    if let Some(save_path) = &args.save_baseline {
+        write_json_file(save_path, &metrics)?;
+        log_status(
+            args.json,
+            format!("💾 Saved baseline metrics to: {}", save_path.display()),
+        );
+    }
+
+    let baseline_diff = if let Some(base_path) = &args.baseline {
+        let base_metrics: lemma::engine::EvaluationMetrics =
+            serde_json::from_reader(std::fs::File::open(base_path)?)?;
+        Some(Evaluator::compare_baseline(
+            &metrics,
+            &base_metrics,
+            args.max_regression,
+            args.max_ece,
+        ))
+    } else {
+        None
+    };
+
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&metrics)?);
+        if let Some(diff) = &baseline_diff {
+            let mut val = serde_json::to_value(&metrics)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("baseline_diff".into(), serde_json::to_value(diff)?);
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&metrics)?);
+        }
     } else {
         Evaluator::print_report(&metrics);
+        if let Some(diff) = &baseline_diff {
+            Evaluator::print_baseline_diff(diff);
+        }
     }
 
     if let Some(min_acc) = args.min_accuracy {
@@ -662,6 +752,25 @@ fn handle_test(args: TestArgs) -> Result<()> {
                 metrics.accuracy * 100.0,
                 min_acc * 100.0
             ),
+        );
+    }
+
+    if let Some(limit_ece) = args.max_ece
+        && metrics.ece > limit_ece + 1e-6
+    {
+        bail!(
+            "Calibration gate failed! Observed ECE {:.4} exceeds maximum allowed {:.4}",
+            metrics.ece,
+            limit_ece
+        );
+    }
+
+    if let Some(diff) = &baseline_diff
+        && diff.regressed
+    {
+        bail!(
+            "Baseline regression gate failed:\n   - {}",
+            diff.reasons.join("\n   - ")
         );
     }
     Ok(())
@@ -1641,52 +1750,108 @@ fn handle_ood(args: OodArgs) -> Result<()> {
     Ok(())
 }
 
+fn handle_cascade_tune(tune_args: lemma::cli::CascadeTuneArgs, force_sweep: bool) -> Result<()> {
+    let checkpoint = parse_checkpoint(&tune_args.checkpoint)?;
+    let questions = load_questions_from_file(&tune_args.schema)?;
+    let items = lemma::datasource::FileSource::new(&tune_args.val_data).read_items()?;
+    let classifier = LayaClassifier::with_checkpoint(checkpoint);
+
+    if force_sweep || tune_args.sweep {
+        log_status(
+            tune_args.json,
+            format!(
+                "📈 Sweeping System 1 / System 2 Pareto frontier on {} samples (SLA >= {:.1}%)...",
+                items.len(),
+                tune_args.target_accuracy * 100.0
+            ),
+        );
+        let points = CascadeRouter::sweep_pareto(
+            &items,
+            &questions,
+            &classifier,
+            tune_args.target_accuracy,
+            tune_args.system2_cost,
+        )?;
+        if tune_args.json {
+            println!("{}", serde_json::to_string_pretty(&points)?);
+        } else {
+            let mut table = Table::new();
+            table.set_header(vec![
+                Cell::new("Risk τ").fg(Color::Cyan),
+                Cell::new("S1 Coverage").fg(Color::Green),
+                Cell::new("S2 Escalate").fg(Color::Yellow),
+                Cell::new("Expected Acc").fg(Color::White),
+                Cell::new("Cost / 1k").fg(Color::Blue),
+                Cell::new("LLM Savings").fg(Color::Magenta),
+                Cell::new("SLA Status").fg(Color::Green),
+            ]);
+            for p in &points {
+                let status = if p.is_optimal {
+                    "⭐ Optimal SLA"
+                } else if p.meets_sla {
+                    "✅ Meets SLA"
+                } else {
+                    "Below SLA"
+                };
+                table.add_row(vec![
+                    Cell::new(format!("{:.2}", p.threshold)),
+                    Cell::new(format!("{:.1}%", p.system1_coverage_rate * 100.0)),
+                    Cell::new(format!("{:.1}%", p.system2_escalation_rate * 100.0)),
+                    Cell::new(format!("{:.2}%", p.expected_accuracy * 100.0)),
+                    Cell::new(format!("${:.2}", p.estimated_cost_per_1000)),
+                    Cell::new(format!("-{:.1}%", p.cost_savings_percent)),
+                    Cell::new(status),
+                ]);
+            }
+            println!("\n⚖️  System 1 / System 2 Pareto Frontier Sweep:\n{table}\n");
+        }
+        return Ok(());
+    }
+
+    log_status(
+        tune_args.json,
+        format!(
+            "📈 Tuning Pareto-optimal System 1 / System 2 cascade on {} samples...",
+            items.len()
+        ),
+    );
+    let policy = CascadeRouter::tune_pareto(
+        &items,
+        &questions,
+        &classifier,
+        tune_args.target_accuracy,
+        tune_args.system2_cost,
+    )?;
+
+    if let Some(export_path) = &tune_args.export_policy {
+        write_json_file(export_path, &policy)?;
+        log_status(
+            tune_args.json,
+            format!("💾 Exported cascade policy to: {}", export_path.display()),
+        );
+    }
+
+    if tune_args.json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+    } else {
+        println!(
+            "\n⚖️  Pareto Frontier Optimization Results:\n   Target Accuracy SLA   : {:.1}%\n   Expected Hybrid Acc   : {:.2}%\n   Optimal Threshold τ*  : {:.2}\n   System 1 Fast Coverage: {:.1}%\n   System 2 Escalation   : {:.1}%\n   Cost Savings vs LLM   : -{:.1}%\n   Estimated Cost / 1k   : ${:.2}",
+            policy.target_accuracy * 100.0,
+            policy.expected_accuracy * 100.0,
+            policy.optimal_threshold,
+            policy.system1_coverage_rate * 100.0,
+            policy.system2_escalation_rate * 100.0,
+            policy.cost_savings_percent,
+            policy.estimated_cost_per_1000
+        );
+    }
+    Ok(())
+}
+
 fn handle_cascade(args: CascadeArgs) -> Result<()> {
     match args.action {
-        CascadeCommands::Tune(tune_args) => {
-            let checkpoint = parse_checkpoint(&tune_args.checkpoint)?;
-            let questions = load_questions_from_file(&tune_args.schema)?;
-            let items = lemma::datasource::FileSource::new(&tune_args.val_data).read_items()?;
-
-            log_status(
-                tune_args.json,
-                format!(
-                    "📈 Tuning Pareto-optimal System 1 / System 2 cascade on {} samples...",
-                    items.len()
-                ),
-            );
-            let classifier = LayaClassifier::with_checkpoint(checkpoint);
-            let policy = CascadeRouter::tune_pareto(
-                &items,
-                &questions,
-                &classifier,
-                tune_args.target_accuracy,
-                tune_args.system2_cost,
-            )?;
-
-            if let Some(export_path) = &tune_args.export_policy {
-                write_json_file(export_path, &policy)?;
-                log_status(
-                    tune_args.json,
-                    format!("💾 Exported cascade policy to: {}", export_path.display()),
-                );
-            }
-
-            if tune_args.json {
-                println!("{}", serde_json::to_string_pretty(&policy)?);
-            } else {
-                println!(
-                    "\n⚖️  Pareto Frontier Optimization Results:\n   Target Accuracy SLA   : {:.1}%\n   Expected Hybrid Acc   : {:.2}%\n   Optimal Threshold τ*  : {:.2}\n   System 1 Fast Coverage: {:.1}%\n   System 2 Escalation   : {:.1}%\n   Cost Savings vs LLM   : -{:.1}%\n   Estimated Cost / 1k   : ${:.2}",
-                    policy.target_accuracy * 100.0,
-                    policy.expected_accuracy * 100.0,
-                    policy.optimal_threshold,
-                    policy.system1_coverage_rate * 100.0,
-                    policy.system2_escalation_rate * 100.0,
-                    policy.cost_savings_percent,
-                    policy.estimated_cost_per_1000
-                );
-            }
-        }
+        CascadeCommands::Tune(tune_args) => handle_cascade_tune(tune_args, false)?,
+        CascadeCommands::Sweep(tune_args) => handle_cascade_tune(tune_args, true)?,
         CascadeCommands::Run(run_args) => {
             let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
             let questions =
@@ -2064,10 +2229,14 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
         .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
         .unwrap_or("validation_dataset");
 
-    let tuner = CalibrationTuner::new(checkpoint)
+    let mut tuner = CalibrationTuner::new(checkpoint)
         .with_loss(loss)
         .with_bins(args.bins)
         .with_qats(args.adaptive, args.adaptive_gamma);
+
+    if let Some(cw_spec) = &args.cost_weights {
+        tuner = tuner.with_cost_weights(parse_cost_weights(cw_spec)?);
+    }
 
     let (report, calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
 
@@ -2077,6 +2246,11 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
             "💾 Calibrated agent config exported to: {}",
             export_path.display()
         );
+    }
+
+    if args.json {
+        println!("{}", CalibrationTuner::format_json(&report)?);
+        return Ok(());
     }
 
     match args.format {

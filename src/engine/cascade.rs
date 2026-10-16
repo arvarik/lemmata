@@ -72,6 +72,19 @@ pub struct CascadePolicy {
     pub estimated_cost_per_1000: f64,
 }
 
+/// A single evaluated risk threshold point along the System 1 / System 2 Pareto frontier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadeSweepPoint {
+    pub threshold: f64,
+    pub expected_accuracy: f64,
+    pub system1_coverage_rate: f64,
+    pub system2_escalation_rate: f64,
+    pub cost_savings_percent: f64,
+    pub estimated_cost_per_1000: f64,
+    pub meets_sla: bool,
+    pub is_optimal: bool,
+}
+
 /// Cost-aware hybrid System 1 / System 2 router.
 pub struct CascadeRouter {
     config: CascadeConfig,
@@ -192,39 +205,18 @@ impl CascadeRouter {
         })
     }
 
-    /// Tune the Pareto-optimal threshold tau* to satisfy target accuracy with minimal cost using default config.
-    pub fn tune_pareto(
+    fn collect_sample_evals(
         items: &[DataItem],
         questions: &BTreeMap<String, Question>,
         classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
-    ) -> Result<CascadePolicy> {
-        Self::tune_pareto_with_config(
-            items,
-            questions,
-            classifier,
-            target_accuracy,
-            system2_cost,
-            &CascadeConfig::default(),
-        )
-    }
-
-    /// Tune the Pareto-optimal threshold tau* with custom router config weights.
-    pub fn tune_pareto_with_config(
-        items: &[DataItem],
-        questions: &BTreeMap<String, Question>,
-        classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
         config: &CascadeConfig,
-    ) -> Result<CascadePolicy> {
+    ) -> Result<Vec<(f64, bool)>> {
         if items.is_empty() {
             bail!("Cannot tune cascade on empty dataset");
         }
 
         let router = Self::new(config.clone());
-        let mut sample_evals: Vec<(f64, bool)> = Vec::new(); // (risk, is_s1_correct)
+        let mut sample_evals: Vec<(f64, bool)> = Vec::new();
         let batch_results = classifier.classify_batch(items, questions)?;
 
         for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
@@ -298,76 +290,167 @@ impl CascadeRouter {
         if sample_evals.is_empty() {
             bail!("No labeled items with ground truth found for Pareto tuning");
         }
+        Ok(sample_evals)
+    }
 
-        // Sweep candidate thresholds tau in [0.10, 0.90]
+    fn eval_at_tau(
+        sample_evals: &[(f64, bool)],
+        tau: f64,
+        system2_cost: f64,
+    ) -> (f64, f64, f64, f64, f64) {
+        let n = sample_evals.len() as f64;
+        let assumed_s2_acc = 0.98;
+        let mut s1_count = 0.0;
+        let mut s1_correct = 0.0;
+        for &(risk, is_correct) in sample_evals {
+            if risk <= tau {
+                s1_count += 1.0;
+                if is_correct {
+                    s1_correct += 1.0;
+                }
+            }
+        }
+        let s1_acc = if s1_count > 0.0 {
+            s1_correct / s1_count
+        } else {
+            1.0
+        };
+        let s1_rate = s1_count / n;
+        let s2_rate = 1.0 - s1_rate;
+        let hybrid_acc = s1_rate * s1_acc + s2_rate * assumed_s2_acc;
+        let total_cost = (n - s1_count) * system2_cost;
+        let cost_per_1000 = s2_rate * 1000.0 * system2_cost;
+        let savings_pct = if system2_cost > 0.0 {
+            s1_rate * 100.0
+        } else {
+            0.0
+        };
+        (hybrid_acc, s1_rate, total_cost, cost_per_1000, savings_pct)
+    }
+
+    /// Sweep thresholds in [0.05, 0.95] (step 0.05) and return the Pareto cost/coverage/accuracy frontier.
+    pub fn sweep_pareto(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        classifier: &LayaClassifier,
+        target_accuracy: f64,
+        system2_cost: f64,
+    ) -> Result<Vec<CascadeSweepPoint>> {
+        Self::sweep_pareto_with_config(
+            items,
+            questions,
+            classifier,
+            target_accuracy,
+            system2_cost,
+            &CascadeConfig::default(),
+        )
+    }
+
+    /// Sweep thresholds in [0.05, 0.95] (step 0.05) with custom router config weights.
+    pub fn sweep_pareto_with_config(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        classifier: &LayaClassifier,
+        target_accuracy: f64,
+        system2_cost: f64,
+        config: &CascadeConfig,
+    ) -> Result<Vec<CascadeSweepPoint>> {
+        let sample_evals = Self::collect_sample_evals(items, questions, classifier, config)?;
+        let grid: Vec<f64> = (1..=19).map(|i| (i * 5) as f64 / 100.0).collect();
+
+        let mut best_idx = None;
+        let mut best_cost = f64::INFINITY;
+        let mut points = Vec::with_capacity(grid.len());
+
+        for (idx, &tau) in grid.iter().enumerate() {
+            let (hybrid_acc, s1_cov, total_cost, cost_1k, savings) =
+                Self::eval_at_tau(&sample_evals, tau, system2_cost);
+            let meets_sla = hybrid_acc >= target_accuracy;
+            if meets_sla && total_cost < best_cost {
+                best_cost = total_cost;
+                best_idx = Some(idx);
+            }
+            points.push(CascadeSweepPoint {
+                threshold: tau,
+                expected_accuracy: (hybrid_acc * 10000.0).round() / 10000.0,
+                system1_coverage_rate: (s1_cov * 10000.0).round() / 10000.0,
+                system2_escalation_rate: ((1.0 - s1_cov) * 10000.0).round() / 10000.0,
+                cost_savings_percent: (savings * 100.0).round() / 100.0,
+                estimated_cost_per_1000: (cost_1k * 100.0).round() / 100.0,
+                meets_sla,
+                is_optimal: false,
+            });
+        }
+        if let Some(i) = best_idx {
+            points[i].is_optimal = true;
+        }
+        Ok(points)
+    }
+
+    /// Tune the Pareto-optimal threshold tau* to satisfy target accuracy with minimal cost using default config.
+    pub fn tune_pareto(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        classifier: &LayaClassifier,
+        target_accuracy: f64,
+        system2_cost: f64,
+    ) -> Result<CascadePolicy> {
+        Self::tune_pareto_with_config(
+            items,
+            questions,
+            classifier,
+            target_accuracy,
+            system2_cost,
+            &CascadeConfig::default(),
+        )
+    }
+
+    /// Tune the Pareto-optimal threshold tau* with custom router config weights.
+    pub fn tune_pareto_with_config(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        classifier: &LayaClassifier,
+        target_accuracy: f64,
+        system2_cost: f64,
+        config: &CascadeConfig,
+    ) -> Result<CascadePolicy> {
+        let sample_evals = Self::collect_sample_evals(items, questions, classifier, config)?;
         let candidate_taus: Vec<f64> = (10..=90).map(|i| i as f64 / 100.0).collect();
         let mut best_tau = 0.45;
         let mut best_cost = f64::INFINITY;
         let mut best_acc = 0.0;
         let mut best_s1_cov = 0.0;
-
-        let n = sample_evals.len() as f64;
-        let assumed_s2_acc = 0.98; // Frontier LLM average accuracy
+        let mut best_cost_1k = 0.0;
+        let mut best_savings = 0.0;
 
         for &tau in &candidate_taus {
-            let mut s1_count = 0.0;
-            let mut s1_correct = 0.0;
-            let mut s2_count = 0.0;
-
-            for &(risk, is_correct) in &sample_evals {
-                if risk <= tau {
-                    s1_count += 1.0;
-                    if is_correct {
-                        s1_correct += 1.0;
-                    }
-                } else {
-                    s2_count += 1.0;
-                }
-            }
-
-            let s1_acc = if s1_count > 0.0 {
-                s1_correct / s1_count
-            } else {
-                1.0
-            };
-
-            let s1_rate = s1_count / n;
-            let s2_rate = s2_count / n;
-            let hybrid_acc = s1_rate * s1_acc + s2_rate * assumed_s2_acc;
-            let total_cost = s2_count * system2_cost;
-
+            let (hybrid_acc, s1_rate, total_cost, cost_1k, savings) =
+                Self::eval_at_tau(&sample_evals, tau, system2_cost);
             if hybrid_acc >= target_accuracy && total_cost < best_cost {
                 best_cost = total_cost;
                 best_tau = tau;
                 best_acc = hybrid_acc;
                 best_s1_cov = s1_rate;
+                best_cost_1k = cost_1k;
+                best_savings = savings;
             }
         }
 
         if best_cost.is_infinite() {
             bail!(
-                "Target accuracy {:.2}% cannot be achieved by cascade (maximum achievable: {:.2}%). Consider lowering target accuracy.",
-                target_accuracy * 100.0,
-                assumed_s2_acc * 100.0
+                "Target accuracy {:.2}% cannot be achieved by cascade (maximum achievable: 98.00%). Consider lowering target accuracy.",
+                target_accuracy * 100.0
             );
         }
-
-        let s2_esc_rate = 1.0 - best_s1_cov;
-        let cost_per_1000 = s2_esc_rate * 1000.0 * system2_cost;
-        let savings_percent = if system2_cost > 0.0 {
-            best_s1_cov * 100.0
-        } else {
-            0.0
-        };
 
         Ok(CascadePolicy {
             optimal_threshold: best_tau,
             target_accuracy,
             expected_accuracy: (best_acc * 10000.0).round() / 10000.0,
             system1_coverage_rate: (best_s1_cov * 10000.0).round() / 10000.0,
-            system2_escalation_rate: (s2_esc_rate * 10000.0).round() / 10000.0,
-            cost_savings_percent: (savings_percent * 100.0).round() / 100.0,
-            estimated_cost_per_1000: (cost_per_1000 * 100.0).round() / 100.0,
+            system2_escalation_rate: ((1.0 - best_s1_cov) * 10000.0).round() / 10000.0,
+            cost_savings_percent: (best_savings * 100.0).round() / 100.0,
+            estimated_cost_per_1000: (best_cost_1k * 100.0).round() / 100.0,
         })
     }
 }
