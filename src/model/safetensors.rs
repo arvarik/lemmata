@@ -18,7 +18,9 @@ pub struct SafetensorsReport {
     pub total_parameters: u64,
     pub dtypes: BTreeMap<String, usize>,
     pub tensor_shapes: BTreeMap<String, Vec<usize>>,
+    pub architecture: String,
     pub is_laya_compatible: bool,
+    pub has_classifier_head: bool,
     pub has_act_head: bool,
     pub has_decision_scorer: bool,
     pub file_size_bytes: u64,
@@ -69,6 +71,12 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
     let mut tensor_shapes = BTreeMap::new();
     let mut has_act_head = false;
     let mut has_decision_scorer = false;
+    let mut has_nli_classifier = false;
+    let mut has_lm_head = false;
+    let mut is_deberta = false;
+    let mut is_modernbert = false;
+    let mut is_eurobert = false;
+    let mut is_neobert = false;
 
     for (name, val) in raw_header {
         if name == "__metadata__" {
@@ -86,19 +94,55 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
             if name.contains("scorer") || name.contains("mask_scorer") {
                 has_decision_scorer = true;
             }
+            if name == "classifier.weight" || name.ends_with(".classifier.weight") {
+                has_nli_classifier = true;
+            }
+            if name.contains("lm_head") || name.starts_with("decoder.") {
+                has_lm_head = true;
+            }
+            if name.starts_with("deberta.") || name.contains("rel_embeddings") {
+                is_deberta = true;
+            }
+            if name.contains("tok_embeddings") || name.contains("Wqkv") {
+                is_modernbert = true;
+            }
+            if name.contains("self_attn.q_proj") || name.contains("mlp.gate_proj") {
+                is_eurobert = true;
+            }
+            if name.starts_with("transformer_encoder.") || name.contains("qkv.weight") {
+                is_neobert = true;
+            }
 
             tensor_shapes.insert(name, info.shape);
         }
     }
 
     let is_laya = has_act_head || has_decision_scorer || tensor_shapes.contains_key("temperature");
+    let has_classifier_head = is_laya || has_nli_classifier || has_lm_head;
+    let architecture = if is_laya {
+        "Laya System 1 (ModernBERT/mmBERT + Decision/Act Heads)".to_string()
+    } else if is_deberta && has_nli_classifier {
+        "DeBERTa-v3 Zero-Shot Sequence Classifier (NLI)".to_string()
+    } else if is_modernbert && has_nli_classifier {
+        "ModernBERT Zero-Shot Sequence Classifier (NLI)".to_string()
+    } else if is_eurobert {
+        "EuroBERT Bidirectional Encoder (RoPE + SwiGLU + MLM Head)".to_string()
+    } else if is_neobert {
+        "NeoBERT Representation Encoder (RoPE + SwiGLU + MLM Head)".to_string()
+    } else if has_nli_classifier {
+        "Encoder Sequence Classifier".to_string()
+    } else {
+        "Pretrained Transformer Encoder".to_string()
+    };
 
     Ok(SafetensorsReport {
         total_tensors: tensor_shapes.len(),
         total_parameters,
         dtypes,
         tensor_shapes,
+        architecture,
         is_laya_compatible: is_laya,
+        has_classifier_head,
         has_act_head,
         has_decision_scorer,
         file_size_bytes: file_size,

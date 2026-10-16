@@ -53,12 +53,17 @@ impl Downloader {
         }
     }
 
-    /// Download a Laya checkpoint to a local directory.
+    /// Download a System 1 checkpoint to a local directory.
     pub fn download(&self, checkpoint: Checkpoint, target_dir: &Path, dry_run: bool) -> Result<()> {
+        let effective_dir = if target_dir == Path::new("models/laya") {
+            checkpoint.local_dir()
+        } else {
+            target_dir.to_path_buf()
+        };
         let repo_id = checkpoint.repo_id();
-        let target_str = target_dir.display().to_string();
+        let target_str = effective_dir.display().to_string();
 
-        println!("⚡ Laya Checkpoint: {}", repo_id);
+        println!("⚡ System 1 Checkpoint: {}", repo_id);
         println!("   Backbone:        {}", checkpoint.backbone());
         println!("   Parameters:      {}", checkpoint.param_count());
         println!("   Context Window:  {} tokens", checkpoint.context_window());
@@ -73,18 +78,31 @@ impl Downloader {
         if dry_run {
             println!("\n[DRY RUN] Would execute command:");
             println!(
-                "   {} download {} --local-dir {}",
+                "   {} download {} --local-dir {} --exclude \"onnx/*\" --exclude \"*.bin\"",
                 self.cli_binary, repo_id, target_str
             );
             return Ok(());
         }
 
-        std::fs::create_dir_all(target_dir)
+        std::fs::create_dir_all(&effective_dir)
             .with_context(|| format!("Failed to create directory: {}", target_str))?;
 
         println!("\n📥 Downloading model files via {}...", self.cli_binary);
         let mut cmd = Command::new(&self.cli_binary);
-        cmd.args(["download", repo_id, "--local-dir", &target_str]);
+        cmd.args([
+            "download",
+            repo_id,
+            "--local-dir",
+            &target_str,
+            "--exclude",
+            "onnx/*",
+            "--exclude",
+            "*.bin",
+            "--exclude",
+            "img/*",
+            "--exclude",
+            "*.jpeg",
+        ]);
 
         let status = cmd
             .status()
@@ -97,7 +115,7 @@ impl Downloader {
             );
         }
 
-        let report = self.verify_checkpoint(checkpoint, target_dir)?;
+        let report = self.verify_checkpoint(checkpoint, &effective_dir)?;
         if !report.is_valid {
             bail!(
                 "Verification failed after download in {}; missing required files: {:?}",
@@ -112,7 +130,7 @@ impl Downloader {
         Ok(())
     }
 
-    /// Verify that essential Laya files are present for a specific checkpoint under `target_dir`.
+    /// Verify that essential model files are present for a specific checkpoint under `target_dir`.
     pub fn verify_checkpoint(
         &self,
         checkpoint: Checkpoint,
@@ -125,32 +143,47 @@ impl Downloader {
                 return self.verify(&candidate);
             }
         }
+        if target_dir == Path::new("models/laya") {
+            let ckpt_dir = checkpoint.local_dir();
+            if ckpt_dir != target_dir && ckpt_dir.exists() {
+                return self.verify(&ckpt_dir);
+            }
+        }
         self.verify(target_dir)
     }
 
-    /// Verify that essential Laya files are present in the target directory.
+    /// Verify that essential model files (Laya or standard Hugging Face Safetensors layout) are present.
     pub fn verify(&self, target_dir: &Path) -> Result<VerificationReport> {
-        let resolved_dir = if !target_dir.join("rl_agent_config.json").exists() {
+        let resolved_dir = if !target_dir.join("rl_agent_config.json").exists()
+            && !target_dir.join("config.json").exists()
+        {
             ["multilingual", "typed-decisions"]
                 .iter()
                 .map(|sub| target_dir.join(sub))
-                .find(|p| p.join("rl_agent_config.json").exists())
+                .find(|p| p.join("rl_agent_config.json").exists() || p.join("config.json").exists())
                 .unwrap_or_else(|| target_dir.to_path_buf())
         } else {
             target_dir.to_path_buf()
         };
 
-        let required_files = [
-            "rl_agent_config.json",
-            "model.safetensors",
-            "tokenizer/tokenizer.json",
-            "encoder/config.json",
-        ];
+        let is_laya_layout = resolved_dir.join("rl_agent_config.json").exists()
+            || resolved_dir.join("encoder/config.json").exists();
+
+        let required_files: &[&str] = if is_laya_layout {
+            &[
+                "rl_agent_config.json",
+                "model.safetensors",
+                "tokenizer/tokenizer.json",
+                "encoder/config.json",
+            ]
+        } else {
+            &["config.json", "model.safetensors", "tokenizer.json"]
+        };
 
         let mut found = Vec::new();
         let mut missing = Vec::new();
 
-        for rel in required_files {
+        for &rel in required_files {
             let p = resolved_dir.join(rel);
             if p.exists() {
                 let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
