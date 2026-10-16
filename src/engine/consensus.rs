@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use crate::datasource::DataItem;
-use crate::model::{Checkpoint, DecisionAnswer, Question, QuestionType};
+use crate::model::{Checkpoint, Question, QuestionType};
 
 /// Status of multi-checkpoint agreement for an item or question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,132 +108,135 @@ impl ConsensusEngine {
             .map(|clf| clf.classify_batch(items, questions))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut consensus_results = Vec::with_capacity(items.len());
+        let consensus_results: Vec<ConsensusResult> = (0..items.len())
+            .into_par_iter()
+            .map(|item_idx| {
+                let item_id = &items[item_idx].id;
+                let mut q_consensus_map = BTreeMap::new();
+                let mut overall_disputed = false;
+                let mut max_latency = 0.0f64;
 
-        for item_idx in 0..items.len() {
-            let item_id = &items[item_idx].id;
-            let mut q_consensus_map = BTreeMap::new();
-            let mut overall_disputed = false;
-            let mut max_latency = 0.0f64;
+                for (qid, q) in questions {
+                    let mut votes: BTreeMap<String, String> = BTreeMap::new();
+                    let mut all_prob_maps: Vec<BTreeMap<String, f64>> = Vec::new();
 
-            for (qid, q) in questions {
-                let mut votes: BTreeMap<String, String> = BTreeMap::new();
-                let mut all_prob_maps: Vec<BTreeMap<String, f64>> = Vec::new();
-                let mut answers: Vec<&DecisionAnswer> = Vec::new();
-
-                for (c_idx, ckpt) in self.checkpoints.iter().enumerate() {
-                    let (_, dec) = &ckpt_results[c_idx][item_idx];
-                    max_latency = max_latency.max(dec.latency_ms);
-                    if let Some(ans) = dec.answers.get(qid) {
-                        answers.push(ans);
-                        let pred_str = if let Some(c) = &ans.choice {
-                            c.clone()
-                        } else if let Some(s) = ans.score {
-                            format!("{:.0}", s.round())
-                        } else if let Some(n) = ans.noul {
-                            if n > 0.5 {
-                                "true".into()
+                    for (c_idx, ckpt) in self.checkpoints.iter().enumerate() {
+                        let (_, dec) = &ckpt_results[c_idx][item_idx];
+                        max_latency = max_latency.max(dec.latency_ms);
+                        if let Some(ans) = dec.answers.get(qid) {
+                            let pred_str = if let Some(c) = &ans.choice {
+                                c.clone()
+                            } else if let Some(s) = ans.score {
+                                format!("{:.0}", s.round())
+                            } else if let Some(n) = ans.noul {
+                                if n > 0.5 {
+                                    "true".into()
+                                } else {
+                                    "false".into()
+                                }
                             } else {
-                                "false".into()
-                            }
-                        } else {
-                            "N/A".into()
-                        };
-                        votes.insert(ckpt.repo_id().to_string(), pred_str);
-                        all_prob_maps.push(ans.probabilities.clone());
+                                "N/A".into()
+                            };
+                            votes.insert(ckpt.repo_id().to_string(), pred_str);
+                            all_prob_maps.push(ans.probabilities.clone());
+                        }
                     }
+
+                    // Compute pooled ensemble probabilities via Bayesian Model Averaging
+                    let mut pooled_probs: BTreeMap<String, f64> = BTreeMap::new();
+                    for (c_idx, prob_map) in all_prob_maps.iter().enumerate() {
+                        let w = self.weights[c_idx];
+                        let sum_p: f64 = prob_map.values().sum::<f64>().max(1e-12);
+                        for (k, &p) in prob_map {
+                            *pooled_probs.entry(k.clone()).or_default() += w * (p / sum_p);
+                        }
+                    }
+
+                    // Epistemic uncertainty = H(ensemble) - sum_m(w_m * H(p_m))
+                    let ens_entropy = shannon_entropy(pooled_probs.values().copied());
+                    let member_entropies: f64 = all_prob_maps
+                        .iter()
+                        .enumerate()
+                        .map(|(i, pm)| {
+                            let s = pm.values().sum::<f64>().max(1e-12);
+                            self.weights[i] * shannon_entropy(pm.values().map(|&p| p / s))
+                        })
+                        .sum();
+                    let epistemic = (ens_entropy - member_entropies).max(0.0);
+                    let aleatoric = member_entropies;
+
+                    // Determine consensus winner
+                    let mut best_label = "unknown".to_string();
+                    let mut best_p = -1.0;
+                    for (k, &p) in &pooled_probs {
+                        if p > best_p {
+                            best_p = p;
+                            best_label = k.clone();
+                        }
+                    }
+
+                    let k = pooled_probs.len().max(2);
+                    let consensus_confidence = if k > 1 {
+                        ((best_p - (1.0 - best_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round()
+                            / 10000.0
+                    } else {
+                        best_p
+                    };
+
+                    // Check for vote discordance: do distinct checkpoints choose different top labels?
+                    let distinct_votes: std::collections::BTreeSet<_> = votes.values().collect();
+                    let has_dispute = epistemic > self.disagreement_threshold
+                        || (distinct_votes.len() > 1 && consensus_confidence < 0.85);
+
+                    let status = if has_dispute {
+                        overall_disputed = true;
+                        ConsensusStatus::Disputed
+                    } else {
+                        ConsensusStatus::Agreed
+                    };
+
+                    let pred_display = match q.qtype {
+                        QuestionType::Choice => best_label,
+                        QuestionType::Score => {
+                            let weighted_score: f64 = pooled_probs
+                                .iter()
+                                .filter_map(|(k, &p)| k.parse::<f64>().ok().map(|idx| idx * p))
+                                .sum();
+                            format!("{:.2}", weighted_score)
+                        }
+                        QuestionType::Noul => {
+                            let p_true = pooled_probs.get("true").copied().unwrap_or(best_p);
+                            format!("{:.4}", p_true)
+                        }
+                    };
+
+                    q_consensus_map.insert(
+                        qid.clone(),
+                        QuestionConsensus {
+                            qid: qid.clone(),
+                            qtype: q.qtype,
+                            consensus_prediction: pred_display,
+                            consensus_confidence,
+                            epistemic_uncertainty: (epistemic * 10000.0).round() / 10000.0,
+                            aleatoric_uncertainty: (aleatoric * 10000.0).round() / 10000.0,
+                            status,
+                            checkpoint_votes: votes,
+                        },
+                    );
                 }
 
-                // Compute pooled ensemble probabilities via Bayesian Model Averaging
-                let mut pooled_probs: BTreeMap<String, f64> = BTreeMap::new();
-                for (c_idx, prob_map) in all_prob_maps.iter().enumerate() {
-                    let w = self.weights[c_idx];
-                    for (k, &p) in prob_map {
-                        *pooled_probs.entry(k.clone()).or_default() += w * p;
-                    }
-                }
-
-                // Epistemic uncertainty = H(ensemble) - sum_m(w_m * H(p_m))
-                let ens_entropy = shannon_entropy(pooled_probs.values().copied());
-                let member_entropies: f64 = all_prob_maps
-                    .iter()
-                    .enumerate()
-                    .map(|(i, pm)| self.weights[i] * shannon_entropy(pm.values().copied()))
-                    .sum();
-                let epistemic = (ens_entropy - member_entropies).max(0.0);
-                let aleatoric = member_entropies;
-
-                // Determine consensus winner
-                let mut best_label = "unknown".to_string();
-                let mut best_p = -1.0;
-                for (k, &p) in &pooled_probs {
-                    if p > best_p {
-                        best_p = p;
-                        best_label = k.clone();
-                    }
-                }
-
-                let k = pooled_probs.len().max(2);
-                let consensus_confidence = if k > 1 {
-                    ((best_p - (1.0 - best_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round()
-                        / 10000.0
-                } else {
-                    best_p
-                };
-
-                // Check for vote discordance: do distinct checkpoints choose different top labels?
-                let distinct_votes: std::collections::BTreeSet<_> = votes.values().collect();
-                let has_dispute = epistemic > self.disagreement_threshold
-                    || (distinct_votes.len() > 1 && consensus_confidence < 0.85);
-
-                let status = if has_dispute {
-                    overall_disputed = true;
-                    ConsensusStatus::Disputed
-                } else {
-                    ConsensusStatus::Agreed
-                };
-
-                let pred_display = match q.qtype {
-                    QuestionType::Choice => best_label,
-                    QuestionType::Score => {
-                        let weighted_score: f64 = pooled_probs
-                            .iter()
-                            .filter_map(|(k, &p)| k.parse::<f64>().ok().map(|idx| idx * p))
-                            .sum();
-                        format!("{:.2}", weighted_score)
-                    }
-                    QuestionType::Noul => {
-                        let p_true = pooled_probs.get("true").copied().unwrap_or(best_p);
-                        format!("{:.4}", p_true)
-                    }
-                };
-
-                q_consensus_map.insert(
-                    qid.clone(),
-                    QuestionConsensus {
-                        qid: qid.clone(),
-                        qtype: q.qtype,
-                        consensus_prediction: pred_display,
-                        consensus_confidence,
-                        epistemic_uncertainty: (epistemic * 10000.0).round() / 10000.0,
-                        aleatoric_uncertainty: (aleatoric * 10000.0).round() / 10000.0,
-                        status,
-                        checkpoint_votes: votes,
+                ConsensusResult {
+                    item_id: item_id.clone(),
+                    questions: q_consensus_map,
+                    overall_status: if overall_disputed {
+                        ConsensusStatus::Disputed
+                    } else {
+                        ConsensusStatus::Agreed
                     },
-                );
-            }
-
-            consensus_results.push(ConsensusResult {
-                item_id: item_id.clone(),
-                questions: q_consensus_map,
-                overall_status: if overall_disputed {
-                    ConsensusStatus::Disputed
-                } else {
-                    ConsensusStatus::Agreed
-                },
-                total_latency_ms: (max_latency * 100.0).round() / 100.0,
-            });
-        }
+                    total_latency_ms: (max_latency * 100.0).round() / 100.0,
+                }
+            })
+            .collect();
 
         Ok(consensus_results)
     }

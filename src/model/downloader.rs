@@ -97,13 +97,49 @@ impl Downloader {
             );
         }
 
-        self.verify(target_dir)?;
-        println!("✅ Download and verification complete: {}", target_str);
+        let report = self.verify_checkpoint(checkpoint, target_dir)?;
+        if !report.is_valid {
+            bail!(
+                "Verification failed after download in {}; missing required files: {:?}",
+                report.path.display(),
+                report.missing
+            );
+        }
+        println!(
+            "✅ Download and verification complete: {}",
+            report.path.display()
+        );
         Ok(())
+    }
+
+    /// Verify that essential Laya files are present for a specific checkpoint under `target_dir`.
+    pub fn verify_checkpoint(
+        &self,
+        checkpoint: Checkpoint,
+        target_dir: &Path,
+    ) -> Result<VerificationReport> {
+        let sub = checkpoint.local_subdir();
+        if !sub.is_empty() {
+            let candidate = target_dir.join(sub);
+            if candidate.exists() {
+                return self.verify(&candidate);
+            }
+        }
+        self.verify(target_dir)
     }
 
     /// Verify that essential Laya files are present in the target directory.
     pub fn verify(&self, target_dir: &Path) -> Result<VerificationReport> {
+        let resolved_dir = if !target_dir.join("rl_agent_config.json").exists() {
+            ["multilingual", "typed-decisions"]
+                .iter()
+                .map(|sub| target_dir.join(sub))
+                .find(|p| p.join("rl_agent_config.json").exists())
+                .unwrap_or_else(|| target_dir.to_path_buf())
+        } else {
+            target_dir.to_path_buf()
+        };
+
         let required_files = [
             "rl_agent_config.json",
             "model.safetensors",
@@ -115,7 +151,7 @@ impl Downloader {
         let mut missing = Vec::new();
 
         for rel in required_files {
-            let p = target_dir.join(rel);
+            let p = resolved_dir.join(rel);
             if p.exists() {
                 let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
                 found.push((rel.to_string(), size));
@@ -126,7 +162,7 @@ impl Downloader {
 
         let is_valid = missing.is_empty();
         Ok(VerificationReport {
-            path: target_dir.to_path_buf(),
+            path: resolved_dir,
             is_valid,
             found,
             missing,

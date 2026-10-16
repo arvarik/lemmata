@@ -26,8 +26,13 @@ pub struct SafetensorsReport {
 }
 
 pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
-    let mut file = File::open(path)
-        .with_context(|| format!("Cannot open Safetensors file: {}", path.display()))?;
+    let resolved = if path.is_dir() {
+        path.join("model.safetensors")
+    } else {
+        path.to_path_buf()
+    };
+    let mut file = File::open(&resolved)
+        .with_context(|| format!("Cannot open Safetensors file: {}", resolved.display()))?;
 
     let file_size = file.metadata()?.len();
     if file_size < 8 {
