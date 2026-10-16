@@ -11,8 +11,8 @@ pub use fetch::{HackerNewsSource, HuggingFaceSource, RedditSource, WikipediaSour
 pub use file::FileSource;
 pub use stdin::StdinSource;
 pub use streaming::{
-    KafkaSource, LakehouseColumnarSource, LineStreamSource, ObjectStoreSource, StreamSink,
-    StreamSourceKind, StreamingDataSource,
+    KafkaSource, LakehouseColumnarSource, LineStreamSource, StreamSink, StreamSourceKind,
+    StreamingDataSource,
 };
 pub use traits::{DataItem, DataSource, MemorySource};
 pub use web::{

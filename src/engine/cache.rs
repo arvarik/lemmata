@@ -7,9 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::engine::metrics::fnv1a64;
 use crate::model::{DecisionResult, Question};
 
-/// Configuration for the sub-millisecond semantic decision cache.
+/// Configuration for the decision cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticCacheConfig {
+    /// Also return cached decisions for similar (not identical) text. Off by default: the
+    /// similarity uses hashed word features, not the model, so "do not refund me" can match
+    /// "refund me" and return the wrong decision.
+    #[serde(default)]
+    pub semantic: bool,
     pub max_entries: usize,
     pub similarity_threshold: f64,
     pub min_confidence: f64,
@@ -25,6 +30,7 @@ fn default_max_escalate() -> f64 {
 impl Default for SemanticCacheConfig {
     fn default() -> Self {
         Self {
+            semantic: false,
             max_entries: 10_000,
             similarity_threshold: 0.92,
             min_confidence: 0.70,
@@ -145,6 +151,11 @@ impl DecisionCache {
                 // Lazily evict expired item
                 self.exact_map.remove(&exact_key);
             }
+        }
+
+        if !self.config.semantic {
+            self.stats.misses += 1;
+            return CacheLookupResult::Miss;
         }
 
         // Tier 2: Semantic lookup via normalized feature vector (schema-isolated)
@@ -419,6 +430,7 @@ mod tests {
     #[test]
     fn test_semantic_cache_hit() {
         let config = SemanticCacheConfig {
+            semantic: true,
             similarity_threshold: 0.85,
             ..Default::default()
         };

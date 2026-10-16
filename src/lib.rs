@@ -122,10 +122,10 @@ pub fn resolve_data_source_filtered(
 }
 
 /// Resolve a StreamingDataSource based on a source URI or file path.
-/// Supported schemes:
-/// - `kafka://broker/topic?group_id=...&file=...`
-/// - `s3://bucket/key` / `gcs://bucket/key` / `blob://bucket/key`
-/// - `lakehouse://path?columns=...`
+/// Supported schemes (all read local files, lemma has no network clients for them):
+/// - `kafka://broker/topic?group_id=...&file=...` replays `file` with Kafka-style offsets
+/// - `s3://`, `gcs://`, `blob://` return an error that asks for a local copy
+/// - `lakehouse://path?columns=...` projects columns from a local file
 /// - `-` or `stdin`
 /// - local file path (e.g. `data/customer_support.jsonl`)
 pub fn resolve_streaming_source(
@@ -140,10 +140,13 @@ pub fn resolve_streaming_source(
             group_id,
             payload_path,
         } => {
+            let Some(p) = payload_path else {
+                bail!(
+                    "lemma has no Kafka client. A kafka:// source replays the local JSONL file named by ?file=, for example kafka://{broker}/{topic}?file=data/tickets.jsonl"
+                );
+            };
             let mut kafka = datasource::KafkaSource::new(broker, topic, group_id);
-            if let Some(p) = payload_path {
-                kafka.load_payload_file(&p)?;
-            }
+            kafka.load_payload_file(&p)?;
             Ok(Box::new(kafka))
         }
         datasource::StreamSourceKind::Lakehouse { path, columns } => {
@@ -154,10 +157,9 @@ pub fn resolve_streaming_source(
             provider,
             bucket,
             key,
-        } => {
-            let source = datasource::ObjectStoreSource::new(provider, bucket, key)?;
-            Ok(Box::new(source))
-        }
+        } => bail!(
+            "lemma has no {provider} client. Download {provider}://{bucket}/{key} first, then pass the local path."
+        ),
         datasource::StreamSourceKind::LineStream { path } => {
             if let Some(p) = path {
                 let source = datasource::LineStreamSource::from_file(&p)?;

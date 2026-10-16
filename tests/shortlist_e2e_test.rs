@@ -122,8 +122,10 @@ fn test_shortlist_20_class_taxonomy_token_reduction_and_recall() {
         total_full_evals += options.len();
         total_shortlisted_evals += sl.kept_options.len();
 
-        let full_logits = clf.compute_option_logits(text, &q, &options);
-        let short_logits = clf.compute_option_logits(text, &q, &sl.kept_options);
+        let full_logits = clf.compute_option_logits(text, &q, &options).unwrap();
+        let short_logits = clf
+            .compute_option_logits(text, &q, &sl.kept_options)
+            .unwrap();
         let expanded_logits = expand_shortlisted_logits(&short_logits, &sl.kept_indices, 20);
         assert_eq!(expanded_logits.len(), 20);
 

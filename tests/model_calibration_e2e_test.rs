@@ -48,7 +48,8 @@ fn test_calibrate_and_persist_checkpoints_e2e_with_qats() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 
     let reports =
-        calibrate_and_persist_checkpoints(&checkpoints, &items, &questions, true, Some(&temp_dir))
+        // The 24-row benchmark is below the default sample minimum, so opt in to fitting it.
+        calibrate_and_persist_checkpoints(&checkpoints, &items, &questions, true, 2, Some(&temp_dir))
             .expect("calibrate_and_persist_checkpoints failed");
 
     assert_eq!(reports.len(), 4);

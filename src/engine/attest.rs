@@ -1,14 +1,49 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::datasource::DataItem;
 use crate::engine::guardrail::GuardAction;
 use crate::engine::metrics::{fnv1a64, format_utc_iso8601};
-use crate::model::DecisionResult;
+use crate::model::{DecisionResult, Question};
 
-/// A tamper-evident cryptographic decision receipt conforming to 2026 enterprise AI audit standards.
+/// Receipt format this build writes and verifies: SHA-256 digests and HMAC-SHA256 signatures.
+pub const RECEIPT_VERSION: &str = "trace-2026.2";
+const SIGNATURE_PREFIX: &str = "hmac-sha256:";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    to_hex(&Sha256::digest(bytes))
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+fn hmac(secret_key: &str) -> Hmac<Sha256> {
+    // HMAC accepts keys of any length, so this cannot fail.
+    Hmac::<Sha256>::new_from_slice(secret_key.as_bytes()).expect("HMAC takes any key length")
+}
+
+/// SHA-256 of the serialized question schema, for receipts.
+pub fn schema_digest(questions: &BTreeMap<String, Question>) -> Result<String> {
+    Ok(sha256_hex(serde_json::to_string(questions)?.as_bytes()))
+}
+
+/// A tamper-evident decision receipt: a SHA-256 digest, an HMAC-SHA256 signature, and a hash
+/// chain link to the previous receipt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionReceipt {
     pub version: String,
@@ -57,23 +92,31 @@ impl DecisionReceipt {
     }
 
     fn compute_digest(&self) -> String {
-        let payload = self.canonical_payload();
-        let rev: Vec<u8> = payload.bytes().rev().collect();
-        format!("{:016x}{:016x}", fnv1a64(payload.as_bytes()), fnv1a64(&rev))
+        sha256_hex(self.canonical_payload().as_bytes())
     }
 
     fn compute_signature(&self, secret_key: &str) -> String {
-        let sig_payload = format!("{}:{}", secret_key, self.receipt_digest);
-        let rev: String = sig_payload.chars().rev().collect();
-        format!(
-            "sig_{:016x}{:016x}",
-            fnv1a64(sig_payload.as_bytes()),
-            fnv1a64(rev.as_bytes())
-        )
+        let mut mac = hmac(secret_key);
+        mac.update(self.receipt_digest.as_bytes());
+        format!("{SIGNATURE_PREFIX}{}", to_hex(&mac.finalize().into_bytes()))
+    }
+
+    /// Constant-time check of the HMAC-SHA256 signature.
+    fn signature_is_valid(&self, secret_key: &str) -> bool {
+        let Some(sig) = self
+            .signature
+            .strip_prefix(SIGNATURE_PREFIX)
+            .and_then(from_hex)
+        else {
+            return false;
+        };
+        let mut mac = hmac(secret_key);
+        mac.update(self.receipt_digest.as_bytes());
+        mac.verify_slice(&sig).is_ok()
     }
 }
 
-/// Verification report validating cryptographic integrity and Merkle hash chaining.
+/// Verification report for receipt digests, signatures, and hash chain links.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationVerificationReport {
     pub total_receipts: usize,
@@ -84,7 +127,7 @@ pub struct AttestationVerificationReport {
     pub failure_reasons: Vec<String>,
 }
 
-/// Cryptographic attestation engine for verifiable runtime decisions.
+/// Signs decision receipts and links each one to the previous receipt.
 pub struct AttestationEngine {
     secret_key: String,
     latest_hash: String,
@@ -112,7 +155,7 @@ impl AttestationEngine {
         &self.latest_hash
     }
 
-    /// Generate an immutable signed decision receipt and advance the Merkle hash chain.
+    /// Generate a signed decision receipt and advance the hash chain.
     pub fn create_receipt(
         &mut self,
         item: &DataItem,
@@ -121,12 +164,15 @@ impl AttestationEngine {
         action: GuardAction,
         schema_digest: &str,
     ) -> Result<DecisionReceipt> {
+        if self.secret_key.is_empty() {
+            bail!("Attestation needs a signing key. Set LEMMA_ATTEST_KEY or pass the key flag.");
+        }
         let input_text = match &item.state {
             serde_json::Value::String(s) => s.clone(),
             other => serde_json::to_string(other)?,
         };
 
-        let input_digest = format!("{:016x}", fnv1a64(input_text.as_bytes()));
+        let input_digest = sha256_hex(input_text.as_bytes());
         let receipt_id = format!(
             "rec_{:016x}",
             fnv1a64(format!("{}::{}", item.id, now_nanos()).as_bytes())
@@ -155,7 +201,7 @@ impl AttestationEngine {
         }
 
         let mut receipt = DecisionReceipt {
-            version: "trace-2026.1".to_string(),
+            version: RECEIPT_VERSION.to_string(),
             receipt_id,
             parent_hash: self.latest_hash.clone(),
             timestamp: format_utc_iso8601(),
@@ -190,6 +236,15 @@ impl AttestationEngine {
         let mut expected_parent = Self::GENESIS_HASH.to_string();
 
         for (i, rec) in receipts.iter().enumerate() {
+            if rec.version != RECEIPT_VERSION {
+                invalid_count += 1;
+                failure_reasons.push(format!(
+                    "Receipt #{}: Unsupported receipt version {} (this build verifies {})",
+                    i, rec.version, RECEIPT_VERSION
+                ));
+                continue;
+            }
+
             if rec.parent_hash != expected_parent {
                 chain_intact = false;
                 if broken_link_index.is_none() {
@@ -207,7 +262,7 @@ impl AttestationEngine {
                 continue;
             }
 
-            if rec.compute_signature(secret_key) != rec.signature {
+            if !rec.signature_is_valid(secret_key) {
                 invalid_count += 1;
                 failure_reasons.push(format!("Receipt #{}: Invalid digital signature", i));
                 continue;
@@ -301,6 +356,18 @@ mod tests {
         assert_eq!(report.valid_receipts, 2);
         assert!(report.chain_intact);
         assert!(report.failure_reasons.is_empty());
+
+        // Without the key, nobody can produce a signature that verifies.
+        let forged = AttestationEngine::verify_ledger(&ledger, "guessed_key");
+        assert_eq!(forged.valid_receipts, 0);
+        assert!(!forged.chain_intact);
+
+        let mut keyless = AttestationEngine::new("");
+        assert!(
+            keyless
+                .create_receipt(&item1, &decision, None, GuardAction::Allow, "sha_schema")
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,0 +1,4 @@
+# paste is a compile-time proc macro that gemm (candle's CPU matmul backend) depends on.
+# It is unmaintained, with no known vulnerability. Remove this when gemm drops paste.
+[advisories]
+ignore = ["RUSTSEC-2024-0436"]

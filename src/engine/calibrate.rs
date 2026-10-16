@@ -11,6 +11,13 @@ use crate::engine::metrics::calculate_ece;
 use crate::engine::ood::euclidean_distance;
 use crate::model::{Checkpoint, Question, QuestionType};
 
+/// Lowest temperature lemma fits or applies to a bucket.
+pub const MIN_TEMPERATURE: f64 = 0.5;
+/// Highest temperature lemma fits or applies to a bucket.
+pub const MAX_TEMPERATURE: f64 = 5.0;
+/// Fewer labeled samples than this cannot support a fitted bucket temperature.
+pub const DEFAULT_MIN_BUCKET_SAMPLES: usize = 30;
+
 /// Loss function minimized during temperature calibration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -200,6 +207,7 @@ pub struct CalibrationTuner {
     enable_qats: bool,
     qats_gamma: f64,
     cost_weights: BTreeMap<String, f64>,
+    min_bucket_samples: usize,
 }
 
 impl CalibrationTuner {
@@ -211,7 +219,14 @@ impl CalibrationTuner {
             enable_qats: false,
             qats_gamma: 0.30,
             cost_weights: BTreeMap::new(),
+            min_bucket_samples: DEFAULT_MIN_BUCKET_SAMPLES,
         }
+    }
+
+    /// Buckets with fewer labeled samples keep their prior temperature.
+    pub fn with_min_bucket_samples(mut self, n: usize) -> Self {
+        self.min_bucket_samples = n.max(2);
+        self
     }
 
     pub fn with_loss(mut self, loss: CalibrationLoss) -> Self {
@@ -280,7 +295,7 @@ impl CalibrationTuner {
                 let options = q.render_options();
                 let k = options.len().max(2);
                 let bucket_key = classifier.get_temperature_bucket(q.qtype, k);
-                let raw_logits = classifier.compute_option_logits(&state_text, q, &options);
+                let raw_logits = classifier.compute_option_logits(&state_text, q, &options)?;
 
                 let (target_idx, target_label, option_weights) = match q.qtype {
                     QuestionType::Choice => {
@@ -389,7 +404,7 @@ impl CalibrationTuner {
             ("choice:2", 1.906),
             ("choice:3-5", 1.760),
             ("choice:6-10", 1.000),
-            ("choice:11+", 0.101),
+            ("choice:11+", MIN_TEMPERATURE), // upstream fits 0.101, below the safe range
             ("score:2", 1.500),
             ("score:3-5", 1.251),
             ("score:6-10", 1.000),
@@ -411,11 +426,11 @@ impl CalibrationTuner {
         for (bucket_name, samples) in &bucket_samples {
             let (raw_ece, raw_nll, raw_brier) = compute_bucket_metrics(samples, 1.0, self.bins);
 
-            let (optimal_t, iterations) = if samples.len() >= 2 {
-                // Evaluate log-spaced grid in [0.05, 5.0] to handle non-smooth ECE step plateaus
+            let (optimal_t, iterations) = if samples.len() >= self.min_bucket_samples {
+                // Evaluate a log-spaced grid over the safe range to handle non-smooth ECE step plateaus
                 let grid_n = 40usize;
-                let ln_min = 0.05f64.ln();
-                let ln_max = 5.0f64.ln();
+                let ln_min = MIN_TEMPERATURE.ln();
+                let ln_max = MAX_TEMPERATURE.ln();
                 let mut grid: Vec<f64> = (0..grid_n)
                     .map(|i| (ln_min + (ln_max - ln_min) * (i as f64 / (grid_n - 1) as f64)).exp())
                     .collect();
@@ -442,8 +457,8 @@ impl CalibrationTuner {
                 );
                 let (full_gss_t, _, _) = golden_section_search(
                     |t| compute_bucket_loss(samples, t, self.loss, self.bins),
-                    0.05,
-                    5.0,
+                    MIN_TEMPERATURE,
+                    MAX_TEMPERATURE,
                     1e-4,
                     30,
                 );
@@ -471,6 +486,11 @@ impl CalibrationTuner {
                 }
                 (best_t, iters)
             } else {
+                eprintln!(
+                    "⚠️  Bucket {bucket_name} has {} labeled samples (minimum {}). It keeps its prior temperature.",
+                    samples.len(),
+                    self.min_bucket_samples
+                );
                 let fallback = baseline_temps.get(bucket_name).copied().unwrap_or(1.0);
                 ((fallback * 1000.0).round() / 1000.0, 0)
             };

@@ -27,7 +27,10 @@ pub use active::{
     ActiveDistillReport, ActiveLearningEngine, ActiveLearningReport, OodDiagnostics,
     ReviewQueueItem, ReviewQueuePrediction, RlcdSample, UncertaintyStrategy,
 };
-pub use attest::{AttestationEngine, AttestationVerificationReport, DecisionReceipt};
+pub use attest::{
+    AttestationEngine, AttestationVerificationReport, DecisionReceipt, RECEIPT_VERSION,
+    schema_digest,
+};
 pub use cache::{
     CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig, compute_schema_hash,
 };
