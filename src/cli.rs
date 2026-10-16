@@ -1730,7 +1730,7 @@ pub struct ScrapeArgs {
 
 #[derive(Args, Debug)]
 pub struct LearnArgs {
-    /// Optional phase number (`1`..`5`), topic slug (`foundations`, `paradigms`, `scaling`, `calibration`, `production`), `all`, `glossary`, or `guide`
+    /// Optional phase number (`1`..`5`), topic slug (`foundations`, `paradigms`, `scaling`, `calibration`, `production`), `all`, `glossary`, `reading`, or `guide`
     #[arg(value_name = "PHASE_OR_TOPIC")]
     pub topic: Option<String>,
 
@@ -1750,11 +1750,15 @@ pub struct LearnArgs {
     #[arg(short, long)]
     pub glossary: bool,
 
+    /// Display curated reading trail of foundational papers, blogs, and practitioner guides
+    #[arg(short = 'r', long)]
+    pub reading: bool,
+
     /// Render all 5 curriculum phases sequentially
     #[arg(short, long)]
     pub all: bool,
 
-    /// Output curriculum, lesson, glossary, or quiz as structured JSON
+    /// Output curriculum, lesson, glossary, reading list, or quiz as structured JSON
     #[arg(long)]
     pub json: bool,
 }

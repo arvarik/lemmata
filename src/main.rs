@@ -2999,6 +2999,41 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
         });
     }
 
+    let is_reading_topic = raw_target.is_some_and(|t| {
+        matches!(
+            t.to_ascii_lowercase().as_str(),
+            "reading" | "papers" | "blogs" | "literature" | "references"
+        )
+    });
+    if args.reading || is_reading_topic {
+        let phase_num_filter = if args.reading {
+            match raw_target {
+                Some(t)
+                    if !matches!(
+                        t.to_ascii_lowercase().as_str(),
+                        "reading" | "papers" | "blogs" | "literature" | "references" | "all"
+                    ) =>
+                {
+                    Some(
+                        t.parse::<lemma::engine::CurriculumPhase>()
+                            .map_err(|e| anyhow::anyhow!(e))?
+                            .number(),
+                    )
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if args.json {
+            let list = lemma::engine::learn::build_reading_list(phase_num_filter);
+            println!("{}", serde_json::to_string_pretty(&list)?);
+        } else {
+            lemma::engine::learn::print_reading_list(phase_num_filter);
+        }
+        return Ok(());
+    }
+
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {
         if args.json {
             let lessons: Vec<_> = lemma::engine::CurriculumPhase::all()
