@@ -28,6 +28,8 @@ pub struct ClassifierConfig {
     pub cost_weights: BTreeMap<String, f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hypothesis_template: Option<String>,
+    #[serde(default)]
+    pub chunk_strategy: crate::model::ChunkStrategy,
 }
 
 impl ClassifierConfig {
@@ -77,6 +79,7 @@ impl ClassifierConfig {
             qats_profile: None,
             cost_weights: BTreeMap::new(),
             hypothesis_template: None,
+            chunk_strategy: crate::model::ChunkStrategy::default(),
         }
     }
 }
@@ -122,6 +125,11 @@ impl LayaClassifier {
 
     pub fn with_hypothesis_template(mut self, tpl: impl Into<String>) -> Self {
         self.config.hypothesis_template = Some(tpl.into());
+        self
+    }
+
+    pub fn with_chunk_strategy(mut self, strategy: crate::model::ChunkStrategy) -> Self {
+        self.config.chunk_strategy = strategy;
         self
     }
 
@@ -194,26 +202,31 @@ impl LayaClassifier {
         // Estimate token counts and enforce checkpoint context window limits
         let state_tokens = estimate_tokens(&state_text);
         let ctx_window = active_ckpt.context_window();
-        let effective_state_text: std::borrow::Cow<'_, str> = if state_tokens > ctx_window {
-            let max_words = (ctx_window * 3 / 4).max(1);
-            let mut word_count = 0usize;
-            let mut in_ws = true;
-            let mut cut_idx = state_text.len().min(ctx_window * 4);
-            for (idx, ch) in state_text.char_indices() {
-                if ch.is_whitespace() {
-                    in_ws = true;
-                } else if in_ws {
-                    in_ws = false;
-                    word_count += 1;
-                    if word_count > max_words {
-                        cut_idx = idx;
-                        break;
+        let chunks = if self.config.chunk_strategy == crate::model::ChunkStrategy::TruncatePrefix {
+            let single = if state_tokens > ctx_window {
+                let max_words = (ctx_window * 3 / 4).max(1);
+                let mut word_count = 0usize;
+                let mut in_ws = true;
+                let mut cut_idx = state_text.len().min(ctx_window * 4);
+                for (idx, ch) in state_text.char_indices() {
+                    if ch.is_whitespace() {
+                        in_ws = true;
+                    } else if in_ws {
+                        in_ws = false;
+                        word_count += 1;
+                        if word_count > max_words {
+                            cut_idx = idx;
+                            break;
+                        }
                     }
                 }
-            }
-            std::borrow::Cow::Borrowed(&state_text[..cut_idx])
+                std::borrow::Cow::Borrowed(&state_text[..cut_idx])
+            } else {
+                std::borrow::Cow::Borrowed(state_text.as_str())
+            };
+            vec![single]
         } else {
-            std::borrow::Cow::Borrowed(&state_text)
+            crate::model::chunk_text_for_window(&state_text, ctx_window, self.config.chunk_strategy)
         };
         let mut total_tokens = 0;
         let mut answers = BTreeMap::new();
@@ -245,8 +258,20 @@ impl LayaClassifier {
             let q_tokens = est_option_tokens + state_tokens.min(ctx_window) + 10;
             total_tokens += q_tokens;
 
-            // Compute raw logits for the options
-            let raw_logits = self.compute_option_logits(&effective_state_text, q, &options);
+            // Compute raw logits for the options (pooling across chunks if SlidingWindow)
+            let raw_logits = if chunks.len() <= 1 {
+                self.compute_option_logits(
+                    chunks.first().map(|c| c.as_ref()).unwrap_or(&state_text),
+                    q,
+                    &options,
+                )
+            } else {
+                let win_logits: Vec<Vec<f64>> = chunks
+                    .iter()
+                    .map(|c| self.compute_option_logits(c, q, &options))
+                    .collect();
+                crate::model::pool_window_logits(&win_logits)
+            };
 
             // Temperature scaling per Laya RLCD calibration
             let temp_key = self.get_temperature_bucket(q.qtype, k);

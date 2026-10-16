@@ -287,6 +287,10 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         return Ok(());
     }
 
+    let chunk_strategy = args
+        .chunk_strategy
+        .parse::<lemma::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let mut config = ClassifierConfig {
         checkpoint,
         temperature: args.temperature,
@@ -294,6 +298,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         multi_label_threshold: args.multi_label_threshold,
         escalate_threshold: args.escalate_threshold,
         hypothesis_template: args.hypothesis_template.clone(),
+        chunk_strategy,
         ..Default::default()
     };
 
@@ -700,9 +705,14 @@ fn handle_test(args: TestArgs) -> Result<()> {
         return Ok(());
     }
 
+    let chunk_strategy = args
+        .chunk_strategy
+        .parse::<lemma::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let mut cfg = ClassifierConfig {
         checkpoint,
         hypothesis_template: args.hypothesis_template.clone(),
+        chunk_strategy,
         ..Default::default()
     };
     if let Some(config_path) = &args.config {
