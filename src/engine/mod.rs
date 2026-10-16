@@ -53,11 +53,11 @@ pub use hierarchical::{
     HierarchicalBenchResult, HierarchicalDecisionResult, HierarchicalRouter, HierarchicalStep,
 };
 pub use learn::{
-    CurriculumPhase, GlossaryEntry, LiveLabOutput, PhaseLesson, QuizQuestion, WorkflowRecipe,
-    build_all_quiz_questions, build_glossary, build_phase_lesson, build_workflow_recipes,
-    print_all_phases, print_curriculum_overview, print_glossary, print_phase_lesson,
-    print_workflow_guide, run_interactive_session, run_interactive_session_with_reader,
-    run_quiz_non_interactive,
+    CurriculumPhase, GlossaryEntry, LiveLabOutput, PhaseLesson, QuizQuestion, ReadingResource,
+    WorkflowRecipe, build_all_quiz_questions, build_glossary, build_phase_lesson,
+    build_reading_list, build_workflow_recipes, print_all_phases, print_curriculum_overview,
+    print_glossary, print_phase_lesson, print_reading_list, print_workflow_guide,
+    run_interactive_session, run_interactive_session_with_reader, run_quiz_non_interactive,
 };
 pub use learn_visuals::{
     c_blue, c_bold, c_cyan, c_dim, c_green, c_magenta, c_red, c_strike_red, c_yellow,
