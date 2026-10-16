@@ -12,6 +12,7 @@ pub mod experiment;
 pub mod explain;
 pub mod guardrail;
 pub mod hierarchical;
+pub mod learn;
 pub mod metrics;
 pub mod model_calibration;
 pub mod ood;
@@ -49,6 +50,13 @@ pub use explain::AttributionEngine;
 pub use guardrail::{AuditRecord, GuardAction, GuardrailEngine, GuardrailPolicy, PolicyRule};
 pub use hierarchical::{
     HierarchicalBenchResult, HierarchicalDecisionResult, HierarchicalRouter, HierarchicalStep,
+};
+pub use learn::{
+    CurriculumPhase, GlossaryEntry, LiveLabOutput, PhaseLesson, QuizQuestion, WorkflowRecipe,
+    build_all_quiz_questions, build_glossary, build_phase_lesson, build_workflow_recipes,
+    print_all_phases, print_curriculum_overview, print_glossary, print_phase_lesson,
+    print_workflow_guide, run_interactive_session, run_interactive_session_with_reader,
+    run_quiz_non_interactive,
 };
 pub use metrics::{
     EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
