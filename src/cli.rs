@@ -444,6 +444,14 @@ pub struct InfoArgs {
     #[arg(long, default_value = "models/laya")]
     pub local_dir: PathBuf,
 
+    /// Scan and display live disk & architecture inventory across all local checkpoints (and custom HF directories)
+    #[arg(long)]
+    pub inventory: bool,
+
+    /// Inspect a specific local Hugging Face checkpoint directory (config.json + model.safetensors)
+    #[arg(long)]
+    pub inspect_dir: Option<PathBuf>,
+
     /// Output model specifications as JSON
     #[arg(long)]
     pub json: bool,

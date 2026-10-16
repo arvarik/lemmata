@@ -899,6 +899,25 @@ fn checkpoint_domain_summary(ckpt: Checkpoint) -> &'static str {
 }
 
 fn handle_info(args: InfoArgs) -> Result<()> {
+    if let Some(dir) = &args.inspect_dir {
+        let spec = lemma::model::inspect_model_directory(dir)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&spec)?);
+        } else {
+            lemma::model::print_models_inventory(&[spec]);
+        }
+        return Ok(());
+    }
+    if args.inventory {
+        let specs = lemma::model::scan_registered_models();
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&specs)?);
+        } else {
+            lemma::model::print_models_inventory(&specs);
+        }
+        return Ok(());
+    }
+
     let checkpoints: Vec<Checkpoint> = if args.checkpoint.eq_ignore_ascii_case("all") {
         Checkpoint::all().to_vec()
     } else {
