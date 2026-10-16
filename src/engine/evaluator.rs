@@ -230,4 +230,124 @@ impl Evaluator {
 
         println!("\n{table}\n");
     }
+
+    pub fn compare_baseline(
+        current: &EvaluationMetrics,
+        baseline: &EvaluationMetrics,
+        max_regression: f64,
+        max_ece: Option<f64>,
+    ) -> BaselineComparison {
+        let acc_delta = ((current.accuracy - baseline.accuracy) * 10000.0).round() / 10000.0;
+        let soft_acc_delta =
+            ((current.soft_accuracy - baseline.soft_accuracy) * 10000.0).round() / 10000.0;
+        let ece_delta = ((current.ece - baseline.ece) * 10000.0).round() / 10000.0;
+        let brier_delta =
+            ((current.brier_score - baseline.brier_score) * 10000.0).round() / 10000.0;
+
+        let mut reasons = Vec::new();
+        let tol = max_regression.max(0.0) + 1e-6;
+        if baseline.accuracy - current.accuracy > tol {
+            reasons.push(format!(
+                "Accuracy dropped by {:.2}% ({:.2}% -> {:.2}%, max allowed drop: {:.2}%)",
+                (baseline.accuracy - current.accuracy) * 100.0,
+                baseline.accuracy * 100.0,
+                current.accuracy * 100.0,
+                max_regression * 100.0
+            ));
+        }
+        if current.ece - baseline.ece > (max_regression.max(0.02) + 1e-6) {
+            reasons.push(format!(
+                "ECE degraded by +{:.4} ({:.4} -> {:.4})",
+                current.ece - baseline.ece,
+                baseline.ece,
+                current.ece
+            ));
+        }
+        if let Some(limit_ece) = max_ece
+            && current.ece > limit_ece + 1e-6
+        {
+            reasons.push(format!(
+                "ECE {:.4} exceeds maximum allowed threshold {:.4}",
+                current.ece, limit_ece
+            ));
+        }
+
+        BaselineComparison {
+            baseline_accuracy: baseline.accuracy,
+            current_accuracy: current.accuracy,
+            accuracy_delta: acc_delta,
+            soft_accuracy_delta: soft_acc_delta,
+            baseline_ece: baseline.ece,
+            current_ece: current.ece,
+            ece_delta,
+            baseline_brier: baseline.brier_score,
+            current_brier: current.brier_score,
+            brier_delta,
+            regressed: !reasons.is_empty(),
+            reasons,
+        }
+    }
+
+    pub fn print_baseline_diff(diff: &BaselineComparison) {
+        let mut table = Table::new();
+        table.set_header(vec![
+            Cell::new("Metric").fg(Color::Cyan),
+            Cell::new("Baseline").fg(Color::White),
+            Cell::new("Current").fg(Color::Green),
+            Cell::new("Delta").fg(Color::Yellow),
+            Cell::new("Gate Status").fg(Color::Magenta),
+        ]);
+
+        table.add_row(vec![
+            Cell::new("Accuracy"),
+            Cell::new(format!("{:.2}%", diff.baseline_accuracy * 100.0)),
+            Cell::new(format!("{:.2}%", diff.current_accuracy * 100.0)),
+            Cell::new(format!("{:+.2}%", diff.accuracy_delta * 100.0)),
+            Cell::new(if diff.accuracy_delta >= -1e-6 {
+                "✅ PASS"
+            } else {
+                "⚠️ DROP"
+            }),
+        ]);
+        table.add_row(vec![
+            Cell::new("ECE (Calibration Error)"),
+            Cell::new(format!("{:.4}", diff.baseline_ece)),
+            Cell::new(format!("{:.4}", diff.current_ece)),
+            Cell::new(format!("{:+.4}", diff.ece_delta)),
+            Cell::new(if diff.ece_delta <= 0.02 + 1e-6 {
+                "✅ PASS"
+            } else {
+                "⚠️ DEGRADED"
+            }),
+        ]);
+        table.add_row(vec![
+            Cell::new("Brier Score"),
+            Cell::new(format!("{:.4}", diff.baseline_brier)),
+            Cell::new(format!("{:.4}", diff.current_brier)),
+            Cell::new(format!("{:+.4}", diff.brier_delta)),
+            Cell::new(if diff.brier_delta <= 0.02 + 1e-6 {
+                "✅ PASS"
+            } else {
+                "⚠️ DEGRADED"
+            }),
+        ]);
+        println!("📊 Baseline Regression Comparison:\n{table}\n");
+    }
+}
+
+/// Comparison report between a current evaluation run and a saved baseline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BaselineComparison {
+    pub baseline_accuracy: f64,
+    pub current_accuracy: f64,
+    pub accuracy_delta: f64,
+    pub soft_accuracy_delta: f64,
+    pub baseline_ece: f64,
+    pub current_ece: f64,
+    pub ece_delta: f64,
+    pub baseline_brier: f64,
+    pub current_brier: f64,
+    pub brier_delta: f64,
+    pub regressed: bool,
+    pub reasons: Vec<String>,
 }
