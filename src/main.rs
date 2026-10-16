@@ -210,36 +210,73 @@ fn apply_calibrated_config(
 }
 
 fn handle_download(args: DownloadArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let downloader = Downloader::detect()?;
+    let checkpoints: Vec<Checkpoint> = if args.all || args.checkpoint.eq_ignore_ascii_case("all") {
+        vec![
+            Checkpoint::English,
+            Checkpoint::Multilingual,
+            Checkpoint::TypedDecisions,
+            Checkpoint::ModernBertZeroShot,
+            Checkpoint::DebertaV3ZeroShot,
+            Checkpoint::EuroBert,
+            Checkpoint::NeoBert,
+        ]
+    } else {
+        vec![parse_checkpoint(&args.checkpoint)?]
+    };
+
+    let downloader = if args.verify_only {
+        Downloader::detect().unwrap_or(Downloader {
+            cli_binary: "hf".into(),
+        })
+    } else {
+        Downloader::detect()?
+    };
 
     if args.verify_only {
-        let report = downloader.verify_checkpoint(checkpoint, &args.target_dir)?;
-        println!("🔍 Verifying checkpoint files in {}", report.path.display());
-        if report.is_valid {
-            println!("✅ All required checkpoint files are valid and present!");
-            for (f, sz) in report.found {
-                println!("   - {}: {:.2} MB", f, sz as f64 / 1_048_576.0);
+        let mut failed = Vec::new();
+        for &checkpoint in &checkpoints {
+            let report = downloader.verify_checkpoint(checkpoint, &args.target_dir)?;
+            println!(
+                "🔍 Verifying checkpoint {} in {}",
+                checkpoint.repo_id(),
+                report.path.display()
+            );
+            if report.is_valid {
+                println!("✅ All required checkpoint files are valid and present!");
+                for (f, sz) in report.found {
+                    println!("   - {}: {:.2} MB", f, sz as f64 / 1_048_576.0);
+                }
+            } else {
+                eprintln!("❌ Missing required files in {}:", report.path.display());
+                for m in &report.missing {
+                    eprintln!("   - {}", m);
+                }
+                failed.push((checkpoint.repo_id(), report.missing.len(), report.path));
             }
-            return Ok(());
         }
-        eprintln!("❌ Missing required files in {}:", report.path.display());
-        for m in &report.missing {
-            eprintln!("   - {}", m);
+        if !failed.is_empty() {
+            let (repo, count, path) = &failed[0];
+            bail!(
+                "Checkpoint verification failed for {} ({}/{} checkpoint(s) incomplete): {} missing required file(s) in {}",
+                repo,
+                failed.len(),
+                checkpoints.len(),
+                count,
+                path.display()
+            );
         }
-        bail!(
-            "Checkpoint verification failed: {} missing required file(s) in {}",
-            report.missing.len(),
-            report.path.display()
-        );
+        return Ok(());
     }
 
-    downloader.download(checkpoint, &args.target_dir, args.dry_run)?;
+    for checkpoint in checkpoints {
+        downloader.download(checkpoint, &args.target_dir, args.dry_run)?;
+    }
     Ok(())
 }
 
 fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let inline_text = args.text.as_deref().or(args.positional_text.as_deref());
 
     let source: Box<dyn DataSource> = if let Some(url_str) = &args.url {
         Box::new(lemma::datasource::WebSource::new(
@@ -251,7 +288,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
             &args.data_dir,
             args.file.as_deref(),
             args.stdin,
-            args.text.as_deref(),
+            inline_text,
             args.extensions.as_deref(),
             args.no_recursive,
         )?
@@ -291,23 +328,25 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         .chunk_strategy
         .parse::<lemma::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut config = ClassifierConfig {
-        checkpoint,
-        temperature: args.temperature,
-        multi_label: args.multi_label,
-        multi_label_threshold: args.multi_label_threshold,
-        escalate_threshold: args.escalate_threshold,
-        hypothesis_template: args.hypothesis_template.clone(),
-        chunk_strategy,
-        shortlist_k: args.shortlist_k,
-        ..Default::default()
-    };
+    let mut config = ClassifierConfig::with_checkpoint(checkpoint);
+    config.multi_label = args.multi_label;
+    config.multi_label_threshold = args.multi_label_threshold;
+    config.escalate_threshold = args.escalate_threshold;
+    config.hypothesis_template = args.hypothesis_template.clone();
+    config.chunk_strategy = chunk_strategy;
+    config.shortlist_k = args.shortlist_k;
+    if (args.temperature - 1.0).abs() > 1e-6 {
+        config.temperature = args.temperature;
+        if args.config.is_none() {
+            config.temperature_by_options.clear();
+        }
+    }
 
     if let Some(cfg_path) = &args.config {
         apply_calibrated_config(
             &mut config,
             cfg_path,
-            (args.temperature - 1.0).abs() < f64::EPSILON,
+            (args.temperature - 1.0).abs() <= 1e-6,
         )?;
     }
     let classifier = LayaClassifier::new(config);
@@ -566,8 +605,9 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
             ExperimentMode::Temp => {
                 let mut rows = Vec::new();
                 for &t in &temps {
-                    let mut cfg = ClassifierConfig::default();
+                    let mut cfg = ClassifierConfig::with_checkpoint(ckpt);
                     cfg.temperature = t;
+                    cfg.temperature_by_options.clear();
                     let m =
                         Evaluator::new(LayaClassifier::new(cfg)).evaluate(&items, &questions)?;
                     rows.push(serde_json::json!({
@@ -611,7 +651,9 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
             )?;
         }
         ExperimentMode::Temp => {
-            ExperimentRunner::sweep_temperature_calibration(&items, &questions, &temps)?;
+            ExperimentRunner::sweep_temperature_calibration_for_checkpoint(
+                ckpt, &items, &questions, &temps,
+            )?;
         }
         ExperimentMode::Checkpoints => {
             ExperimentRunner::compare_checkpoints(&items, &questions)?;
@@ -626,8 +668,19 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
 }
 
 fn handle_compare(args: CompareArgs) -> Result<()> {
-    let questions =
+    let chunk_strategy = args
+        .chunk_strategy
+        .parse::<lemma::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let mut questions =
         load_questions_or_inline(args.schema.as_deref(), "Classify the topic or sentiment")?;
+    if let Some(tpl) = &args.hypothesis_template {
+        for q in questions.values_mut() {
+            if q.hypothesis_template.is_none() {
+                q.hypothesis_template = Some(tpl.clone());
+            }
+        }
+    }
     let items =
         resolve_data_source(&args.data_dir, args.file.as_deref(), false, None)?.read_items()?;
     if items.is_empty() {
@@ -650,18 +703,30 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
         list
     };
 
-    let report =
-        ExperimentRunner::run_arena(&items, &questions, &checkpoints, args.top_disagreements)?;
+    let report = ExperimentRunner::run_arena_with_options(
+        &items,
+        &questions,
+        &checkpoints,
+        args.top_disagreements,
+        chunk_strategy,
+        args.hypothesis_template.as_deref(),
+        args.shortlist_k,
+    )?;
     let slice_matrix = if let Some(slice_str) = &args.slice_by {
         let mode = slice_str
             .parse::<lemma::engine::SliceBy>()
             .map_err(|e| anyhow::anyhow!(e))?;
-        Some(lemma::engine::compute_arena_slice_matrix(
-            &items,
-            &questions,
-            &checkpoints,
-            &mode,
-        )?)
+        Some(
+            lemma::engine::slicing::compute_arena_slice_matrix_with_options(
+                &items,
+                &questions,
+                &checkpoints,
+                &mode,
+                chunk_strategy,
+                args.hypothesis_template.as_deref(),
+                args.shortlist_k,
+            )?,
+        )
     } else {
         None
     };
@@ -710,18 +775,18 @@ fn handle_test(args: TestArgs) -> Result<()> {
         .chunk_strategy
         .parse::<lemma::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut cfg = ClassifierConfig {
-        checkpoint,
-        hypothesis_template: args.hypothesis_template.clone(),
-        chunk_strategy,
-        shortlist_k: args.shortlist_k,
-        ..Default::default()
-    };
+    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+    cfg.hypothesis_template = args.hypothesis_template.clone();
+    cfg.chunk_strategy = chunk_strategy;
+    cfg.shortlist_k = args.shortlist_k;
     if let Some(config_path) = &args.config {
         apply_calibrated_config(&mut cfg, config_path, args.temperature.is_none())?;
     }
     if let Some(t) = args.temperature {
         cfg.temperature = t;
+        if args.config.is_none() {
+            cfg.temperature_by_options.clear();
+        }
     }
     let slice_entries = if let Some(slice_str) = &args.slice_by {
         let mode = slice_str
@@ -1112,14 +1177,23 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
 }
 
 fn handle_explain(args: ExplainArgs) -> Result<()> {
+    let text = args
+        .text
+        .as_deref()
+        .or(args.input_text.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Input text is required for `lemma explain`. Pass `<TEXT>` positionally or via `--text <TEXT>`."
+            )
+        })?;
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_questions_or_inline(args.schema.as_deref(), "Classify department")?;
 
-    let target_lower = args.target.to_lowercase();
     let qid = args
         .qid
         .as_deref()
         .or_else(|| {
+            let target_lower = args.target.as_ref()?.to_lowercase();
             questions
                 .iter()
                 .find(|(_, q)| {
@@ -1127,6 +1201,12 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
                         .iter()
                         .any(|o| o.to_lowercase().contains(&target_lower))
                 })
+                .map(|(k, _)| k.as_str())
+        })
+        .or_else(|| {
+            questions
+                .iter()
+                .find(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
                 .map(|(k, _)| k.as_str())
         })
         .or_else(|| questions.keys().next().map(|s| s.as_str()))
@@ -1148,16 +1228,54 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
                 .to_string()
         })
         .collect();
+
+    let classifier = LayaClassifier::with_checkpoint(checkpoint);
     let has_opt = |cand: &str| opt_keys.iter().any(|k| k.eq_ignore_ascii_case(cand));
+
+    let (raw_target, raw_contrast, user_specified) = match (&args.target, &args.contrast) {
+        (Some(t), Some(c)) => (t.clone(), c.clone(), true),
+        (t_opt, c_opt) => {
+            let ans = classifier.classify_single(text, question)?;
+            let mut ranked: Vec<(String, f64)> = ans
+                .probabilities
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+            let top1 = t_opt
+                .clone()
+                .or_else(|| ranked.first().map(|(k, _)| k.clone()))
+                .or_else(|| opt_keys.first().cloned())
+                .unwrap_or_else(|| "billing".to_string());
+            let top2 = c_opt
+                .clone()
+                .or_else(|| {
+                    ranked
+                        .iter()
+                        .find(|(k, _)| !k.eq_ignore_ascii_case(&top1))
+                        .map(|(k, _)| k.clone())
+                })
+                .or_else(|| {
+                    opt_keys
+                        .iter()
+                        .find(|k| !k.eq_ignore_ascii_case(&top1))
+                        .cloned()
+                })
+                .unwrap_or_else(|| "technical".to_string());
+            (top1, top2, t_opt.is_some() || c_opt.is_some())
+        }
+    };
+
     let (target, contrast) =
-        if (!has_opt(&args.target) || !has_opt(&args.contrast)) && opt_keys.len() >= 2 {
-            let t = if has_opt(&args.target) {
-                args.target.clone()
+        if (!has_opt(&raw_target) || !has_opt(&raw_contrast)) && opt_keys.len() >= 2 {
+            let t = if has_opt(&raw_target) {
+                raw_target.clone()
             } else {
                 opt_keys[0].clone()
             };
-            let c = if has_opt(&args.contrast) && !args.contrast.eq_ignore_ascii_case(&t) {
-                args.contrast.clone()
+            let c = if has_opt(&raw_contrast) && !raw_contrast.eq_ignore_ascii_case(&t) {
+                raw_contrast.clone()
             } else {
                 opt_keys
                     .iter()
@@ -1165,18 +1283,19 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
                     .cloned()
                     .unwrap_or_else(|| opt_keys[1].clone())
             };
-            eprintln!(
-                "ℹ️  Option(s) '{}'/'{}' not in question '{}'; using '{}' vs '{}'",
-                args.target, args.contrast, qid, t, c
-            );
+            if user_specified {
+                eprintln!(
+                    "ℹ️  Option(s) '{}'/'{}' not in question '{}'; using '{}' vs '{}'",
+                    raw_target, raw_contrast, qid, t, c
+                );
+            }
             (t, c)
         } else {
-            (args.target.clone(), args.contrast.clone())
+            (raw_target, raw_contrast)
         };
 
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let report = AttributionEngine::new(&classifier)
-        .explain(&args.text, qid, question, &target, &contrast)?;
+    let report =
+        AttributionEngine::new(&classifier).explain(text, qid, question, &target, &contrast)?;
     if args.json {
         let attrs: Vec<_> = report
             .attributions
@@ -2144,11 +2263,9 @@ fn run_hierarchical_classification(
         return Ok(());
     }
 
-    let classifier = LayaClassifier::new(ClassifierConfig {
-        checkpoint,
-        escalate_threshold,
-        ..Default::default()
-    });
+    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+    cfg.escalate_threshold = escalate_threshold;
+    let classifier = LayaClassifier::new(cfg);
 
     let mut router = HierarchicalRouter::new(schema, classifier)
         .with_coarse_threshold(coarse_threshold)
@@ -2281,10 +2398,7 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
 
             let router = HierarchicalRouter::new(
                 schema,
-                LayaClassifier::new(ClassifierConfig {
-                    checkpoint,
-                    ..Default::default()
-                }),
+                LayaClassifier::new(ClassifierConfig::with_checkpoint(checkpoint)),
             )
             .with_coarse_threshold(bench_args.coarse_threshold);
 
@@ -2422,11 +2536,8 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_schema_or_default(args.schema.as_deref())?;
 
-    let mut config = ClassifierConfig {
-        checkpoint,
-        escalate_threshold: args.escalate_threshold,
-        ..Default::default()
-    };
+    let mut config = ClassifierConfig::with_checkpoint(checkpoint);
+    config.escalate_threshold = args.escalate_threshold;
     if let Some(cfg_path) = &args.config {
         apply_calibrated_config(&mut config, cfg_path, true)?;
     }
@@ -2655,11 +2766,9 @@ fn handle_stats(args: StatsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let classifier = LayaClassifier::new(ClassifierConfig {
-        checkpoint,
-        escalate_threshold: args.escalate_threshold,
-        ..Default::default()
-    });
+    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+    cfg.escalate_threshold = args.escalate_threshold;
+    let classifier = LayaClassifier::new(cfg);
 
     let report = StatsEngine::new(classifier)
         .with_iterations(args.iterations)
