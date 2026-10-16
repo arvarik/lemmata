@@ -15,6 +15,7 @@ pub mod hierarchical;
 pub mod metrics;
 pub mod model_calibration;
 pub mod ood;
+pub mod shortlist;
 pub mod slicing;
 pub mod stats;
 pub mod stream;
@@ -58,6 +59,7 @@ pub use model_calibration::{
     save_checkpoint_calibration, save_checkpoint_calibration_at,
 };
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
+pub use shortlist::{ShortlistResult, expand_shortlisted_logits, shortlist_options};
 pub use slicing::{
     ArenaSliceRow, SliceBy, SliceMetricEntry, compute_arena_slice_matrix, evaluate_slices,
     extract_item_slice, print_arena_slice_matrix, print_slice_report,

@@ -30,6 +30,8 @@ pub struct ClassifierConfig {
     pub hypothesis_template: Option<String>,
     #[serde(default)]
     pub chunk_strategy: crate::model::ChunkStrategy,
+    #[serde(default)]
+    pub shortlist_k: usize,
 }
 
 impl ClassifierConfig {
@@ -80,6 +82,7 @@ impl ClassifierConfig {
             cost_weights: BTreeMap::new(),
             hypothesis_template: None,
             chunk_strategy: crate::model::ChunkStrategy::default(),
+            shortlist_k: 0,
         };
         if let Some(cal) = crate::engine::model_calibration::load_checkpoint_calibration(checkpoint)
         {
@@ -135,6 +138,11 @@ impl LayaClassifier {
 
     pub fn with_chunk_strategy(mut self, strategy: crate::model::ChunkStrategy) -> Self {
         self.config.chunk_strategy = strategy;
+        self
+    }
+
+    pub fn with_shortlist_k(mut self, k: usize) -> Self {
+        self.config.shortlist_k = k;
         self
     }
 
@@ -239,9 +247,29 @@ impl LayaClassifier {
         for (qid, q) in questions {
             let options = q.render_options();
             let k = options.len().max(2);
+            let shortlist = if self.config.shortlist_k > 0
+                && q.qtype == QuestionType::Choice
+                && options.len() > self.config.shortlist_k
+            {
+                Some(crate::engine::shortlist_options(
+                    &state_text,
+                    q,
+                    &options,
+                    self.config.shortlist_k,
+                ))
+            } else {
+                None
+            };
+            let eval_options: &[String] = shortlist
+                .as_ref()
+                .map(|s| s.kept_options.as_slice())
+                .unwrap_or(&options);
 
             let head_budget = active_ckpt.head_budget();
-            let est_option_tokens = options.iter().map(|o| estimate_tokens(o)).sum::<usize>();
+            let est_option_tokens = eval_options
+                .iter()
+                .map(|o| estimate_tokens(o))
+                .sum::<usize>();
 
             if est_option_tokens > head_budget {
                 let warn_set = WARNED_HEAD_BUDGET.get_or_init(|| Mutex::new(HashSet::new()));
@@ -264,18 +292,27 @@ impl LayaClassifier {
             total_tokens += q_tokens;
 
             // Compute raw logits for the options (pooling across chunks if SlidingWindow)
-            let raw_logits = if chunks.len() <= 1 {
+            let eval_logits = if chunks.len() <= 1 {
                 self.compute_option_logits(
                     chunks.first().map(|c| c.as_ref()).unwrap_or(&state_text),
                     q,
-                    &options,
+                    eval_options,
                 )
             } else {
                 let win_logits: Vec<Vec<f64>> = chunks
                     .iter()
-                    .map(|c| self.compute_option_logits(c, q, &options))
+                    .map(|c| self.compute_option_logits(c, q, eval_options))
                     .collect();
                 crate::model::pool_window_logits(&win_logits)
+            };
+            let raw_logits = if let Some(s) = &shortlist {
+                crate::engine::expand_shortlisted_logits(
+                    &eval_logits,
+                    &s.kept_indices,
+                    options.len(),
+                )
+            } else {
+                eval_logits
             };
 
             // Temperature scaling per Laya RLCD calibration
