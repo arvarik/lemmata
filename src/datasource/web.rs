@@ -57,7 +57,7 @@ impl HtmlExtractor {
         }
     }
 
-    /// Extract document title via OpenGraph, Twitter card, <title>, or <h1>.
+    /// Extract document title via OpenGraph, Twitter card, `<title>`, or `<h1>`.
     pub fn extract_title(html: &str) -> String {
         // 1. Try og:title
         if let Some(og) = Self::extract_meta_content(html, "property=\"og:title\"") {

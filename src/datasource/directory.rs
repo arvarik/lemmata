@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
-use std::path::PathBuf;
-use walkdir::WalkDir;
+use std::path::{Path, PathBuf};
 
 use super::file::FileSource;
 use super::traits::{DataItem, DataSource};
@@ -36,6 +35,29 @@ impl DirectorySource {
         self.extensions = extensions;
         self
     }
+
+    fn collect_files(&self, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') || name_str == "target" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                if self.recursive {
+                    self.collect_files(&path, out);
+                }
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
 }
 
 impl DataSource for DirectorySource {
@@ -52,43 +74,31 @@ impl DataSource for DirectorySource {
             bail!("Path is not a directory: {}", dir.display());
         }
 
-        let mut walker = WalkDir::new(dir);
-        if !self.recursive {
-            walker = walker.max_depth(1);
-        }
+        let mut files = Vec::new();
+        self.collect_files(dir, &mut files);
 
         let mut all_items = Vec::new();
         let mut file_count = 0;
 
-        for entry in walker
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && name != "target"
-            })
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if path.is_file() {
-                let matches_ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|ext| {
-                        self.extensions
-                            .iter()
-                            .any(|allowed| allowed.eq_ignore_ascii_case(ext))
-                    })
-                    .unwrap_or(false);
+        for path in files {
+            let matches_ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|ext| {
+                    self.extensions
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+                })
+                .unwrap_or(false);
 
-                if matches_ext {
-                    match FileSource::parse_file(path) {
-                        Ok(items) => {
-                            file_count += 1;
-                            all_items.extend(items);
-                        }
-                        Err(err) => {
-                            eprintln!("⚠️  Skipping file {}: {}", path.display(), err);
-                        }
+            if matches_ext {
+                match FileSource::parse_file(&path) {
+                    Ok(items) => {
+                        file_count += 1;
+                        all_items.extend(items);
+                    }
+                    Err(err) => {
+                        eprintln!("⚠️  Skipping file {}: {}", path.display(), err);
                     }
                 }
             }

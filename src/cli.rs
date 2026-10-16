@@ -1375,7 +1375,7 @@ pub struct FetchArgs {
 
 #[derive(Args, Debug)]
 pub struct ScrapeArgs {
-    /// Target web page URL to scrape (e.g. "https://news.ycombinator.com")
+    /// Target web page URL to scrape (e.g. `https://news.ycombinator.com`)
     #[arg(short = 'u', long, value_name = "URL")]
     pub url: String,
 
@@ -1387,7 +1387,7 @@ pub struct ScrapeArgs {
     #[arg(long, default_value_t = 15)]
     pub timeout: u64,
 
-    /// Route through Jina Reader (https://r.jina.ai/<url>) for headless dynamic markdown rendering
+    /// Route through Jina Reader (`https://r.jina.ai/<url>`) for headless dynamic markdown rendering
     #[arg(long)]
     pub jina: bool,
 
