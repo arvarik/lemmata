@@ -68,7 +68,7 @@ impl ClassifierConfig {
         let local_safetensors = checkpoint.local_dir().join("model.safetensors");
         let local_weights_path = local_safetensors.exists().then_some(local_safetensors);
 
-        Self {
+        let mut cfg = Self {
             checkpoint,
             temperature: 1.0,
             temperature_by_options: temp_map,
@@ -80,7 +80,12 @@ impl ClassifierConfig {
             cost_weights: BTreeMap::new(),
             hypothesis_template: None,
             chunk_strategy: crate::model::ChunkStrategy::default(),
+        };
+        if let Some(cal) = crate::engine::model_calibration::load_checkpoint_calibration(checkpoint)
+        {
+            crate::engine::model_calibration::apply_persisted_calibration(&mut cfg, &cal);
         }
+        cfg
     }
 }
 
