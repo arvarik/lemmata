@@ -12,9 +12,9 @@ use lemma::cli::{
     AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
     CascadeCommands, Cli, Commands, CompareArgs, CompletionsArgs, ConformalArgs, ConsensusArgs,
     DownloadArgs, DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
-    HierarchicalCommands, InfoArgs, InspectArgs, OodArgs, OodCommands, OutputFormat, SchemaArgs,
-    SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs, SchemaValidateArgs, ScrapeArgs, StatsArgs,
-    StreamArgs, TestArgs,
+    GuideArgs, HierarchicalCommands, InfoArgs, InspectArgs, LearnArgs, OodArgs, OodCommands,
+    OutputFormat, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
+    SchemaValidateArgs, ScrapeArgs, StatsArgs, StreamArgs, TestArgs,
 };
 use lemma::datasource::{DataItem, DataSource, StreamSink};
 use lemma::engine::{
@@ -71,6 +71,8 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Stats(args) => handle_stats(args),
         Commands::Fetch(args) => handle_fetch(args),
         Commands::Scrape(args) => handle_scrape(args),
+        Commands::Learn(args) => handle_learn(args),
+        Commands::Guide(args) => handle_guide(args),
         Commands::Completions(args) => handle_completions(args),
     }
 }
@@ -2945,6 +2947,149 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
             ])?;
             wtr.flush()?;
         }
+    }
+    Ok(())
+}
+
+fn handle_learn(args: LearnArgs) -> Result<()> {
+    let raw_target = args
+        .phase
+        .as_deref()
+        .or(args.topic.as_deref())
+        .map(str::trim);
+
+    if args.glossary || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("glossary")) {
+        let filter = if args.glossary {
+            raw_target.filter(|t| !t.eq_ignore_ascii_case("glossary"))
+        } else {
+            None
+        };
+        if args.json {
+            let entries = lemma::engine::build_glossary();
+            let filtered: Vec<_> = match filter {
+                Some(q) => {
+                    let ql = q.to_lowercase();
+                    entries
+                        .into_iter()
+                        .filter(|e| {
+                            e.term.to_lowercase().contains(&ql)
+                                || e.category.to_lowercase().contains(&ql)
+                                || e.definition.to_lowercase().contains(&ql)
+                        })
+                        .collect()
+                }
+                None => entries,
+            };
+            println!("{}", serde_json::to_string_pretty(&filtered)?);
+        } else {
+            lemma::engine::print_glossary(filter);
+        }
+        return Ok(());
+    }
+
+    if raw_target.is_some_and(|t| {
+        matches!(
+            t.to_ascii_lowercase().as_str(),
+            "guide" | "recipes" | "cookbook" | "howto" | "cheatsheet"
+        )
+    }) {
+        return handle_guide(GuideArgs {
+            topic: None,
+            json: args.json,
+        });
+    }
+
+    if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {
+        if args.json {
+            let lessons: Vec<_> = lemma::engine::CurriculumPhase::all()
+                .into_iter()
+                .map(lemma::engine::build_phase_lesson)
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&lessons)?);
+        } else {
+            lemma::engine::print_all_phases();
+        }
+        return Ok(());
+    }
+
+    let phase_opt = match raw_target {
+        Some(t) if !t.eq_ignore_ascii_case("quiz") => Some(
+            t.parse::<lemma::engine::CurriculumPhase>()
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        _ => None,
+    };
+
+    if args.interactive {
+        lemma::engine::run_interactive_session(phase_opt, args.quiz)?;
+        return Ok(());
+    }
+
+    if args.quiz || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("quiz")) {
+        if args.json {
+            let all_q = lemma::engine::build_all_quiz_questions();
+            let filtered: Vec<_> = match phase_opt {
+                Some(p) => all_q
+                    .into_iter()
+                    .filter(|q| q.phase == p.number())
+                    .collect(),
+                None => all_q,
+            };
+            println!("{}", serde_json::to_string_pretty(&filtered)?);
+        } else {
+            lemma::engine::run_quiz_non_interactive(phase_opt.map(|p| p.number()));
+        }
+        return Ok(());
+    }
+
+    if let Some(phase) = phase_opt {
+        if args.json {
+            let lesson = lemma::engine::build_phase_lesson(phase);
+            println!("{}", serde_json::to_string_pretty(&lesson)?);
+        } else {
+            lemma::engine::print_phase_lesson(phase);
+        }
+        return Ok(());
+    }
+
+    if args.json {
+        let phases: Vec<_> = lemma::engine::CurriculumPhase::all()
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "phase": p.number(),
+                    "slug": p.slug(),
+                    "title": p.title(),
+                    "subtitle": p.subtitle(),
+                    "key_takeaways": p.key_takeaways(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&phases)?);
+    } else {
+        lemma::engine::print_curriculum_overview();
+    }
+    Ok(())
+}
+
+fn handle_guide(args: GuideArgs) -> Result<()> {
+    if args.json {
+        let recipes = lemma::engine::build_workflow_recipes();
+        let filtered: Vec<_> = match args.topic.as_deref() {
+            Some(q) => {
+                let ql = q.to_lowercase();
+                recipes
+                    .into_iter()
+                    .filter(|r| {
+                        r.slug.to_lowercase().contains(&ql) || r.title.to_lowercase().contains(&ql)
+                    })
+                    .collect()
+            }
+            None => recipes,
+        };
+        println!("{}", serde_json::to_string_pretty(&filtered)?);
+    } else {
+        lemma::engine::print_workflow_guide(args.topic.as_deref());
     }
     Ok(())
 }

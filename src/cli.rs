@@ -98,6 +98,18 @@ pub enum Commands {
     #[command(visible_alias = "arena")]
     Compare(CompareArgs),
 
+    /// Interactive 5-phase System 1 mastery curriculum, live concept labs, glossary, and Socratic quizzes
+    #[command(visible_alias = "educate", alias = "tutorial", alias = "course")]
+    Learn(LearnArgs),
+
+    /// Practical end-to-end CLI workflow recipes and quickstart cookbook
+    #[command(
+        visible_alias = "cookbook",
+        visible_alias = "howto",
+        alias = "cheatsheet"
+    )]
+    Guide(GuideArgs),
+
     /// Generate shell auto-completions for bash, elvish, fish, powershell, or zsh
     Completions(CompletionsArgs),
 }
@@ -1714,4 +1726,46 @@ pub struct ScrapeArgs {
     /// Output presentation format (jsonl, json, table; default: jsonl)
     #[arg(long, default_value = "jsonl")]
     pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct LearnArgs {
+    /// Optional phase number (`1`..`5`), topic slug (`foundations`, `paradigms`, `scaling`, `calibration`, `production`), `all`, `glossary`, or `guide`
+    #[arg(value_name = "PHASE_OR_TOPIC")]
+    pub topic: Option<String>,
+
+    /// Specific curriculum phase (`1`..`5`, `foundations`, `paradigms`, `scaling`, `calibration`, `production`, or `all`)
+    #[arg(short, long)]
+    pub phase: Option<String>,
+
+    /// Launch step-by-step interactive terminal tutor with live labs and graded Socratic checkpoints
+    #[arg(short, long)]
+    pub interactive: bool,
+
+    /// Run Socratic diagnostic multiple-choice quiz to test conceptual intuition
+    #[arg(short, long)]
+    pub quiz: bool,
+
+    /// Display A-to-Z System 1 concept and mathematical glossary (optionally filtered by topic)
+    #[arg(short, long)]
+    pub glossary: bool,
+
+    /// Render all 5 curriculum phases sequentially
+    #[arg(short, long)]
+    pub all: bool,
+
+    /// Output curriculum, lesson, glossary, or quiz as structured JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct GuideArgs {
+    /// Optional workflow recipe slug (`quickstart`, `arena`, `calibration`, `scaling`, `production`)
+    #[arg(value_name = "RECIPE")]
+    pub topic: Option<String>,
+
+    /// Output workflow recipes as structured JSON
+    #[arg(long)]
+    pub json: bool,
 }
