@@ -293,6 +293,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         multi_label: args.multi_label,
         multi_label_threshold: args.multi_label_threshold,
         escalate_threshold: args.escalate_threshold,
+        hypothesis_template: args.hypothesis_template.clone(),
         ..Default::default()
     };
 
@@ -673,6 +674,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
 
     let mut cfg = ClassifierConfig {
         checkpoint,
+        hypothesis_template: args.hypothesis_template.clone(),
         ..Default::default()
     };
     if let Some(config_path) = &args.config {
@@ -860,9 +862,11 @@ fn handle_info(args: InfoArgs) -> Result<()> {
                     .verify_checkpoint(c, &args.local_dir)
                     .map(|r| r.is_valid)
                     .unwrap_or(false);
+                let paradigm = lemma::model::head_paradigm_for(c);
                 serde_json::json!({
                     "repo_id": c.repo_id(), "backbone": c.backbone(), "parameters": c.param_count(),
                     "context_window": c.context_window(), "head_budget": c.head_budget(),
+                    "head_paradigm": paradigm.as_str(), "head_complexity": paradigm.complexity_notation(),
                     "local_dir": c.local_dir(), "installed": installed,
                     "domain": checkpoint_domain_summary(c),
                 })

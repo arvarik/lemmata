@@ -741,6 +741,7 @@ fn test_schema_knapsack_optimizer() {
             instructions: "Classify incoming support inquiry to appropriate enterprise domain"
                 .into(),
             criteria: Some(serde_json::Value::Object(criteria_map)),
+            hypothesis_template: None,
         },
     );
 
@@ -1612,6 +1613,7 @@ fn test_web_scraper_html_extraction_and_classification() {
         qtype: QuestionType::Choice,
         instructions: "Is this article about machine learning encoders or culinary cooking?".into(),
         criteria: Some(serde_json::Value::Object(criteria)),
+        hypothesis_template: None,
     };
     let mut questions = std::collections::BTreeMap::new();
     questions.insert("topic".to_string(), q);

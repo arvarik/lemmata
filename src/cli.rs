@@ -248,6 +248,10 @@ pub struct ClassifyArgs {
     /// Coarse router confidence threshold to proceed to fine sub-classifier (default: 0.50)
     #[arg(long, default_value_t = 0.50)]
     pub coarse_threshold: f64,
+
+    /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
+    #[arg(long)]
+    pub hypothesis_template: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -369,6 +373,10 @@ pub struct TestArgs {
     /// Do not recursively traverse subdirectories
     #[arg(long)]
     pub no_recursive: bool,
+
+    /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
+    #[arg(long)]
+    pub hypothesis_template: Option<String>,
 }
 
 #[derive(Args, Debug)]
