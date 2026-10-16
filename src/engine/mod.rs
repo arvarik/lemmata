@@ -13,6 +13,7 @@ pub mod explain;
 pub mod guardrail;
 pub mod hierarchical;
 pub mod metrics;
+pub mod model_calibration;
 pub mod ood;
 pub mod slicing;
 pub mod stats;
@@ -50,6 +51,11 @@ pub use hierarchical::{
 };
 pub use metrics::{
     EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
+};
+pub use model_calibration::{
+    MODEL_CALIBRATION_FILENAME, apply_persisted_calibration, calibrate_and_persist_checkpoints,
+    calibration_path_for, load_checkpoint_calibration, load_checkpoint_calibration_from,
+    save_checkpoint_calibration, save_checkpoint_calibration_at,
 };
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
 pub use slicing::{

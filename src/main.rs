@@ -2335,6 +2335,14 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
 
     let (report, calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
 
+    if args.persist_to_model {
+        let saved = lemma::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?;
+        eprintln!(
+            "💾 Auto-persisted checkpoint calibration profile to: {}",
+            saved.display()
+        );
+    }
+
     if let Some(export_path) = &args.export_config {
         write_json_file(export_path, &calibrated_config)?;
         eprintln!(
