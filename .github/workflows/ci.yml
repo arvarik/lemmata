@@ -63,6 +63,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
       - name: Verify release build & CLI smoke check
+        shell: bash
         run: |
           cargo build --release --locked
           cargo run --release --locked -- --version
