@@ -299,6 +299,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         escalate_threshold: args.escalate_threshold,
         hypothesis_template: args.hypothesis_template.clone(),
         chunk_strategy,
+        shortlist_k: args.shortlist_k,
         ..Default::default()
     };
 
@@ -713,6 +714,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
         checkpoint,
         hypothesis_template: args.hypothesis_template.clone(),
         chunk_strategy,
+        shortlist_k: args.shortlist_k,
         ..Default::default()
     };
     if let Some(config_path) = &args.config {

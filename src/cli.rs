@@ -256,6 +256,10 @@ pub struct ClassifyArgs {
     /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
+
+    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    #[arg(long, default_value_t = 0)]
+    pub shortlist_k: usize,
 }
 
 #[derive(Args, Debug)]
@@ -393,6 +397,10 @@ pub struct TestArgs {
     /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
+
+    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    #[arg(long, default_value_t = 0)]
+    pub shortlist_k: usize,
 }
 
 #[derive(Args, Debug)]
