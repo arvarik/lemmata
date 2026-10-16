@@ -74,6 +74,7 @@ pub enum Commands {
     Attest(AttestArgs),
 
     /// Hierarchical coarse-to-fine decision trees for high-cardinality routing
+    #[command(visible_alias = "route")]
     Hierarchical(HierarchicalArgs),
 
     /// Automatically tune and calibrate temperature parameters per question bucket
@@ -224,7 +225,7 @@ pub struct ClassifyArgs {
     #[arg(long, default_value_t = 0.60)]
     pub ood_threshold: f64,
 
-    /// Action when OOD detected (allow, escalate, quarantine)
+    /// Action when OOD detected (allow, flag, escalate, quarantine)
     #[arg(long, default_value = "escalate")]
     pub ood_action: String,
 
@@ -266,6 +267,10 @@ pub struct ExperimentArgs {
     /// Number of permutations for option ordering experiment
     #[arg(long, default_value_t = 5)]
     pub permutations: usize,
+
+    /// Output experiment results as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -355,6 +360,10 @@ pub struct InfoArgs {
     /// Check local cache directory for downloaded checkpoints
     #[arg(long, default_value = "models/laya")]
     pub local_dir: PathBuf,
+
+    /// Output model specifications as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -393,6 +402,10 @@ pub struct ExplainArgs {
     /// Checkpoint to use
     #[arg(short, long, default_value = "english")]
     pub checkpoint: String,
+
+    /// Output explanation report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -519,7 +532,7 @@ pub struct DriftArgs {
 #[derive(Args, Debug)]
 pub struct GuardArgs {
     /// Path to declarative policy JSON file defining guardrail rules
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "schema/policy.json")]
     pub policy: PathBuf,
 
     /// Path to questions schema JSON file
@@ -569,6 +582,10 @@ pub struct GuardArgs {
     /// Output presentation format (table, json, pretty, compact, csv, jsonl)
     #[arg(long, default_value = "table")]
     pub format: OutputFormat,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -669,11 +686,17 @@ pub enum OodCommands {
 #[derive(Args, Debug)]
 pub struct OodFitArgs {
     /// In-distribution training dataset (JSONL or CSV)
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        visible_alias = "in-data",
+        visible_alias = "file",
+        default_value = "data/customer_support.jsonl"
+    )]
     pub train_data: PathBuf,
 
     /// Path to questions schema JSON file
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "schema/questions.json")]
     pub schema: PathBuf,
 
     /// Target question ID to fit centroids for
@@ -684,32 +707,48 @@ pub struct OodFitArgs {
     #[arg(short, long, default_value = "english")]
     pub checkpoint: String,
 
+    /// Target false-positive rate (FPR) for threshold calibration
+    #[arg(long, default_value_t = 0.05)]
+    pub fpr_rate: f64,
+
     /// Output file to save fitted OOD profile JSON
     #[arg(short, long, default_value = "models/laya/ood_profile.json")]
     pub output: PathBuf,
+
+    /// Output fitted profile as JSON to stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct OodEvalArgs {
     /// In-distribution evaluation dataset
-    #[arg(long)]
+    #[arg(long, default_value = "data/customer_support.jsonl")]
     pub id_data: PathBuf,
 
     /// Out-of-distribution anomaly dataset
-    #[arg(long)]
+    #[arg(
+        long,
+        visible_alias = "test-data",
+        default_value = "data/banking_tickets.jsonl"
+    )]
     pub ood_data: PathBuf,
 
     /// Path to questions schema JSON file
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "schema/questions.json")]
     pub schema: PathBuf,
 
     /// Path to fitted OOD profile JSON
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "models/laya/ood_profile.json")]
     pub profile: PathBuf,
 
     /// Checkpoint to use
     #[arg(short, long, default_value = "english")]
     pub checkpoint: String,
+
+    /// Output evaluation metrics as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -730,15 +769,21 @@ pub enum CascadeCommands {
 #[derive(Args, Debug)]
 pub struct CascadeTuneArgs {
     /// Labeled validation dataset
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        visible_alias = "eval-data",
+        visible_alias = "file",
+        default_value = "data/customer_support.jsonl"
+    )]
     pub val_data: PathBuf,
 
     /// Path to questions schema JSON file
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "schema/questions.json")]
     pub schema: PathBuf,
 
     /// Target accuracy SLA (e.g. 0.95 for 95%)
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long, visible_alias = "target-acc", default_value_t = 0.95)]
     pub target_accuracy: f64,
 
     /// Estimated System 2 cost per invocation in USD
@@ -752,12 +797,16 @@ pub struct CascadeTuneArgs {
     /// Optional path to export tuned cascade policy JSON
     #[arg(long)]
     pub export_policy: Option<PathBuf>,
+
+    /// Output tuned policy as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct CascadeRunArgs {
     /// Specific file to route
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "data")]
     pub file: Option<PathBuf>,
 
     /// Inline text snippet
@@ -773,7 +822,7 @@ pub struct CascadeRunArgs {
     pub checkpoint: String,
 
     /// Risk threshold tau (items with risk > tau cascade to System 2)
-    #[arg(long, default_value_t = 0.45)]
+    #[arg(short, long, visible_alias = "threshold", default_value_t = 0.45)]
     pub risk_threshold: f64,
 
     /// Estimated System 2 cost per invocation in USD
@@ -783,6 +832,10 @@ pub struct CascadeRunArgs {
     /// Output presentation format
     #[arg(long, default_value = "table")]
     pub format: OutputFormat,
+
+    /// Output decisions as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -800,12 +853,26 @@ pub enum AttestCommands {
 #[derive(Args, Debug)]
 pub struct AttestVerifyArgs {
     /// Path to decision receipts JSONL log
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        visible_alias = "receipts",
+        default_value = "logs/receipts.jsonl"
+    )]
     pub receipt_log: PathBuf,
 
     /// Secret key used to sign the receipts
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        visible_alias = "attest-key",
+        default_value = "lemma_default_enterprise_secret_2026"
+    )]
     pub secret_key: String,
+
+    /// Output verification report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]

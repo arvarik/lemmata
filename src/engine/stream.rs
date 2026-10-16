@@ -196,19 +196,13 @@ impl StreamPipeline {
             total_ingested += batch.len();
 
             // 1. Process items (leveraging DecisionCache and Rayon parallel evaluation)
-            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = if batch.len() > 1
-            {
-                // Rayon parallel map for micro-batch
-                batch
-                    .par_iter()
-                    .map(|item| self.process_single_item(item, &schema_hash))
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                vec![self.process_single_item(&batch[0], &schema_hash)?]
-            };
+            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = batch
+                .par_iter()
+                .map(|item| self.process_single_item(item, &schema_hash))
+                .collect::<Result<Vec<_>>>()?;
 
             // 2. Cryptographic Attestation & Cache Insertion on the sequential sink-emission step
-            for (mut record, opt_decision) in processed_records {
+            for (item, (mut record, opt_decision)) in batch.iter().zip(processed_records) {
                 cumulative_latency_ms += record.latency_ms;
                 if record.cached {
                     total_cached += 1;
@@ -226,12 +220,9 @@ impl StreamPipeline {
                         .map(|a| a.confidence)
                         .fold(1.0, f64::min);
                     if !record.cached && !decision.answers.is_empty() && min_conf >= 0.70 {
-                        let text_val = match &batch.iter().find(|i| i.id == record.item_id) {
-                            Some(item) => match &item.state {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => serde_json::to_string(other).unwrap_or_default(),
-                            },
-                            None => String::new(),
+                        let text_val = match &item.state {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
                         };
                         if let Ok(mut c) = cache_arc.lock() {
                             c.insert(&text_val, &schema_hash, decision);
@@ -240,9 +231,7 @@ impl StreamPipeline {
                 }
 
                 // Cryptographic Merkle chain attestation receipt
-                if let (Some(attest), Some(decision)) = (&mut self.attest_engine, &opt_decision)
-                    && let Some(item) = batch.iter().find(|i| i.id == record.item_id)
-                {
+                if let (Some(attest), Some(decision)) = (&mut self.attest_engine, &opt_decision) {
                     let action = if record.escalated {
                         GuardAction::Escalate
                     } else {

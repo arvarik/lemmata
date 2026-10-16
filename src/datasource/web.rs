@@ -382,40 +382,44 @@ impl HtmlExtractor {
     }
 }
 
+/// Execute an HTTP GET via system `curl` with headers and timeout, verifying exit status.
+pub(crate) fn curl_fetch(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<String> {
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sSL", "--max-time", &timeout_secs.to_string()]);
+    for (k, v) in headers {
+        cmd.args(["-H", &format!("{}: {}", k, v)]);
+    }
+    cmd.arg(url);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to execute curl request for {}", url))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        bail!("HTTP request failed for {}: {}", url, err.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Jina Reader API client (`https://r.jina.ai/<url>`) for dynamic SPA rendering.
 pub struct JinaReaderClient;
 
 impl JinaReaderClient {
     pub fn fetch(url: &str, api_key: Option<&str>, timeout_secs: u64) -> Result<ExtractedDocument> {
         let jina_url = format!("https://r.jina.ai/{}", url);
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sSL",
-            "--max-time",
-            &timeout_secs.to_string(),
-            "-H",
-            "Accept: text/plain",
-            "-H",
-            "X-Return-Format: markdown",
-            "-H",
-            "X-Timeout: 20",
-        ]);
-
-        if let Some(key) = api_key {
-            cmd.args(["-H", &format!("Authorization: Bearer {}", key)]);
+        let auth_header = api_key.map(|k| format!("Bearer {}", k));
+        let mut headers = vec![
+            ("Accept", "text/plain"),
+            ("X-Return-Format", "markdown"),
+            ("X-Timeout", "20"),
+        ];
+        if let Some(auth) = &auth_header {
+            headers.push(("Authorization", auth.as_str()));
         }
 
-        cmd.arg(&jina_url);
-
-        let output = cmd
-            .output()
-            .context("Failed to execute curl for Jina Reader API")?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            bail!("Jina Reader request failed: {}", err);
-        }
-
-        let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let body = curl_fetch(&jina_url, &headers, timeout_secs)?
+            .trim()
+            .to_string();
         if body.is_empty() {
             bail!("Jina Reader returned empty response for {}", url);
         }
@@ -424,11 +428,11 @@ impl JinaReaderClient {
         let mut title = String::new();
         for line in body.lines().take(10) {
             let trimmed = line.trim();
-            if trimmed.starts_with("Title:") {
-                title = trimmed.trim_start_matches("Title:").trim().to_string();
-                break;
-            } else if trimmed.starts_with("# ") {
-                title = trimmed.trim_start_matches("# ").trim().to_string();
+            if let Some(rest) = trimmed
+                .strip_prefix("Title:")
+                .or_else(|| trimmed.strip_prefix("# "))
+            {
+                title = rest.trim().to_string();
                 break;
             }
         }
@@ -477,27 +481,15 @@ impl WebScraper {
         }
 
         // 1. Fetch raw HTML via system curl (zero dependencies)
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sSL",
-            "--max-time",
-            &self.options.timeout_secs.to_string(),
-            "-A",
-            &self.options.user_agent,
-            "-H",
-            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "-H",
-            "Accept-Language: en-US,en;q=0.9",
-            url,
-        ]);
-
-        let output = cmd.output().context("Failed to execute curl request")?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            bail!("HTTP request failed for {}: {}", url, err);
-        }
-
-        let raw_html = String::from_utf8_lossy(&output.stdout).to_string();
+        let headers = [
+            ("User-Agent", self.options.user_agent.as_str()),
+            (
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ),
+            ("Accept-Language", "en-US,en;q=0.9"),
+        ];
+        let raw_html = curl_fetch(url, &headers, self.options.timeout_secs)?;
         let mut doc = HtmlExtractor::extract(&raw_html, url);
 
         // 2. Fallback check: if extracted text is minimal or SPA detected, try Jina Reader

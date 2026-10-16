@@ -274,44 +274,45 @@ lemma cache clear
 ```
 
 ### 17. Free-Energy & Mahalanobis++ OOD Detection (`lemma ood`)
-Detects out-of-distribution inputs and domain drift without requiring auxiliary labels by fitting Helmholtz Free-Energy profiles $E(x; T) = -T \ln \sum \exp(z_k / T)$ and $\ell_2$-normalized class centroid Mahalanobis distances:
+Detects out-of-distribution inputs and domain drift by fitting Helmholtz Free-Energy profiles $E(x; T) = -T \ln \sum \exp(z_k / T)$ and $\ell_2$-normalized class centroid Mahalanobis distances:
 
 ```bash
 # Fit an OOD baseline profile from golden in-distribution data
 lemma ood fit \
-  --in-data data/customer_support.jsonl \
+  --train-data data/customer_support.jsonl \
   --schema schema/questions.json \
   --output models/laya/ood_profile.json \
   --fpr-rate 0.05
 
-# Evaluate OOD detection AUROC, AUPR, and FPR@95% on test data
+# Evaluate OOD detection FPR and TPR/Recall against test data
 lemma ood eval \
   --profile models/laya/ood_profile.json \
-  --test-data data/customer_support.jsonl \
+  --id-data data/customer_support.jsonl \
+  --ood-data data/banking_tickets.jsonl \
   --schema schema/questions.json
 ```
 
 ### 18. Cost-Aware System 1 / System 2 Hybrid Cascading Router (`lemma cascade`)
-Routes high-confidence requests directly through fast ModernBERT/mmBERT Laya (System 1, sub-35ms, ~$0.00001/call) while escalating ambiguous requests to frontier LLMs (System 2, e.g. Claude 3.7 / GPT-5, ~$0.01/call) seeded with Laya prior distributions:
+Routes high-confidence requests through fast ModernBERT/mmBERT Laya (System 1, sub-35ms) while escalating ambiguous requests to frontier LLMs (System 2) seeded with Laya prior distributions:
 
 ```bash
 # 1. Tune the Pareto-optimal risk threshold tau* for a given accuracy SLA
 lemma cascade tune \
-  --eval-data data/customer_support.jsonl \
+  --val-data data/customer_support.jsonl \
   --schema schema/questions.json \
-  --target-acc 0.95 \
+  --target-accuracy 0.95 \
   --system2-cost 0.01
 
-# 2. Execute live cascade routing and produce prior-seeded System 2 prompt payloads
+# 2. Execute live cascade routing
 lemma cascade run \
-  --data data/customer_support.jsonl \
+  --file data/customer_support.jsonl \
   --schema schema/questions.json \
-  --threshold 0.45 \
+  --risk-threshold 0.45 \
   --system2-cost 0.01
 ```
 
 ### 19. Cryptographic Decision Attestation & Merkle Audit Trail (`lemma attest`)
-Generates RFC 8785 canonical JSON-digested and Ed25519/HMAC-SHA256-signed audit receipts with Merkle hash chaining ($H_i = \text{Hash}(H_{i-1} \Vert \text{Payload}_i)$) to guarantee tamper-proof audit trails for enterprise compliance:
+Generates RFC 8785 canonical JSON-digested and HMAC-signed audit receipts with Merkle hash chaining ($H_i = \text{Hash}(H_{i-1} \Vert \text{Payload}_i)$) to guarantee tamper-proof audit trails:
 
 ```bash
 # Generate cryptographically signed audit receipts during policy evaluation
@@ -323,14 +324,15 @@ lemma guard \
   --receipt-log logs/receipts.jsonl
 
 # Verify Merkle chain integrity and digital signatures across the receipt log
-lemma attest verify --receipts logs/receipts.jsonl --attest-key "enterprise_secret_signing_key_2026"
+lemma attest verify \
+  --receipt-log logs/receipts.jsonl \
+  --secret-key "enterprise_secret_signing_key_2026"
 ```
 
 ### 20. Dynamic Schema Criteria Knapsack Optimizer (`lemma schema optimize`)
-Uses 0/1 dynamic programming knapsack optimization over criteria clauses to compact verbose option descriptions into ModernBERT (192) or mmBERT (256) head token limits while prioritizing discriminative class keywords:
+Uses 0/1 dynamic programming knapsack optimization over criteria clauses to compact verbose option descriptions into ModernBERT (192) or mmBERT (256) head token limits:
 
 ```bash
-# Optimize schema descriptions to strictly fit within token budget
 lemma schema optimize \
   --schema schema/questions.json \
   --budget 192 \
@@ -338,29 +340,29 @@ lemma schema optimize \
   --diff
 ```
 
-### 21. Hierarchical Coarse-to-Fine Decision Routing (`lemma hierarchical` & `lemma classify --hierarchical`)
-Solves the high-cardinality bottleneck (>20 labels, e.g. Banking77) by structuring decisions into a two-stage coarse-to-fine hierarchy, preserving ample head token budgets (30–45 tokens/option) and recovering classification accuracy from 0.425 to >0.850 with sub-70ms execution:
+### 21. Hierarchical Coarse-to-Fine Decision Routing (`lemma hierarchical` / `lemma route`)
+Solves high-cardinality classification (>20 labels, e.g. Banking77) via a two-stage coarse-to-fine hierarchy:
 
 ```bash
-# 1. Inspect and visualize the hierarchical decision tree with token budget allocations
+# 1. Visualize the hierarchical decision tree with token budget allocations
 lemma hierarchical tree --schema schema/banking_hierarchy.json
 
 # 2. Validate token budgets across all coarse and fine nodes
 lemma hierarchical validate --schema schema/banking_hierarchy.json
 
-# 3. Classify inputs through the coarse-to-fine hierarchy (with table or jsonl output)
+# 3. Classify inputs through the coarse-to-fine hierarchy (also via `lemma route run`)
 lemma classify \
   --file data/banking_tickets.jsonl \
   --hierarchical schema/banking_hierarchy.json \
   --coarse-threshold 0.50 \
   --format table
 
-# 4. Run dedicated benchmark measuring coarse vs fine latency, escalation rates, and throughput
+# 4. Benchmark coarse vs fine latency, escalation rates, and throughput
 lemma hierarchical bench --schema schema/banking_hierarchy.json --file data/banking_tickets.jsonl
 ```
 
 ### 22. Automated Temperature Calibration & ECE Tuner (`lemma calibrate`)
-Automatically tunes per-bucket temperature parameters (`choice:2`, `choice:3-5`, `choice:6-10`, `choice:11+`, `score:3-5`, `noul:2`) from labeled validation sets using scalar Brent / Golden-Section optimization to minimize Expected Calibration Error (ECE), Negative Log-Likelihood (NLL), or Brier score. Supports 2026 Quantile-Adaptive Temperature Scaling (**Q-ATS**) to dynamically modulate temperature under covariate shift:
+Tunes per-bucket temperature parameters (`choice:2`, `choice:3-5`, `choice:6-10`, `choice:11+`, `score:3-5`, `noul:2`) from labeled validation sets using Golden-Section optimization to minimize ECE, NLL, or Brier score, with optional Quantile-Adaptive Temperature Scaling (**Q-ATS**):
 
 ```bash
 # 1. Calibrate temperatures using Negative Log-Likelihood loss and export to config
@@ -370,24 +372,17 @@ lemma calibrate \
   --loss nll \
   --export-config config/laya_calibrated.json
 
-# 2. Calibrate with 2026 Quantile-Adaptive Temperature Scaling (Q-ATS)
+# 2. Calibrate with Quantile-Adaptive Temperature Scaling (Q-ATS)
 lemma calibrate \
   --val-data data/customer_support.jsonl \
   --schema schema/questions.json \
   --adaptive \
   --adaptive-gamma 0.30 \
   --export-config config/laya_qats.json
-
-# 3. Classify with calibrated or Q-ATS configuration in production inference
-lemma classify \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --config config/laya_calibrated.json \
-  --format table
 ```
 
 ### 23. Pluggable Streaming & Lakehouse Connectors (`lemma stream`)
-Ingests unbounded streaming event queues (Kafka, AWS Kinesis) and cloud lakehouses (Apache Iceberg, Delta Lake, AWS S3, DuckDB/Parquet) with micro-batching, backpressure, columnar projection, semantic cache insertion, cryptographic attestation receipt chaining, and dual routing to primary and supervisor escalation queues:
+Ingests streaming event queues (Kafka) and cloud lakehouses (Iceberg, S3) with micro-batching, columnar projection, semantic caching, and attestation receipt chaining:
 
 ```bash
 # 1. Ingest streaming events from Kafka topic and route to primary and escalation sinks
@@ -397,139 +392,56 @@ lemma stream \
   --sink "output/routed_tickets.jsonl" \
   --escalate-sink "output/human_review_queue.jsonl" \
   --batch-size 32 \
-  --max-flush-interval-ms 50 \
   --attest \
-  --cache \
-  --format table
+  --cache
 
-# 2. Lakehouse columnar projection (scans strictly selected columns, ignoring wide analytics fields)
+# 2. Lakehouse columnar projection
 lemma stream \
   --source "lakehouse://data/customer_support.jsonl?columns=body" \
   --schema schema/questions.json \
   --sink output/lakehouse_decisions.jsonl \
   --format compact
-
-# 3. Stream from S3 / GCS cloud object store archives with attestation
-lemma stream \
-  --source "s3://prod-lakehouse/customer_support.jsonl" \
-  --schema schema/questions.json \
-  --sink output/s3_stream_output.jsonl \
-  --attest \
-  --format json
 ```
 
 ### 24. Active Learning & RLCD Distillation (`lemma active`)
-Harvests ambiguous, high-entropy, or out-of-distribution items flagged by Laya's internal Act/Escalate head into human-in-the-loop review queues, computes acquisition scores across 5 uncertainty strategies, and synthesizes contrastive preference corpora for continuous **RLCD (Reinforcement Learning from Contrastive Distillation)**:
+Harvests ambiguous or out-of-distribution items into human-in-the-loop review queues and synthesizes contrastive preference corpora for **RLCD**:
 
 ```bash
-# 1. Uncertainty Sampling: extract the top 20 ambiguous requests via composite uncertainty scoring
+# 1. Uncertainty Sampling (strategies: composite, entropy, margin, conformal, energy)
 lemma active sample \
   --data data/customer_support.jsonl \
   --schema schema/questions.json \
   --strategy composite \
   --budget 20 \
-  --export-queue output/supervisor_review_queue.jsonl \
-  --format table
+  --export-queue output/supervisor_review_queue.jsonl
 
-# Available strategies: composite, entropy, margin, conformal, energy
-lemma active sample \
-  --data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --strategy entropy \
-  --budget 10
-
-# 2. RLCD Dataset Synthesis: pair ground-truth targets with negative model predictions and compute contrastive margin weights
+# 2. RLCD Dataset Synthesis
 lemma active distill \
   --data data/customer_support.jsonl \
   --schema schema/questions.json \
   --val-split 0.20 \
-  --output output/rlcd_contrastive_dataset.jsonl \
-  --format table
+  --output output/rlcd_contrastive_dataset.jsonl
 
-# 3. Active Learning Pool Diagnostics: inspect entropy, top-2 margins, and uncertainty distributions
-lemma active stats \
-  --data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --format table
+# 3. Active Learning Pool Diagnostics
+lemma active stats --data data/customer_support.jsonl --schema schema/questions.json
+```
+
 ### 25. Unified Speed, Performance & Accuracy Diagnostics (`lemma stats`)
-Evaluates end-to-end system telemetry across three unified pillars: **Speed & Latency Distributions**, **Throughput & Cache Efficiency**, and **Decision Accuracy & Calibration Quality**:
+Evaluates end-to-end system telemetry across **Speed & Latency Distributions**, **Throughput & Cache Efficiency**, and **Decision Accuracy & Calibration Quality**:
 
 ```bash
-# 1. Full diagnostic report across speed, throughput, and accuracy with ANSI table format
-lemma stats \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --format table
-
-# 2. Measure semantic cache hit rates and sub-millisecond retrieval speedup across 5 iterations
-lemma stats \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --cache \
-  --iterations 5 \
-  --format table
-
-# 3. Compact single-line summary for CI/CD assertions and deployment health checks
-lemma stats \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --format compact
-# Output:
-# ⚡ SPEED: 0.13ms p50 (p95: 0.15ms, avg: 0.13ms) | 🚀 PERF: 7,404.0 items/s (22,211.9 dec/s, 18.1% head) | 🎯 ACC: 72.2% (Soft: 57.6%, ECE: 0.441, Brier: 0.167) | 🛡️ RISK: 83.3% escalate (conf: 36.1%)
-
-# 4. Profile raw inline text or unstructured streams
-lemma stats \
-  --text "Please cancel my subscription and refund invoice #4411" \
-  --schema schema/questions.json \
-  --format compact
-
-# 5. Export comprehensive telemetry to JSON or CSV for analytics pipelines
-lemma stats \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --output target/system_stats_report.json \
-  --format json
+# Full diagnostic report or compact one-line summary
+lemma stats --file data/customer_support.jsonl --schema schema/questions.json --format table
+lemma stats --file data/customer_support.jsonl --schema schema/questions.json --format compact
 ```
 
----
+### 26. Public Dataset & Web Ingestion (`lemma fetch` & `lemma scrape`)
+Ingest datasets from Hugging Face Hub, Hacker News, Reddit, or Wikipedia, or scrape web pages into clean Markdown:
 
-## 🔌 Extensible Data Ingestion Architecture
-
-`lemma` defines a pluggable `DataSource` trait in `src/datasource/traits.rs`:
-
-```rust
-pub trait DataSource: Send + Sync {
-    fn name(&self) -> &str;
-    fn read_items(&self) -> Result<Vec<DataItem>>;
-}
+```bash
+lemma fetch --hf fancyzhx/ag_news --limit 50 --auto-schema --output data/ag_news.jsonl
+lemma scrape --url https://example.com/article --format jsonl
 ```
-
-Built-in implementations:
-- `DirectorySource`: Recursively ingests files from directories (e.g. `data/`).
-- `FileSource`: Parses `.json`, `.jsonl`, `.csv`, `.txt`, `.md`.
-- `StdinSource`: Streams line-delimited items or JSONL from UNIX pipes.
-- `MemorySource`: Zero-copy in-memory buffers for programmatic or test calls.
-
-Custom connectors (Kafka, S3, Snowflake, Iceberg) can easily implement this trait.
-
----
-
-## 📚 Subsystem Architecture & Capabilities
-
-1. **Hierarchical Coarse-to-Fine Routing (`lemma route`)**  
-   Solves the high-cardinality bottleneck (>20 labels) identified in Laya benchmarks by structuring decisions into a two-stage coarse-to-fine hierarchy.
-
-2. **Automated Temperature Calibration Tuner (`lemma calibrate`)**  
-   Automated Brent-optimization to refit domain-specific temperature parameters per `(question_type, option_count)` bucket, slashing Expected Calibration Error (ECE) from 0.466 to 0.081.
-
-3. **Pluggable Streaming & Lakehouse Connectors (`lemma stream`)**  
-   Connects `lemma` directly to Apache Kafka, AWS S3, Apache Iceberg, and Snowflake with backpressure, columnar projection, and cryptographic audit receipts.
-
-4. **Active Learning & Distillation Pipeline (`lemma active`, `lemma cascade`)**  
-   Harvests high-entropy items flagged by Laya's internal Act/Escalate head into human-in-the-loop review queues and synthesizes contrastive datasets for continuous RLCD fine-tuning.
-
-5. **Unified System Diagnostics & Stats Engine (`lemma stats`)**  
-   Measures sub-millisecond percentile latencies (P50/P90/P95/P99), ingestion/decision throughput, cache hit rate speedups, head token budget utilization, top-1 & soft accuracy, ECE, Brier score, and per-question breakdowns.
 
 ---
 
