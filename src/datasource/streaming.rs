@@ -171,14 +171,74 @@ impl StreamSourceKind {
     }
 }
 
+#[derive(Default)]
+struct BufferedStream {
+    items: VecDeque<DataItem>,
+    current_offset: usize,
+    committed_offset: usize,
+}
+
+impl BufferedStream {
+    fn load_file(&mut self, path: &Path, uri_override: Option<&str>) -> Result<usize> {
+        let parsed = FileSource::parse_file(path)?;
+        let count = parsed.len();
+        for mut item in parsed {
+            if let Some(uri) = uri_override {
+                item.source_uri = uri.to_string();
+            }
+            self.items.push_back(item);
+        }
+        Ok(count)
+    }
+
+    fn next_batch(&mut self, max_batch_size: usize) -> Vec<DataItem> {
+        let fetch_count = max_batch_size.min(self.items.len());
+        self.current_offset += fetch_count;
+        self.items.drain(..fetch_count).collect()
+    }
+}
+
+macro_rules! impl_buffered_streaming_source {
+    ($ty:ty, $name:literal) => {
+        impl StreamingDataSource for $ty {
+            fn name(&self) -> &str {
+                $name
+            }
+
+            fn next_batch(
+                &mut self,
+                max_batch_size: usize,
+                _timeout: Duration,
+            ) -> Result<Vec<DataItem>> {
+                Ok(self.stream.next_batch(max_batch_size))
+            }
+
+            fn commit_offset(&mut self, count: usize) -> Result<()> {
+                self.stream.committed_offset += count;
+                Ok(())
+            }
+
+            fn is_exhausted(&self) -> bool {
+                self.stream.items.is_empty()
+            }
+
+            fn current_offset(&self) -> usize {
+                self.stream.current_offset
+            }
+
+            fn committed_offset(&self) -> usize {
+                self.stream.committed_offset
+            }
+        }
+    };
+}
+
 /// Apache Kafka streaming connector with consumer group and offset commit tracking.
 pub struct KafkaSource {
     broker: String,
     topic: String,
     group_id: String,
-    buffer: VecDeque<DataItem>,
-    current_offset: usize,
-    committed_offset: usize,
+    stream: BufferedStream,
 }
 
 impl KafkaSource {
@@ -191,24 +251,19 @@ impl KafkaSource {
             broker: broker.into(),
             topic: topic.into(),
             group_id: group_id.into(),
-            buffer: VecDeque::new(),
-            current_offset: 0,
-            committed_offset: 0,
+            stream: BufferedStream::default(),
         }
     }
 
     /// Pre-load or seed items from a file or buffer (useful for payload streaming and testing).
     pub fn with_items(mut self, items: Vec<DataItem>) -> Self {
-        self.buffer = VecDeque::from(items);
+        self.stream.items = VecDeque::from(items);
         self
     }
 
     /// Load payload from disk if specified in URI query or fallback.
     pub fn load_payload_file(&mut self, path: &Path) -> Result<usize> {
-        let items = FileSource::parse_file(path)?;
-        let count = items.len();
-        self.buffer.extend(items);
-        Ok(count)
+        self.stream.load_file(path, None)
     }
 
     pub fn broker(&self) -> &str {
@@ -224,60 +279,22 @@ impl KafkaSource {
     }
 }
 
-impl StreamingDataSource for KafkaSource {
-    fn name(&self) -> &str {
-        "KafkaSource"
-    }
-
-    fn next_batch(&mut self, max_batch_size: usize, _timeout: Duration) -> Result<Vec<DataItem>> {
-        let fetch_count = max_batch_size.min(self.buffer.len());
-        let mut batch = Vec::with_capacity(fetch_count);
-        for _ in 0..fetch_count {
-            if let Some(item) = self.buffer.pop_front() {
-                self.current_offset += 1;
-                batch.push(item);
-            }
-        }
-        Ok(batch)
-    }
-
-    fn commit_offset(&mut self, count: usize) -> Result<()> {
-        self.committed_offset += count;
-        Ok(())
-    }
-
-    fn is_exhausted(&self) -> bool {
-        self.buffer.is_empty()
-    }
-
-    fn current_offset(&self) -> usize {
-        self.current_offset
-    }
-
-    fn committed_offset(&self) -> usize {
-        self.committed_offset
-    }
-}
+impl_buffered_streaming_source!(KafkaSource, "KafkaSource");
 
 /// Analytical Lakehouse connector (Iceberg / Delta Lake / DuckDB / Parquet projection).
 /// Scans strictly selected columns to preserve RAM and memory bus bandwidth.
 pub struct LakehouseColumnarSource {
     path: PathBuf,
     columns: Vec<String>,
-    items: VecDeque<DataItem>,
-    current_offset: usize,
-    committed_offset: usize,
+    stream: BufferedStream,
 }
 
 impl LakehouseColumnarSource {
     pub fn new(path: impl Into<PathBuf>, columns: Vec<String>) -> Result<Self> {
-        let p = path.into();
         let mut source = Self {
-            path: p.clone(),
-            columns: columns.clone(),
-            items: VecDeque::new(),
-            current_offset: 0,
-            committed_offset: 0,
+            path: path.into(),
+            columns,
+            stream: BufferedStream::default(),
         };
         source.load_projected()?;
         Ok(source)
@@ -291,89 +308,39 @@ impl LakehouseColumnarSource {
             );
         }
 
-        // Ingest raw records and project strictly requested columns
-        let raw_items = FileSource::parse_file(&self.path)?;
-        let path_str = self.path.display().to_string();
+        let uri = format!(
+            "lakehouse://{}#columns={:?}",
+            self.path.display(),
+            self.columns
+        );
+        self.stream.load_file(&self.path, Some(&uri))?;
 
-        for raw in raw_items {
-            let projected_state = match raw.state {
-                serde_json::Value::Object(map) => {
-                    if self.columns.is_empty() {
-                        serde_json::Value::Object(map)
-                    } else {
-                        let mut filtered = serde_json::Map::new();
-                        for col in &self.columns {
-                            if let Some(val) = map.get(col) {
-                                filtered.insert(col.clone(), val.clone());
-                            }
-                        }
-                        if filtered.is_empty() {
-                            // If none matched exact, retain original
-                            serde_json::Value::Object(map)
-                        } else {
-                            serde_json::Value::Object(filtered)
-                        }
+        if !self.columns.is_empty() {
+            for item in &mut self.stream.items {
+                if let serde_json::Value::Object(map) = &item.state {
+                    let filtered: serde_json::Map<String, serde_json::Value> = self
+                        .columns
+                        .iter()
+                        .filter_map(|col| map.get(col).map(|v| (col.clone(), v.clone())))
+                        .collect();
+                    if !filtered.is_empty() {
+                        item.state = serde_json::Value::Object(filtered);
                     }
                 }
-                other => other,
-            };
-
-            let item = DataItem {
-                id: raw.id,
-                state: projected_state,
-                ground_truth: raw.ground_truth,
-                source_uri: format!("lakehouse://{}#columns={:?}", path_str, self.columns),
-            };
-            self.items.push_back(item);
-        }
-
-        Ok(())
-    }
-}
-
-impl StreamingDataSource for LakehouseColumnarSource {
-    fn name(&self) -> &str {
-        "LakehouseColumnarSource"
-    }
-
-    fn next_batch(&mut self, max_batch_size: usize, _timeout: Duration) -> Result<Vec<DataItem>> {
-        let fetch_count = max_batch_size.min(self.items.len());
-        let mut batch = Vec::with_capacity(fetch_count);
-        for _ in 0..fetch_count {
-            if let Some(item) = self.items.pop_front() {
-                self.current_offset += 1;
-                batch.push(item);
             }
         }
-        Ok(batch)
-    }
-
-    fn commit_offset(&mut self, count: usize) -> Result<()> {
-        self.committed_offset += count;
         Ok(())
     }
-
-    fn is_exhausted(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    fn current_offset(&self) -> usize {
-        self.current_offset
-    }
-
-    fn committed_offset(&self) -> usize {
-        self.committed_offset
-    }
 }
+
+impl_buffered_streaming_source!(LakehouseColumnarSource, "LakehouseColumnarSource");
 
 /// Cloud Object Store connector (AWS S3, Google Cloud Storage, Azure Blob).
 pub struct ObjectStoreSource {
     provider: String,
     bucket: String,
     key: String,
-    items: VecDeque<DataItem>,
-    current_offset: usize,
-    committed_offset: usize,
+    stream: BufferedStream,
 }
 
 impl ObjectStoreSource {
@@ -382,96 +349,43 @@ impl ObjectStoreSource {
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> Result<Self> {
-        let prov = provider.into();
-        let b = bucket.into();
-        let k = key.into();
-
         let mut source = Self {
-            provider: prov,
-            bucket: b,
-            key: k,
-            items: VecDeque::new(),
-            current_offset: 0,
-            committed_offset: 0,
+            provider: provider.into(),
+            bucket: bucket.into(),
+            key: key.into(),
+            stream: BufferedStream::default(),
         };
         source.load_or_simulate()?;
         Ok(source)
     }
 
     fn load_or_simulate(&mut self) -> Result<()> {
-        // If a local file exists with matching key path (or within data/), load it
-        let direct_path = PathBuf::from(&self.key);
-        let candidate_path = if direct_path.exists() {
-            Some(direct_path)
-        } else {
-            let data_candidate = PathBuf::from("data").join(&self.key);
-            if data_candidate.exists() {
-                Some(data_candidate)
-            } else {
-                None
-            }
-        };
+        let uri = format!("{}://{}/{}", self.provider, self.bucket, self.key);
+        let direct = PathBuf::from(&self.key);
+        let candidate = direct.exists().then_some(direct).or_else(|| {
+            let d = PathBuf::from("data").join(&self.key);
+            d.exists().then_some(d)
+        });
 
-        if let Some(path) = candidate_path {
-            let parsed = FileSource::parse_file(&path)?;
-            let uri = format!("{}://{}/{}", self.provider, self.bucket, self.key);
-            for mut item in parsed {
-                item.source_uri = uri.clone();
-                self.items.push_back(item);
-            }
+        if let Some(path) = candidate {
+            self.stream.load_file(&path, Some(&uri))?;
         } else {
-            // Emits simulated remote object item when credentials/endpoint are mocked
-            let item = DataItem::new(
+            self.stream.items.push_back(DataItem::new(
                 format!("{}:{}:0", self.bucket, self.key),
                 serde_json::json!({
-                    "object_uri": format!("{}://{}/{}", self.provider, self.bucket, self.key),
+                    "object_uri": uri,
                     "bucket": self.bucket,
                     "key": self.key,
                     "body": format!("Cloud archive event payload from {}/{}", self.bucket, self.key)
                 }),
-                format!("{}://{}/{}", self.provider, self.bucket, self.key),
-            );
-            self.items.push_back(item);
+                uri,
+            ));
         }
-
         Ok(())
     }
 }
 
-impl StreamingDataSource for ObjectStoreSource {
-    fn name(&self) -> &str {
-        "ObjectStoreSource"
-    }
-
-    fn next_batch(&mut self, max_batch_size: usize, _timeout: Duration) -> Result<Vec<DataItem>> {
-        let fetch_count = max_batch_size.min(self.items.len());
-        let mut batch = Vec::with_capacity(fetch_count);
-        for _ in 0..fetch_count {
-            if let Some(item) = self.items.pop_front() {
-                self.current_offset += 1;
-                batch.push(item);
-            }
-        }
-        Ok(batch)
-    }
-
-    fn commit_offset(&mut self, count: usize) -> Result<()> {
-        self.committed_offset += count;
-        Ok(())
-    }
-
-    fn is_exhausted(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    fn current_offset(&self) -> usize {
-        self.current_offset
-    }
-
-    fn committed_offset(&self) -> usize {
-        self.committed_offset
-    }
-}
+impl_buffered_streaming_source!(ObjectStoreSource, "ObjectStoreSource");
 
 /// Line-delimited JSON or plain text streaming connector (for stdin, pipes, or files).
 pub struct LineStreamSource {
@@ -486,9 +400,8 @@ impl LineStreamSource {
     pub fn from_file(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open stream file: {}", path.display()))?;
-        let reader: Box<dyn std::io::Read + Send + Sync> = Box::new(file);
         Ok(Self {
-            reader: Some(BufReader::new(reader)),
+            reader: Some(BufReader::new(Box::new(file))),
             source_uri: path.display().to_string(),
             current_offset: 0,
             committed_offset: 0,
@@ -497,10 +410,8 @@ impl LineStreamSource {
     }
 
     pub fn from_stdin() -> Self {
-        let stdin = std::io::stdin();
-        let reader: Box<dyn std::io::Read + Send + Sync> = Box::new(stdin);
         Self {
-            reader: Some(BufReader::new(reader)),
+            reader: Some(BufReader::new(Box::new(std::io::stdin()))),
             source_uri: "stdin".to_string(),
             current_offset: 0,
             committed_offset: 0,
@@ -536,10 +447,8 @@ impl StreamingDataSource for LineStreamSource {
                     }
 
                     let item_id = format!("stream_{}", self.current_offset);
-                    let state = match serde_json::from_str::<serde_json::Value>(trimmed) {
-                        Ok(val) => val,
-                        Err(_) => serde_json::json!({ "text": trimmed }),
-                    };
+                    let state = serde_json::from_str::<serde_json::Value>(trimmed)
+                        .unwrap_or_else(|_| serde_json::json!({ "text": trimmed }));
 
                     self.current_offset += 1;
                     batch.push(DataItem::new(item_id, state, &self.source_uri));
@@ -570,6 +479,17 @@ impl StreamingDataSource for LineStreamSource {
     fn committed_offset(&self) -> usize {
         self.committed_offset
     }
+}
+
+fn open_append_writer(path: &Path) -> Result<BufWriter<File>> {
+    if let Some(p) = path.parent()
+        && !p.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(p)?;
+    }
+    Ok(BufWriter::new(
+        OpenOptions::new().create(true).append(true).open(path)?,
+    ))
 }
 
 /// Egress target sink for classified streaming events or escalation queues.
@@ -606,14 +526,7 @@ impl StreamSink {
                 for param in query.split('&') {
                     let kv: Vec<&str> = param.splitn(2, '=').collect();
                     if kv.len() == 2 && (kv[0] == "file" || kv[0] == "path") {
-                        let path = PathBuf::from(kv[1]);
-                        if let Some(p) = path.parent()
-                            && !p.as_os_str().is_empty()
-                        {
-                            std::fs::create_dir_all(p)?;
-                        }
-                        let file = OpenOptions::new().create(true).append(true).open(path)?;
-                        out_file = Some(BufWriter::new(file));
+                        out_file = Some(open_append_writer(Path::new(kv[1]))?);
                     }
                 }
             }
@@ -626,36 +539,26 @@ impl StreamSink {
         }
 
         let clean_target = trimmed.strip_prefix("file://").unwrap_or(trimmed);
-        let path = PathBuf::from(clean_target);
-        if let Some(p) = path.parent()
-            && !p.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(p)?;
-        }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(StreamSink::File(BufWriter::new(file)))
+        Ok(StreamSink::File(open_append_writer(Path::new(
+            clean_target,
+        ))?))
     }
 
     /// Emits a single serialized record to the sink.
     pub fn write_record(&mut self, record_json: &str) -> Result<()> {
         match self {
-            StreamSink::Stdout => {
+            StreamSink::File(writer)
+            | StreamSink::Kafka {
+                out_file: Some(writer),
+                ..
+            } => {
+                writeln!(writer, "{}", record_json)?;
+            }
+            StreamSink::Stdout | StreamSink::Kafka { out_file: None, .. } => {
                 let stdout = std::io::stdout();
                 let mut handle = stdout.lock();
                 writeln!(handle, "{}", record_json)?;
                 handle.flush()?;
-            }
-            StreamSink::File(writer) => {
-                writeln!(writer, "{}", record_json)?;
-            }
-            StreamSink::Kafka { out_file, .. } => {
-                if let Some(writer) = out_file {
-                    writeln!(writer, "{}", record_json)?;
-                } else {
-                    let stdout = std::io::stdout();
-                    let mut handle = stdout.lock();
-                    writeln!(handle, "{}", record_json)?;
-                }
             }
         }
         Ok(())
@@ -664,18 +567,13 @@ impl StreamSink {
     /// Flushes any pending buffered writes.
     pub fn flush(&mut self) -> Result<()> {
         match self {
-            StreamSink::Stdout => {
-                std::io::stdout().flush()?;
-            }
-            StreamSink::File(writer) => {
-                writer.flush()?;
-            }
-            StreamSink::Kafka { out_file, .. } => {
-                if let Some(writer) = out_file {
-                    writer.flush()?;
-                } else {
-                    std::io::stdout().flush()?;
-                }
+            StreamSink::File(writer)
+            | StreamSink::Kafka {
+                out_file: Some(writer),
+                ..
+            } => writer.flush()?,
+            StreamSink::Stdout | StreamSink::Kafka { out_file: None, .. } => {
+                std::io::stdout().flush()?
             }
         }
         Ok(())
