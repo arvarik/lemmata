@@ -214,11 +214,8 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
     let downloader = Downloader::detect()?;
 
     if args.verify_only {
-        println!(
-            "🔍 Verifying checkpoint files in {}",
-            args.target_dir.display()
-        );
-        let report = downloader.verify(&args.target_dir)?;
+        let report = downloader.verify_checkpoint(checkpoint, &args.target_dir)?;
+        println!("🔍 Verifying checkpoint files in {}", report.path.display());
         if report.is_valid {
             println!("✅ All required checkpoint files are valid and present!");
             for (f, sz) in report.found {
@@ -226,17 +223,14 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
             }
             return Ok(());
         }
-        eprintln!(
-            "❌ Missing required files in {}:",
-            args.target_dir.display()
-        );
+        eprintln!("❌ Missing required files in {}:", report.path.display());
         for m in &report.missing {
             eprintln!("   - {}", m);
         }
         bail!(
             "Checkpoint verification failed: {} missing required file(s) in {}",
             report.missing.len(),
-            args.target_dir.display()
+            report.path.display()
         );
     }
 
@@ -817,21 +811,29 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
 }
 
 fn checkpoint_domain_summary(ckpt: Checkpoint) -> &'static str {
-    match ckpt.repo_id() {
-        "convaiinnovations/laya" => {
+    match ckpt {
+        Checkpoint::English => {
             "English text classification, email triage, toxicity guardrails (~39.5ms)"
         }
-        "convaiinnovations/laya-multilingual" => {
-            "100+ languages, 2.2x faster forward pass (~32.8ms)"
-        }
-        "convaiinnovations/laya-typed-decisions" => {
+        Checkpoint::Multilingual => "100+ languages, 2.2x faster forward pass (~32.8ms)",
+        Checkpoint::TypedDecisions => {
             "Specialized enterprise workflows (0.766 acc, beats Jev teacher)"
         }
-        "convaiinnovations/laya-router" => {
-            "<0.5ms Unicode script router between English & Multilingual"
+        Checkpoint::AutoRoute => "<0.5ms Unicode script router between English & Multilingual",
+        Checkpoint::ModernBertZeroShot => {
+            "ModernBERT-large NLI zero-shot cross-encoder (8k context, RoPE + FlashAttn)"
         }
-        "typesafe/jev-1.13" => "TypeSafe AI Jev 1.13.0 System 1 baseline comparison profile",
-        _ => "Zero-shot NLI encoder baseline comparison profile",
+        Checkpoint::DebertaV3ZeroShot => {
+            "DeBERTa-v3-large NLI zero-shot cross-encoder (512 context, disentangled attn)"
+        }
+        Checkpoint::EuroBert => {
+            "Multilingual & European bidirectional encoder (8k context, RoPE + SwiGLU)"
+        }
+        Checkpoint::NeoBert => {
+            "Compact 250M English representation encoder (4k context, RoPE + SwiGLU)"
+        }
+        Checkpoint::Jev => "TypeSafe AI Jev 1.13.0 System 1 baseline comparison profile",
+        Checkpoint::ModernBertNli => "Zero-shot NLI encoder baseline comparison profile",
     }
 }
 
@@ -842,23 +844,26 @@ fn handle_info(args: InfoArgs) -> Result<()> {
         vec![parse_checkpoint(&args.checkpoint)?]
     };
 
-    let local_verification = args
-        .local_dir
-        .exists()
-        .then(|| {
-            Downloader::detect()
-                .ok()
-                .and_then(|d| d.verify(&args.local_dir).ok())
-        })
-        .flatten();
+    let verifier = Downloader {
+        cli_binary: "hf".into(),
+    };
+    let primary_ckpt = checkpoints.first().copied().unwrap_or(Checkpoint::English);
+    let local_verification = verifier
+        .verify_checkpoint(primary_ckpt, &args.local_dir)
+        .ok();
 
     if args.json {
         let ckpt_json: Vec<_> = checkpoints
             .iter()
             .map(|&c| {
+                let installed = verifier
+                    .verify_checkpoint(c, &args.local_dir)
+                    .map(|r| r.is_valid)
+                    .unwrap_or(false);
                 serde_json::json!({
                     "repo_id": c.repo_id(), "backbone": c.backbone(), "parameters": c.param_count(),
                     "context_window": c.context_window(), "head_budget": c.head_budget(),
+                    "local_dir": c.local_dir(), "installed": installed,
                     "domain": checkpoint_domain_summary(c),
                 })
             })
@@ -873,33 +878,44 @@ fn handle_info(args: InfoArgs) -> Result<()> {
     }
 
     println!(
-        "\n🧠 Laya System 1 Decision Model Family\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        "\n🧠 System 1 Decision Model Registry\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     );
 
     let mut table = Table::new();
     table.set_header(vec![
         Cell::new("Checkpoint").fg(Color::Cyan),
         Cell::new("Backbone").fg(Color::Blue),
-        Cell::new("Parameters").fg(Color::Green),
+        Cell::new("Params").fg(Color::Green),
         Cell::new("Context").fg(Color::Yellow),
-        Cell::new("Head Budget").fg(Color::Magenta),
+        Cell::new("Local").fg(Color::Magenta),
         Cell::new("Key Strengths / Domain").fg(Color::White),
     ]);
 
     for ckpt in checkpoints {
+        let installed = verifier
+            .verify_checkpoint(ckpt, &args.local_dir)
+            .map(|r| r.is_valid)
+            .unwrap_or(false);
         table.add_row(vec![
             Cell::new(ckpt.repo_id()),
             Cell::new(ckpt.backbone()),
             Cell::new(ckpt.param_count()),
-            Cell::new(format!("{} tokens", ckpt.context_window())),
-            Cell::new(format!("{} tokens", ckpt.head_budget())),
+            Cell::new(format!("{} tok", ckpt.context_window())),
+            Cell::new(if installed {
+                "✅ Ready"
+            } else {
+                "☁️ Remote"
+            }),
             Cell::new(checkpoint_domain_summary(ckpt)),
         ]);
     }
 
     println!(
         "{table}\n\nLocal Cache Inspection ({}):",
-        args.local_dir.display()
+        local_verification
+            .as_ref()
+            .map(|r| r.path.display().to_string())
+            .unwrap_or_else(|| args.local_dir.display().to_string())
     );
     if let Some(rep) = local_verification {
         if rep.is_valid {
@@ -921,16 +937,27 @@ fn handle_info(args: InfoArgs) -> Result<()> {
 }
 
 fn handle_inspect(args: InspectArgs) -> Result<()> {
+    let target_path = if let Some(ckpt_str) = &args.checkpoint {
+        let ckpt = parse_checkpoint(ckpt_str)?;
+        ckpt.local_dir().join("model.safetensors")
+    } else {
+        args.file.clone()
+    };
     log_status(
         args.json,
-        format!("🔍 Inspecting Safetensors weights: {}", args.file.display()),
+        format!(
+            "🔍 Inspecting Safetensors weights: {}",
+            target_path.display()
+        ),
     );
-    let rep = inspect_safetensors(&args.file)?;
+    let rep = inspect_safetensors(&target_path)?;
 
     if args.json {
         let json_val = serde_json::json!({
+            "architecture": rep.architecture,
             "total_tensors": rep.total_tensors, "total_parameters": rep.total_parameters,
             "dtypes": rep.dtypes, "is_laya_compatible": rep.is_laya_compatible,
+            "has_classifier_head": rep.has_classifier_head,
             "has_act_head": rep.has_act_head, "has_decision_scorer": rep.has_decision_scorer,
             "file_size_bytes": rep.file_size_bytes, "header_size_bytes": rep.header_size_bytes,
         });
@@ -945,6 +972,11 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
         Cell::new("Verification Details").fg(Color::DarkGrey),
     ]);
     table.add_row(vec![
+        Cell::new("Detected Architecture"),
+        Cell::new(&rep.architecture),
+        Cell::new("Inferred from Safetensors weight hierarchy"),
+    ]);
+    table.add_row(vec![
         Cell::new("Total Tensors"),
         Cell::new(format!("{}", rep.total_tensors)),
         Cell::new("Number of distinct weight arrays"),
@@ -956,7 +988,7 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
             rep.total_parameters as f64 / 1_000_000.0,
             rep.total_parameters
         )),
-        Cell::new("ModernBERT-large + decision head expected ~421M"),
+        Cell::new("Exact parameter count across all tensors"),
     ]);
     table.add_row(vec![
         Cell::new("File Size"),
@@ -972,15 +1004,15 @@ fn handle_inspect(args: InspectArgs) -> Result<()> {
         Cell::new("Precision format (F16 / BF16 / F32)"),
     ]);
     table.add_row(vec![
-        Cell::new("Laya Decision Head"),
-        Cell::new(if rep.is_laya_compatible {
+        Cell::new("Classification / MLM Head"),
+        Cell::new(if rep.has_classifier_head {
             "VERIFIED (✅)"
         } else {
-            "NOT FOUND (⚠️)"
+            "BACKBONE ONLY (⚠️)"
         }),
         Cell::new(format!(
-            "Act head: {}, Mask Scorer: {}",
-            rep.has_act_head, rep.has_decision_scorer
+            "Laya native: {}, Act head: {}, Mask Scorer: {}",
+            rep.is_laya_compatible, rep.has_act_head, rep.has_decision_scorer
         )),
     ]);
 

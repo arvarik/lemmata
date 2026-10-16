@@ -427,9 +427,13 @@ pub struct InfoArgs {
 
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// Path to model.safetensors file to inspect
+    /// Path to model.safetensors file or model directory to inspect
     #[arg(short, long, default_value = "models/laya/model.safetensors")]
     pub file: PathBuf,
+
+    /// Optional System 1 checkpoint name to inspect (e.g. modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(short, long)]
+    pub checkpoint: Option<String>,
 
     /// Output report as JSON
     #[arg(long)]

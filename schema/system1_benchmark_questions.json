@@ -1,0 +1,30 @@
+{
+  "department": {
+    "type": "choice",
+    "instructions": "Classify the primary routing department for this incoming customer or system event.",
+    "criteria": {
+      "billing": "Invoices, duplicate charges, refunds, payment failures, subscription pricing, or tax receipts",
+      "technical": "Software bugs, API errors, gateway timeouts, crashes, stack traces, or infrastructure outages",
+      "security": "Phishing, unauthorized access, compromised credentials, 2FA/MFA bypass, or prompt injection attacks",
+      "account": "Profile settings, SSO configuration, user seat permissions, role changes, or login username updates"
+    }
+  },
+  "urgency": {
+    "type": "score",
+    "instructions": "Score the operational urgency and severity of this event from 0 (low) to 3 (critical emergency).",
+    "criteria": [
+      "0: Informational note, feedback, or low-priority archive item requiring no immediate action",
+      "1: Routine request or standard support inquiry within normal SLA",
+      "2: Time-sensitive business issue or billing dispute needing prompt follow-up",
+      "3: Critical production outage, active security breach, or immediate churn threat"
+    ]
+  },
+  "requires_escalation": {
+    "type": "noul",
+    "instructions": "Does this event require immediate supervisor or security escalation due to critical outage, active fraud/phishing, or churn threat?",
+    "criteria": [
+      "false: Standard routine request that can be handled by automated tier-1 workflows",
+      "true: Urgent escalation required due to critical outage, security compromise, or customer threatening to cancel"
+    ]
+  }
+}

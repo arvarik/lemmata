@@ -27,6 +27,22 @@ pub enum Checkpoint {
     #[serde(rename = "convaiinnovations/laya-router")]
     AutoRoute,
 
+    /// ModernBERT-large Zero-Shot v2.0 NLI cross-encoder (395M params, 8192 context).
+    #[serde(rename = "MoritzLaurer/ModernBERT-large-zeroshot-v2.0")]
+    ModernBertZeroShot,
+
+    /// DeBERTa-v3-large Zero-Shot v2.0 NLI cross-encoder (435M params, 512 context).
+    #[serde(rename = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0")]
+    DebertaV3ZeroShot,
+
+    /// EuroBERT-210m multilingual bidirectional Llama-style encoder (210M params, 8192 context).
+    #[serde(rename = "EuroBERT/EuroBERT-210m")]
+    EuroBert,
+
+    /// NeoBERT next-gen SwiGLU + RoPE representation encoder (250M params, 4096 context).
+    #[serde(rename = "chandar-lab/NeoBERT")]
+    NeoBert,
+
     /// TypeSafe AI Jev 1.13.0 System 1 decision model profile for benchmarking/comparison.
     #[serde(rename = "typesafe/jev-1.13")]
     Jev,
@@ -43,8 +59,27 @@ impl Checkpoint {
             Self::Multilingual => "convaiinnovations/laya-multilingual",
             Self::TypedDecisions => "convaiinnovations/laya-typed-decisions",
             Self::AutoRoute => "convaiinnovations/laya-router",
+            Self::ModernBertZeroShot => "MoritzLaurer/ModernBERT-large-zeroshot-v2.0",
+            Self::DebertaV3ZeroShot => "MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
+            Self::EuroBert => "EuroBERT/EuroBERT-210m",
+            Self::NeoBert => "chandar-lab/NeoBERT",
             Self::Jev => "typesafe/jev-1.13",
             Self::ModernBertNli => "tasksource/ModernBERT-large-nli",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::English => "laya-en",
+            Self::Multilingual => "laya-multi",
+            Self::TypedDecisions => "laya-typed",
+            Self::AutoRoute => "laya-route",
+            Self::ModernBertZeroShot => "modernbert-zs",
+            Self::DebertaV3ZeroShot => "deberta-v3-zs",
+            Self::EuroBert => "eurobert-210m",
+            Self::NeoBert => "neobert-250m",
+            Self::Jev => "jev-1.13",
+            Self::ModernBertNli => "modernbert-nli",
         }
     }
 
@@ -53,7 +88,10 @@ impl Checkpoint {
             Self::English | Self::TypedDecisions | Self::Jev => "ModernBERT-large",
             Self::Multilingual => "mmBERT-base",
             Self::AutoRoute => "ModernBERT-large + mmBERT-base",
-            Self::ModernBertNli => "ModernBERT-large-NLI",
+            Self::ModernBertZeroShot | Self::ModernBertNli => "ModernBERT-large (NLI)",
+            Self::DebertaV3ZeroShot => "DeBERTa-v3-large (NLI)",
+            Self::EuroBert => "EuroBERT-210m (RoPE/SwiGLU)",
+            Self::NeoBert => "NeoBERT-250M (RoPE/SwiGLU)",
         }
     }
 
@@ -62,21 +100,32 @@ impl Checkpoint {
             Self::English | Self::TypedDecisions | Self::Jev => "421M",
             Self::Multilingual => "322M",
             Self::AutoRoute => "421M/322M",
-            Self::ModernBertNli => "395M",
+            Self::ModernBertZeroShot | Self::ModernBertNli => "395M",
+            Self::DebertaV3ZeroShot => "435M",
+            Self::EuroBert => "210M",
+            Self::NeoBert => "250M",
         }
     }
 
     pub fn context_window(&self) -> usize {
         match self {
-            Self::English | Self::Jev | Self::ModernBertNli => 512,
+            Self::English | Self::Jev | Self::ModernBertNli | Self::DebertaV3ZeroShot => 512,
             Self::Multilingual | Self::TypedDecisions | Self::AutoRoute => 1024,
+            Self::NeoBert => 4096,
+            Self::ModernBertZeroShot | Self::EuroBert => 8192,
         }
     }
 
     pub fn head_budget(&self) -> usize {
         match self {
             Self::English | Self::Jev => 192,
-            Self::Multilingual | Self::TypedDecisions | Self::AutoRoute => 256,
+            Self::Multilingual
+            | Self::TypedDecisions
+            | Self::AutoRoute
+            | Self::DebertaV3ZeroShot
+            | Self::EuroBert
+            | Self::NeoBert => 256,
+            Self::ModernBertZeroShot => 512,
             Self::ModernBertNli => 128,
         }
     }
@@ -89,7 +138,22 @@ impl Checkpoint {
         }
     }
 
-    /// Per-qtype temperatures `[choice, score, noul]` from `rl_agent_config.json`.
+    /// Canonical local directory where this checkpoint's weights & configs reside.
+    pub fn local_dir(&self) -> std::path::PathBuf {
+        match self {
+            Self::English | Self::AutoRoute | Self::Jev => std::path::PathBuf::from("models/laya"),
+            Self::Multilingual => std::path::PathBuf::from("models/laya/multilingual"),
+            Self::TypedDecisions => std::path::PathBuf::from("models/laya/typed-decisions"),
+            Self::ModernBertZeroShot | Self::ModernBertNli => {
+                std::path::PathBuf::from("models/modernbert-zeroshot")
+            }
+            Self::DebertaV3ZeroShot => std::path::PathBuf::from("models/deberta-v3"),
+            Self::EuroBert => std::path::PathBuf::from("models/eurobert"),
+            Self::NeoBert => std::path::PathBuf::from("models/neobert"),
+        }
+    }
+
+    /// Per-qtype temperatures `[choice, score, noul]` from `rl_agent_config.json` or model profile.
     pub fn default_temperatures(&self) -> [f64; 3] {
         match self {
             Self::English | Self::AutoRoute => {
@@ -97,6 +161,10 @@ impl Checkpoint {
             }
             Self::Multilingual => [1.0, 1.0, 1.0],
             Self::TypedDecisions => [1.0148024559020996, 1.0374259948730469, 1.0575125217437744],
+            Self::ModernBertZeroShot => [1.35, 1.25, 1.50],
+            Self::DebertaV3ZeroShot => [1.48, 1.35, 1.65],
+            Self::EuroBert => [1.18, 1.15, 1.30],
+            Self::NeoBert => [1.22, 1.18, 1.35],
             Self::Jev => [1.45, 1.35, 1.65],
             Self::ModernBertNli => [1.85, 1.60, 2.10],
         }
@@ -113,7 +181,12 @@ impl Checkpoint {
                 ("score:3-5".into(), 1.2514300346374512),
                 ("noul:2".into(), 1.983399510383606),
             ]),
-            Self::Multilingual | Self::ModernBertNli => HashMap::new(),
+            Self::Multilingual
+            | Self::ModernBertNli
+            | Self::ModernBertZeroShot
+            | Self::DebertaV3ZeroShot
+            | Self::EuroBert
+            | Self::NeoBert => HashMap::new(),
             Self::Jev => HashMap::from([
                 ("choice:2".into(), 1.55),
                 ("choice:3-5".into(), 1.45),
@@ -125,7 +198,7 @@ impl Checkpoint {
         }
     }
 
-    /// Sub-0.5ms Unicode block inspector routing non-Latin/multilingual text to `Multilingual`
+    /// Sub-0.5ms Unicode block & lexical inspector routing non-Latin/multilingual text to `Multilingual`
     /// and English/ASCII text to `English`.
     pub fn detect_script_route(text: &str) -> (Checkpoint, &'static str) {
         let mut ext_latin = 0usize;
@@ -152,10 +225,27 @@ impl Checkpoint {
             }
         }
         if ext_latin >= 2 || (alpha > 0 && (ext_latin as f64 / alpha as f64) > 0.03) {
-            (Self::Multilingual, "latin_extended")
-        } else {
-            (Self::English, "ascii_latin")
+            return (Self::Multilingual, "latin_extended");
         }
+        let lower = text.to_lowercase();
+        let eu_markers = [
+            "reembolso",
+            "factura",
+            "necesito",
+            "gracias",
+            "remboursement",
+            "facture",
+            "bonjour",
+            "merci",
+            "rechnung",
+            "fehler",
+            "bitte",
+            "absturz",
+        ];
+        if eu_markers.iter().filter(|&&m| lower.contains(m)).count() >= 2 {
+            return (Self::Multilingual, "latin_extended");
+        }
+        (Self::English, "ascii_latin")
     }
 
     pub fn laya_checkpoints() -> &'static [Checkpoint] {
@@ -168,6 +258,10 @@ impl Checkpoint {
             Self::Multilingual,
             Self::TypedDecisions,
             Self::AutoRoute,
+            Self::ModernBertZeroShot,
+            Self::DebertaV3ZeroShot,
+            Self::EuroBert,
+            Self::NeoBert,
             Self::Jev,
             Self::ModernBertNli,
         ]
@@ -185,24 +279,44 @@ impl std::str::FromStr for Checkpoint {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().trim() {
-            "english" | "laya" | "convaiinnovations/laya" | "default" => Ok(Self::English),
+            "english" | "laya" | "laya-en" | "convaiinnovations/laya" | "default" => {
+                Ok(Self::English)
+            }
             "multilingual"
             | "multi"
+            | "laya-multi"
             | "laya-multilingual"
             | "convaiinnovations/laya-multilingual" => Ok(Self::Multilingual),
             "typed-decisions"
             | "typed"
+            | "laya-typed"
             | "laya-typed-decisions"
             | "convaiinnovations/laya-typed-decisions" => Ok(Self::TypedDecisions),
-            "route" | "auto" | "router" | "laya-router" | "convaiinnovations/laya-router" => {
-                Ok(Self::AutoRoute)
-            }
+            "route"
+            | "auto"
+            | "auto-route"
+            | "router"
+            | "laya-router"
+            | "convaiinnovations/laya-router" => Ok(Self::AutoRoute),
+            "modernbert-zeroshot"
+            | "modernbert-zs"
+            | "modernbert"
+            | "modernbert-large-zeroshot"
+            | "moritzlaurer/modernbert-large-zeroshot-v2.0" => Ok(Self::ModernBertZeroShot),
+            "deberta-v3"
+            | "deberta"
+            | "deberta-zs"
+            | "deberta-zeroshot"
+            | "deberta-v3-zeroshot"
+            | "moritzlaurer/deberta-v3-large-zeroshot-v2.0" => Ok(Self::DebertaV3ZeroShot),
+            "eurobert" | "eurobert-210m" | "eurobert/eurobert-210m" => Ok(Self::EuroBert),
+            "neobert" | "neobert-250m" | "chandar-lab/neobert" => Ok(Self::NeoBert),
             "jev" | "jev-1.13" | "typesafe/jev" | "typesafe/jev-1.13" => Ok(Self::Jev),
             "modernbert-nli" | "nli" | "deberta-nli" | "tasksource/modernbert-large-nli" => {
                 Ok(Self::ModernBertNli)
             }
             other => Err(format!(
-                "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions, route, jev, modernbert-nli",
+                "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions, route, modernbert-zeroshot, deberta-v3, eurobert, neobert, jev, modernbert-nli",
                 other
             )),
         }
