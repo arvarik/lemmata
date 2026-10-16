@@ -28,6 +28,7 @@ models/
 !/data/customer_support.jsonl
 !/data/banking_tickets.jsonl
 !/data/feedback_dataset.csv
+!/data/system1_golden_benchmark.jsonl
 *.parquet
 *.arrow
 *.feather

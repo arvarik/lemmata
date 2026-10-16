@@ -1,4 +1,4 @@
-use lemma::datasource::DataItem;
+use lemma::datasource::{DataItem, FileSource};
 use lemma::engine::{ConsensusEngine, ExperimentRunner, LayaClassifier};
 use lemma::model::{
     Checkpoint, DecisionAnswer, DecisionModel, DecisionResult, Downloader, Question,
@@ -269,5 +269,88 @@ fn test_consensus_epistemic_uncertainty_and_checkpoint_verification() {
         }
         let st_rep = inspect_safetensors(laya_dir).unwrap();
         assert!(st_rep.is_laya_compatible);
+    }
+}
+
+#[test]
+fn test_multi_model_system1_golden_benchmark_and_local_checkpoints() {
+    let items = FileSource::parse_file(Path::new("data/system1_golden_benchmark.jsonl"))
+        .expect("Failed to load golden benchmark dataset");
+    assert_eq!(items.len(), 24);
+
+    let schema_str = std::fs::read_to_string("schema/system1_benchmark_questions.json")
+        .expect("Failed to read benchmark schema");
+    let questions: BTreeMap<String, Question> =
+        serde_json::from_str(&schema_str).expect("Failed to parse benchmark schema");
+    assert_eq!(questions.len(), 3);
+
+    let mb_zs = LayaClassifier::with_checkpoint(Checkpoint::ModernBertZeroShot);
+    let deb_zs = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot);
+    let euro = LayaClassifier::with_checkpoint(Checkpoint::EuroBert);
+    let neo = LayaClassifier::with_checkpoint(Checkpoint::NeoBert);
+    let router = LayaClassifier::with_checkpoint(Checkpoint::AutoRoute);
+
+    // 1. Long-context (>550 tokens) telemetry: 8k ModernBERT-ZS succeeds where 512-token DeBERTa-v3-ZS truncates
+    let long_01 = items.iter().find(|i| i.id == "long_01").unwrap();
+    let res_mb_long = mb_zs.classify(&long_01.state, &questions).unwrap();
+    let res_deb_long = deb_zs.classify(&long_01.state, &questions).unwrap();
+    assert_eq!(
+        res_mb_long.answers["department"].choice.as_deref(),
+        Some("technical")
+    );
+    assert_ne!(
+        res_deb_long.answers["department"].choice.as_deref(),
+        Some("technical")
+    );
+
+    // 2. NLI negation trap: NLI-trained DeBERTa-v3-ZS & ModernBERT-ZS invert negated clause while raw MLM NeoBERT is fooled
+    let neg_02 = items.iter().find(|i| i.id == "neg_02").unwrap();
+    let res_deb_neg = deb_zs.classify(&neg_02.state, &questions).unwrap();
+    let res_neo_neg = neo.classify(&neg_02.state, &questions).unwrap();
+    assert_eq!(
+        res_deb_neg.answers["department"].choice.as_deref(),
+        Some("security")
+    );
+    assert_eq!(
+        res_neo_neg.answers["department"].choice.as_deref(),
+        Some("technical")
+    );
+
+    // 3. European vs CJK multilingual: EuroBERT handles Russian (multi_06), Laya AutoRoute handles both Russian and Chinese (multi_05)
+    let multi_ru = items.iter().find(|i| i.id == "multi_06").unwrap();
+    let multi_zh = items.iter().find(|i| i.id == "multi_05").unwrap();
+    assert_eq!(
+        euro.classify(&multi_ru.state, &questions).unwrap().answers["department"]
+            .choice
+            .as_deref(),
+        Some("billing")
+    );
+    assert_eq!(
+        router
+            .classify(&multi_zh.state, &questions)
+            .unwrap()
+            .answers["department"]
+            .choice
+            .as_deref(),
+        Some("technical")
+    );
+
+    // 4. Verify local checkpoints and safetensors headers when downloaded on disk
+    let dl = Downloader {
+        cli_binary: "hf".into(),
+    };
+    for ckpt in [
+        Checkpoint::ModernBertZeroShot,
+        Checkpoint::DebertaV3ZeroShot,
+        Checkpoint::EuroBert,
+        Checkpoint::NeoBert,
+    ] {
+        let dir = ckpt.local_dir();
+        if dir.exists() {
+            let rep = dl.verify_checkpoint(ckpt, &dir).unwrap();
+            assert!(rep.is_valid, "Checkpoint {:?} should verify cleanly", ckpt);
+            let st = inspect_safetensors(&dir).unwrap();
+            assert!(st.has_classifier_head && st.total_parameters > 200_000_000);
+        }
     }
 }
