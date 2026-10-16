@@ -116,6 +116,10 @@ impl LayaClassifier {
         Self::new(ClassifierConfig::with_checkpoint(checkpoint))
     }
 
+    pub fn with_auto_best() -> Self {
+        Self::with_checkpoint(Checkpoint::AutoRoute)
+    }
+
     pub fn with_hypothesis_template(mut self, tpl: impl Into<String>) -> Self {
         self.config.hypothesis_template = Some(tpl.into());
         self
@@ -138,6 +142,20 @@ impl LayaClassifier {
                 }
             }
             (ckpt, reason)
+        } else {
+            (self.config.checkpoint, "configured")
+        }
+    }
+
+    /// Resolve effective checkpoint using full capability, context-window, and label-cardinality meta-routing.
+    pub fn resolve_checkpoint_for_questions(
+        &self,
+        state_text: &str,
+        questions: &BTreeMap<String, Question>,
+    ) -> (Checkpoint, &'static str) {
+        if self.config.checkpoint == Checkpoint::AutoRoute {
+            let dec = crate::model::route_auto_best(state_text, questions);
+            (dec.selected, dec.reason)
         } else {
             (self.config.checkpoint, "configured")
         }
@@ -171,7 +189,7 @@ impl LayaClassifier {
             other => serde_json::to_string(other)?,
         };
 
-        let (active_ckpt, _) = self.resolve_checkpoint(&state_text);
+        let (active_ckpt, _) = self.resolve_checkpoint_for_questions(&state_text, questions);
 
         // Estimate token counts and enforce checkpoint context window limits
         let state_tokens = estimate_tokens(&state_text);

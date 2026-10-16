@@ -295,6 +295,10 @@ impl std::str::FromStr for Checkpoint {
             "route"
             | "auto"
             | "auto-route"
+            | "auto-best"
+            | "autobest"
+            | "meta-router"
+            | "meta_router"
             | "router"
             | "laya-router"
             | "convaiinnovations/laya-router" => Ok(Self::AutoRoute),
