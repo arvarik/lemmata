@@ -287,3 +287,208 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_command_aliases_model_flags_and_positional_ergonomics() {
+    // 1. Intuitive command aliases: run, predict, infer, eval, pull, models, tune, why
+    let cli_run = Cli::try_parse_from([
+        "lemma",
+        "run",
+        "My invoice was charged twice",
+        "--model",
+        "deberta-v3",
+    ])
+    .expect("`lemma run <TEXT> --model` must parse");
+    match cli_run.command {
+        Commands::Classify(args) => {
+            assert_eq!(
+                args.positional_text.as_deref(),
+                Some("My invoice was charged twice")
+            );
+            assert_eq!(args.checkpoint, "deberta-v3");
+        }
+        _ => panic!("Expected Commands::Classify"),
+    }
+
+    assert!(matches!(
+        Cli::try_parse_from(["lemma", "predict", "-m", "modernbert-zeroshot", "test"])
+            .expect("`lemma predict -m` must parse")
+            .command,
+        Commands::Classify(_)
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["lemma", "infer", "-m", "auto-best", "test"])
+            .expect("`lemma infer -m` must parse")
+            .command,
+        Commands::Classify(_)
+    ));
+
+    let cli_eval = Cli::try_parse_from([
+        "lemma",
+        "eval",
+        "--model",
+        "eurobert",
+        "-f",
+        "data/customer_support.jsonl",
+    ])
+    .expect("`lemma eval --model` must parse");
+    match cli_eval.command {
+        Commands::Test(args) => assert_eq!(args.checkpoint, "eurobert"),
+        _ => panic!("Expected Commands::Test"),
+    }
+
+    let cli_pull = Cli::try_parse_from(["lemma", "pull", "--all", "--verify-only"])
+        .expect("`lemma pull --all --verify-only` must parse");
+    match cli_pull.command {
+        Commands::Download(args) => {
+            assert!(args.all);
+            assert!(args.verify_only);
+        }
+        _ => panic!("Expected Commands::Download"),
+    }
+
+    let cli_models = Cli::try_parse_from(["lemma", "models", "--model", "neobert"])
+        .expect("`lemma models --model` must parse");
+    match cli_models.command {
+        Commands::Info(args) => assert_eq!(args.checkpoint, "neobert"),
+        _ => panic!("Expected Commands::Info"),
+    }
+
+    let cli_tune = Cli::try_parse_from([
+        "lemma",
+        "tune",
+        "-m",
+        "typed-decisions",
+        "--file",
+        "data/customer_support.jsonl",
+    ])
+    .expect("`lemma tune -m` must parse");
+    match cli_tune.command {
+        Commands::Calibrate(args) => assert_eq!(args.checkpoint, "typed-decisions"),
+        _ => panic!("Expected Commands::Calibrate"),
+    }
+
+    let cli_why = Cli::try_parse_from([
+        "lemma",
+        "why",
+        "Urgent production database crash and stack trace",
+        "--model",
+        "deberta-v3",
+    ])
+    .expect("`lemma why <TEXT> --model` must parse");
+    match cli_why.command {
+        Commands::Explain(args) => {
+            assert_eq!(
+                args.input_text.as_deref(),
+                Some("Urgent production database crash and stack trace")
+            );
+            assert!(args.target.is_none());
+            assert!(args.contrast.is_none());
+            assert_eq!(args.checkpoint, "deberta-v3");
+        }
+        _ => panic!("Expected Commands::Explain"),
+    }
+
+    // 2. CompareArgs adapter flags (--chunk-strategy, --shortlist-k, --hypothesis-template)
+    let cli_cmp = Cli::try_parse_from([
+        "lemma",
+        "compare",
+        "-m",
+        "english,deberta-v3",
+        "--chunk-strategy",
+        "head-tail",
+        "--shortlist-k",
+        "4",
+        "--hypothesis-template",
+        "This ticket is about {label}.",
+    ])
+    .expect("`lemma compare` with adapter flags must parse");
+    match cli_cmp.command {
+        Commands::Compare(args) => {
+            assert_eq!(args.checkpoints, "english,deberta-v3");
+            assert_eq!(args.chunk_strategy, "head-tail");
+            assert_eq!(args.shortlist_k, 4);
+            assert_eq!(
+                args.hypothesis_template.as_deref(),
+                Some("This ticket is about {label}.")
+            );
+        }
+        _ => panic!("Expected Commands::Compare"),
+    }
+}
+
+#[test]
+fn test_positional_classify_auto_explain_and_download_all_e2e() {
+    let bin = env!("CARGO_BIN_EXE_lemma");
+
+    // 1. Positional `lemma classify "<TEXT>"` (or `lemma run "<TEXT>"`)
+    let out_cls = Command::new(bin)
+        .args([
+            "run",
+            "My credit card invoice was charged twice, please refund immediately",
+            "--model",
+            "english",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute lemma run positional text");
+    assert!(out_cls.status.success());
+    let parsed_cls: serde_json::Value =
+        serde_json::from_slice(&out_cls.stdout).expect("Positional classify must emit valid JSON");
+    let arr = parsed_cls.as_array().expect("Expected JSON array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(
+        arr[0][1]["answers"]["classification"]["choice"].as_str(),
+        Some("billing")
+    );
+
+    // 2. Ergonomic `lemma explain "<TEXT>"` auto-detects winning & runner-up labels
+    let out_exp = Command::new(bin)
+        .args([
+            "why",
+            "System error 500 stack trace crash in Kubernetes pod",
+            "--model",
+            "english",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute lemma why positional text");
+    assert!(out_exp.status.success());
+    let parsed_exp: serde_json::Value =
+        serde_json::from_slice(&out_exp.stdout).expect("Explain output must be valid JSON");
+    assert_eq!(parsed_exp["target_choice"].as_str(), Some("technical"));
+    assert_ne!(parsed_exp["contrast_choice"].as_str(), Some("technical"));
+    assert!(!parsed_exp["attributions"].as_array().unwrap().is_empty());
+
+    // 3. `lemma download --all --verify-only` checks all 7 local System 1 checkpoints
+    let all_present = [
+        lemma::model::Checkpoint::English,
+        lemma::model::Checkpoint::Multilingual,
+        lemma::model::Checkpoint::TypedDecisions,
+        lemma::model::Checkpoint::ModernBertZeroShot,
+        lemma::model::Checkpoint::DebertaV3ZeroShot,
+        lemma::model::Checkpoint::EuroBert,
+        lemma::model::Checkpoint::NeoBert,
+    ]
+    .iter()
+    .all(|c| c.local_dir().join("model.safetensors").exists());
+
+    let out_dl = Command::new(bin)
+        .args(["download", "--all", "--verify-only"])
+        .output()
+        .expect("Failed to execute lemma download --all --verify-only");
+    let combined_out = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out_dl.stdout),
+        String::from_utf8_lossy(&out_dl.stderr)
+    );
+    assert!(combined_out.contains("convaiinnovations/laya"));
+    assert!(combined_out.contains("MoritzLaurer/ModernBERT-large-zeroshot-v2.0"));
+    assert!(combined_out.contains("MoritzLaurer/deberta-v3-large-zeroshot-v2.0"));
+    assert!(combined_out.contains("EuroBERT/EuroBERT-210m"));
+    assert!(combined_out.contains("chandar-lab/NeoBERT"));
+    if all_present {
+        assert!(out_dl.status.success());
+    }
+}

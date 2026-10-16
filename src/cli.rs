@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "lemma",
-    about = "High-performance CLI for Laya System 1 decision and classification models",
+    about = "High-performance System 1 decision platform for bidirectional encoders (Laya, ModernBERT, DeBERTa-v3, EuroBERT, NeoBERT)",
     version,
     author
 )]
@@ -15,11 +15,12 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Download or verify Laya model checkpoints from Hugging Face Hub
+    /// Download or verify System 1 model checkpoints from Hugging Face Hub
+    #[command(visible_alias = "pull")]
     Download(DownloadArgs),
 
     /// Classify data ingested from data/ folder, files, stdin, or inline text
-    #[command(alias = "run")]
+    #[command(visible_alias = "run", alias = "predict", alias = "infer")]
     Classify(ClassifyArgs),
 
     /// Fetch public datasets or live discussions from Hugging Face, Hacker News, Reddit, or Wikipedia
@@ -32,18 +33,21 @@ pub enum Commands {
     Experiment(ExperimentArgs),
 
     /// Evaluate classification accuracy and calibration against ground-truth labels
+    #[command(visible_alias = "eval")]
     Test(TestArgs),
 
     /// Benchmark classification throughput and latency percentiles
     Bench(BenchArgs),
 
-    /// Display Laya model architecture specifications and local environment status
+    /// Display System 1 model architecture specifications and local environment status
+    #[command(visible_alias = "models")]
     Info(InfoArgs),
 
     /// Inspect local Safetensors weights, tensor shapes, parameter counts, and integrity
     Inspect(InspectArgs),
 
     /// Explain decisions via contrastive token leave-one-out margin ablation
+    #[command(visible_alias = "why")]
     Explain(ExplainArgs),
 
     /// Calibrate and evaluate conformal prediction sets with guaranteed (1 - α) coverage
@@ -78,6 +82,7 @@ pub enum Commands {
     Hierarchical(HierarchicalArgs),
 
     /// Automatically tune and calibrate temperature parameters per question bucket
+    #[command(visible_alias = "tune")]
     Calibrate(CalibrateArgs),
 
     /// Process live streaming events with micro-batching, lakehouse columnar projection, and dual sinks
@@ -106,9 +111,19 @@ pub struct CompletionsArgs {
 
 #[derive(Args, Debug)]
 pub struct DownloadArgs {
-    /// Checkpoint to download: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
+
+    /// Download or verify all 7 local System 1 checkpoints
+    #[arg(long)]
+    pub all: bool,
 
     /// Destination directory for model weights
     #[arg(short, long, default_value = "models/laya")]
@@ -125,6 +140,10 @@ pub struct DownloadArgs {
 
 #[derive(Args, Debug)]
 pub struct ClassifyArgs {
+    /// Inline text snippet to classify (positional shortcut for --text)
+    #[arg(value_name = "TEXT")]
+    pub positional_text: Option<String>,
+
     /// Directory to ingest data from (default: data)
     #[arg(long, default_value = "data")]
     pub data_dir: PathBuf,
@@ -165,8 +184,14 @@ pub struct ClassifyArgs {
     #[arg(short, long, default_value = "billing,technical,sales,other")]
     pub labels: String,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Temperature scaling factor
@@ -284,8 +309,8 @@ pub struct ExperimentArgs {
     #[arg(long)]
     pub adversarial: bool,
 
-    /// Checkpoint to evaluate for order or adversarial experiments
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(short, long, visible_alias = "model", default_value = "english")]
     pub checkpoint: String,
 
     /// Number of permutations for option ordering experiment
@@ -300,7 +325,14 @@ pub struct ExperimentArgs {
 #[derive(Args, Debug)]
 pub struct CompareArgs {
     /// Comma-separated list of System 1 checkpoints to compare (default: all)
-    #[arg(short, long, visible_alias = "models", default_value = "all")]
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "models",
+        visible_alias = "model",
+        default_value = "all"
+    )]
     pub checkpoints: String,
 
     /// Directory to ingest data from (default: data)
@@ -323,6 +355,18 @@ pub struct CompareArgs {
     #[arg(long)]
     pub slice_by: Option<String>,
 
+    /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
+    #[arg(long)]
+    pub hypothesis_template: Option<String>,
+
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
+
+    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    #[arg(long, default_value_t = 0)]
+    pub shortlist_k: usize,
+
     /// Output arena report as JSON
     #[arg(long)]
     pub json: bool,
@@ -342,8 +386,14 @@ pub struct TestArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Checkpoint to evaluate
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Temperature scaling factor during evaluation
@@ -425,8 +475,14 @@ pub struct BenchArgs {
     #[arg(short, long, default_value_t = 3)]
     pub warmup: usize,
 
-    /// Checkpoint to benchmark
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output benchmark metrics as JSON
@@ -444,8 +500,14 @@ pub struct BenchArgs {
 
 #[derive(Args, Debug)]
 pub struct InfoArgs {
-    /// Checkpoint to inspect: all, english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "all")]
+    /// Model checkpoint (all, english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "all"
+    )]
     pub checkpoint: String,
 
     /// Check local cache directory for downloaded checkpoints
@@ -471,8 +533,8 @@ pub struct InspectArgs {
     #[arg(short, long, default_value = "models/laya/model.safetensors")]
     pub file: PathBuf,
 
-    /// Optional System 1 checkpoint name to inspect (e.g. modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(short, long)]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(short, long, short_alias = 'm', visible_alias = "model")]
     pub checkpoint: Option<String>,
 
     /// Output report as JSON
@@ -482,9 +544,13 @@ pub struct InspectArgs {
 
 #[derive(Args, Debug)]
 pub struct ExplainArgs {
-    /// Text to explain
+    /// Text to explain (can also be passed as a positional argument)
     #[arg(short, long)]
-    pub text: String,
+    pub text: Option<String>,
+
+    /// Inline text to explain (positional)
+    #[arg(value_name = "TEXT")]
+    pub input_text: Option<String>,
 
     /// Path to questions schema JSON file
     #[arg(short, long)]
@@ -494,16 +560,22 @@ pub struct ExplainArgs {
     #[arg(long)]
     pub qid: Option<String>,
 
-    /// Target winning choice to explain (e.g. "billing")
-    #[arg(long, default_value = "billing")]
-    pub target: String,
+    /// Target winning choice to explain (auto-detected top-1 prediction if omitted)
+    #[arg(long)]
+    pub target: Option<String>,
 
-    /// Contrast runner-up choice (e.g. "technical")
-    #[arg(long, default_value = "technical")]
-    pub contrast: String,
+    /// Contrast runner-up choice (auto-detected top-2 prediction if omitted)
+    #[arg(long)]
+    pub contrast: Option<String>,
 
-    /// Checkpoint to use
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output explanation report as JSON
@@ -529,8 +601,14 @@ pub struct ConformalArgs {
     #[arg(short, long, default_value_t = 0.05)]
     pub alpha: f64,
 
-    /// Checkpoint to use
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Specific question ID to calibrate (default: first choice question)
@@ -565,8 +643,14 @@ pub struct SchemaValidateArgs {
     /// Path to schema JSON file to validate
     pub schema: PathBuf,
 
-    /// Checkpoint to validate against (determines head token budget: 192 vs 256)
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 }
 
@@ -584,8 +668,14 @@ pub struct SchemaInferArgs {
     #[arg(long)]
     pub target_cols: Option<String>,
 
-    /// Target checkpoint (determines head token budget limit: 192 vs 256)
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output file path to save inferred schema JSON
@@ -611,8 +701,14 @@ pub struct DriftArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Checkpoint to evaluate
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Critical threshold for Population Stability Index (PSI)
@@ -658,8 +754,14 @@ pub struct GuardArgs {
     #[arg(short, long)]
     pub text: Option<String>,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Optional path to write JSONL audit log records
@@ -694,7 +796,14 @@ pub struct GuardArgs {
 #[derive(Args, Debug)]
 pub struct ConsensusArgs {
     /// Comma-separated list of checkpoints (default: "english,multilingual,typed-decisions")
-    #[arg(short, long, default_value = "english,multilingual,typed-decisions")]
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "models",
+        visible_alias = "model",
+        default_value = "english,multilingual,typed-decisions"
+    )]
     pub checkpoints: String,
 
     /// Optional comma-separated reliability weights (e.g. "0.4,0.3,0.3")
@@ -806,8 +915,14 @@ pub struct OodFitArgs {
     #[arg(long, default_value = "classification")]
     pub target_qid: String,
 
-    /// Checkpoint to use
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Target false-positive rate (FPR) for threshold calibration
@@ -845,8 +960,14 @@ pub struct OodEvalArgs {
     #[arg(short, long, default_value = "models/laya/ood_profile.json")]
     pub profile: PathBuf,
 
-    /// Checkpoint to use
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output evaluation metrics as JSON
@@ -896,8 +1017,14 @@ pub struct CascadeTuneArgs {
     #[arg(long, default_value_t = 0.005)]
     pub system2_cost: f64,
 
-    /// Checkpoint to use for System 1
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Sweep all candidate risk thresholds in [0.05, 0.95] and print the Pareto frontier table
@@ -927,8 +1054,14 @@ pub struct CascadeRunArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Checkpoint to use for System 1
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Risk threshold tau (items with risk > tau cascade to System 2)
@@ -1064,8 +1197,14 @@ pub struct HierarchicalRunArgs {
     #[arg(long)]
     pub escalate_only: bool,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 }
 
@@ -1075,8 +1214,14 @@ pub struct HierarchicalTreeArgs {
     #[arg(short, long)]
     pub schema: PathBuf,
 
-    /// Checkpoint to determine token budget: english (192) or multilingual (256)
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 }
 
@@ -1086,8 +1231,14 @@ pub struct HierarchicalValidateArgs {
     #[arg(short, long)]
     pub schema: PathBuf,
 
-    /// Checkpoint to determine token budget: english (192) or multilingual (256)
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 }
 
@@ -1117,8 +1268,14 @@ pub struct HierarchicalBenchArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 }
 
@@ -1144,8 +1301,14 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = 10)]
     pub bins: usize,
 
-    /// Checkpoint to calibrate: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Export calibrated configuration to specified JSON file (e.g. config/laya_calibrated.json)
@@ -1207,8 +1370,14 @@ pub struct StreamArgs {
     #[arg(long, default_value_t = 0.50)]
     pub escalate_threshold: f64,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Optional calibrated agent config (rl_agent_config.json)
@@ -1288,8 +1457,14 @@ pub struct ActiveSampleArgs {
     #[arg(long)]
     pub ood_profile: Option<PathBuf>,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Export prioritized review queue items to specified JSONL file (e.g. data/review_queue.jsonl)
@@ -1323,8 +1498,14 @@ pub struct ActiveDistillArgs {
     #[arg(long, default_value = "human_supervisor_resolution")]
     pub source_label: String,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output report format (table, json, compact)
@@ -1342,8 +1523,14 @@ pub struct ActiveStatsArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Checkpoint to use: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Output report format (table, json, compact)
@@ -1373,8 +1560,14 @@ pub struct StatsArgs {
     #[arg(short, long, default_value = "schema/questions.json")]
     pub schema: PathBuf,
 
-    /// Checkpoint to evaluate: english, multilingual, or typed-decisions
-    #[arg(short, long, default_value = "english")]
+    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
     /// Number of benchmark passes for timing stability (default: 3)
