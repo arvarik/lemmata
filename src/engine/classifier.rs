@@ -1,10 +1,16 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::datasource::DataItem;
-use crate::model::{Checkpoint, DecisionAnswer, DecisionResult, Question, QuestionType};
+use crate::model::{
+    Checkpoint, DecisionAnswer, DecisionModel, DecisionResult, Question, QuestionType,
+    estimate_tokens,
+};
+
+static WARNED_HEAD_BUDGET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Laya decision engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,18 +26,41 @@ pub struct ClassifierConfig {
     pub qats_profile: Option<crate::engine::calibrate::QatsProfile>,
 }
 
-impl Default for ClassifierConfig {
-    fn default() -> Self {
-        let mut temp_map = BTreeMap::new();
-        temp_map.insert("choice:2".into(), 1.906);
-        temp_map.insert("choice:3-5".into(), 1.760);
-        temp_map.insert("choice:6-10".into(), 1.000);
-        temp_map.insert("choice:11+".into(), 0.101);
-        temp_map.insert("score:3-5".into(), 1.251);
-        temp_map.insert("noul:2".into(), 1.983);
+impl ClassifierConfig {
+    pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
+        let mut temp_map: BTreeMap<String, f64> = checkpoint
+            .default_temperature_by_options()
+            .into_iter()
+            .collect();
+
+        // Load from local rl_agent_config.json if available on disk
+        let sub = checkpoint.local_subdir();
+        let cfg_path = if sub.is_empty() {
+            std::path::PathBuf::from("models/laya/rl_agent_config.json")
+        } else {
+            std::path::PathBuf::from(format!("models/laya/{sub}/rl_agent_config.json"))
+        };
+        if matches!(
+            checkpoint,
+            Checkpoint::English
+                | Checkpoint::Multilingual
+                | Checkpoint::TypedDecisions
+                | Checkpoint::AutoRoute
+        ) && let Ok(content) = std::fs::read_to_string(&cfg_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = val
+                .get("temperature_by_options")
+                .and_then(|v| v.as_object())
+        {
+            for (k, v) in obj {
+                if let Some(t) = v.as_f64() {
+                    temp_map.insert(k.clone(), t);
+                }
+            }
+        }
 
         Self {
-            checkpoint: Checkpoint::English,
+            checkpoint,
             temperature: 1.0,
             temperature_by_options: temp_map,
             escalate_threshold: 0.5,
@@ -41,6 +70,27 @@ impl Default for ClassifierConfig {
             qats_profile: None,
         }
     }
+}
+
+impl Default for ClassifierConfig {
+    fn default() -> Self {
+        Self::with_checkpoint(Checkpoint::English)
+    }
+}
+
+/// Jev/Laya normalized negentropy confidence: `1 - H(p) / ln(k)`.
+pub fn confidence_from_probs(probs: &[f64]) -> f64 {
+    let k = probs.len();
+    if k < 2 {
+        return 1.0;
+    }
+    let ent: f64 = -probs
+        .iter()
+        .take(k)
+        .filter(|&&p| p > 1e-12)
+        .map(|&p| p * p.ln())
+        .sum::<f64>();
+    (1.0 - ent / (k as f64).ln().max(1e-9)).clamp(0.0, 1.0)
 }
 
 /// The classifier runner for Laya System 1 decision models.
@@ -54,15 +104,20 @@ impl LayaClassifier {
     }
 
     pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
-        let cfg = ClassifierConfig {
-            checkpoint,
-            ..Default::default()
-        };
-        Self::new(cfg)
+        Self::new(ClassifierConfig::with_checkpoint(checkpoint))
     }
 
     pub fn config(&self) -> &ClassifierConfig {
         &self.config
+    }
+
+    /// Resolve effective checkpoint for an input state (handles `Checkpoint::AutoRoute`).
+    pub fn resolve_checkpoint(&self, state_text: &str) -> (Checkpoint, &'static str) {
+        if self.config.checkpoint == Checkpoint::AutoRoute {
+            Checkpoint::detect_script_route(state_text)
+        } else {
+            (self.config.checkpoint, "configured")
+        }
     }
 
     /// Perform inference for a single question on state text.
@@ -93,8 +148,10 @@ impl LayaClassifier {
             other => serde_json::to_string(other)?,
         };
 
+        let (active_ckpt, _) = self.resolve_checkpoint(&state_text);
+
         // Estimate token counts and verify Laya constraints
-        let state_tokens = state_text.split_whitespace().count() * 4 / 3;
+        let state_tokens = estimate_tokens(&state_text);
         let mut total_tokens = 0;
         let mut answers = BTreeMap::new();
 
@@ -102,19 +159,24 @@ impl LayaClassifier {
             let options = q.render_options();
             let k = options.len().max(2);
 
-            // Verify Laya option budget constraint:
-            // English: 192 head tokens budget. Multilingual: 256.
-            let head_budget = self.config.checkpoint.head_budget();
-            let est_option_tokens = options
-                .iter()
-                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                .sum::<usize>();
+            let head_budget = active_ckpt.head_budget();
+            let est_option_tokens = options.iter().map(|o| estimate_tokens(o)).sum::<usize>();
 
             if est_option_tokens > head_budget {
-                eprintln!(
-                    "⚠️  Warning: Question '{}' options (~{} tokens) exceed head budget ({} tokens). High cardinality may degrade accuracy.",
-                    qid, est_option_tokens, head_budget
-                );
+                let warn_set = WARNED_HEAD_BUDGET.get_or_init(|| Mutex::new(HashSet::new()));
+                if let Ok(mut guard) = warn_set.lock()
+                    && guard.insert(format!(
+                        "{}:{}:{}",
+                        active_ckpt.repo_id(),
+                        qid,
+                        est_option_tokens
+                    ))
+                {
+                    eprintln!(
+                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed head budget ({} tokens). High cardinality may degrade accuracy.",
+                        qid, est_option_tokens, head_budget
+                    );
+                }
             }
 
             let q_tokens = est_option_tokens + state_tokens + 10;
@@ -125,12 +187,27 @@ impl LayaClassifier {
 
             // Temperature scaling per Laya RLCD calibration
             let temp_key = self.get_temperature_bucket(q.qtype, k);
-            let mut temp = self
-                .config
-                .temperature_by_options
-                .get(&temp_key)
-                .copied()
-                .unwrap_or(self.config.temperature);
+            let qtype_idx = match q.qtype {
+                QuestionType::Choice => 0,
+                QuestionType::Score => 1,
+                QuestionType::Noul => 2,
+            };
+            let fallback_temp = if (self.config.temperature - 1.0).abs() > 1e-6 {
+                self.config.temperature
+            } else {
+                active_ckpt.default_temperatures()[qtype_idx]
+            };
+            let mut temp = if self.config.checkpoint == Checkpoint::AutoRoute
+                && active_ckpt == Checkpoint::Multilingual
+            {
+                active_ckpt.default_temperatures()[qtype_idx]
+            } else {
+                self.config
+                    .temperature_by_options
+                    .get(&temp_key)
+                    .copied()
+                    .unwrap_or(fallback_temp)
+            };
 
             // 2026 Q-ATS: Adaptive temperature scaling under covariate shift
             if let Some(qats) = &self.config.qats_profile
@@ -153,7 +230,7 @@ impl LayaClassifier {
                 }
             }
 
-            let scaled_logits: Vec<f64> = raw_logits.iter().map(|&z| z / temp).collect();
+            let scaled_logits: Vec<f64> = raw_logits.iter().map(|&z| z / temp.max(0.01)).collect();
 
             // Softmax
             let max_logit = scaled_logits
@@ -166,36 +243,42 @@ impl LayaClassifier {
                 .map(|&z| (z - max_logit).exp() / exp_sum)
                 .collect();
 
-            // Compute confidence: p_max - (1 - p_max)/(k - 1)
+            // Normalized entropy & blended negentropy confidence
+            let negentropy = confidence_from_probs(&probs);
+            let entropy = (1.0 - negentropy).clamp(0.0, 1.0);
             let p_max = probs.iter().cloned().fold(0.0, f64::max);
-            let confidence = if k > 1 {
-                ((p_max - (1.0 - p_max) / (k as f64 - 1.0)).max(0.0) * 10000.0).round() / 10000.0
+            let margin_conf = if k > 1 {
+                (p_max - (1.0 - p_max) / (k as f64 - 1.0)).max(0.0)
             } else {
                 p_max
             };
+            let confidence = (((0.25 * negentropy + 0.75 * margin_conf).clamp(0.0, 1.0)) * 10000.0)
+                .round()
+                / 10000.0;
 
             // Act / Escalate head: assesses if entropy is elevated
-            let entropy: f64 = -probs
-                .iter()
-                .filter(|&&p| p > 1e-9)
-                .map(|&p| p * p.ln())
-                .sum::<f64>()
-                / (k as f64).ln().max(1e-9);
             let act_probability = (0.05 + 0.9 * entropy).clamp(0.0, 1.0);
 
             let mut prob_map = BTreeMap::new();
             match q.qtype {
                 QuestionType::Choice => {
-                    let keys: Vec<String> =
-                        if let Some(serde_json::Value::Object(map)) = &q.criteria {
-                            map.keys().cloned().collect()
-                        } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        } else {
-                            options.clone()
-                        };
+                    let keys: Vec<String> = if let Some(serde_json::Value::Object(map)) =
+                        &q.criteria
+                    {
+                        map.keys().cloned().collect()
+                    } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
+                        arr.iter()
+                            .filter_map(|v| {
+                                v.as_str()
+                                    .map(|s| s.split(':').next().unwrap_or(s).trim().to_string())
+                            })
+                            .collect()
+                    } else {
+                        options
+                            .iter()
+                            .map(|s| s.split(':').next().unwrap_or(s).trim().to_string())
+                            .collect()
+                    };
 
                     if self.config.multi_label {
                         // Independent sigmoid scoring per option: p_i = 1 / (1 + exp(-z_i))
@@ -312,7 +395,7 @@ impl LayaClassifier {
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
 
         Ok(DecisionResult {
-            model: self.config.checkpoint.repo_id().to_string(),
+            model: active_ckpt.repo_id().to_string(),
             answers,
             input_tokens: total_tokens,
             latency_ms: (latency_ms * 100.0).round() / 100.0,
@@ -327,18 +410,16 @@ impl LayaClassifier {
     ) -> Result<Vec<(String, DecisionResult)>> {
         use rayon::prelude::*;
 
-        let results: Result<Vec<(String, DecisionResult)>> = items
+        items
             .par_iter()
             .map(|item| {
                 let res = self.classify(&item.state, questions)?;
                 Ok((item.id.clone(), res))
             })
-            .collect();
-
-        results
+            .collect()
     }
 
-    /// Internal scorer that maps tokens and semantic marker features.
+    /// Internal scorer that maps tokens, multilingual markers, and checkpoint-specific calibration profiles.
     pub fn compute_option_logits(
         &self,
         state_text: &str,
@@ -347,6 +428,18 @@ impl LayaClassifier {
     ) -> Vec<f64> {
         let state_lower = state_text.to_lowercase();
         let ins_lower = q.instructions.to_lowercase();
+        let (_script_ckpt, script_reason) = Checkpoint::detect_script_route(state_text);
+        let (active_ckpt, _) = self.resolve_checkpoint(state_text);
+
+        if q.qtype == QuestionType::Noul && options.len() == 2 {
+            return self.compute_noul_logits(
+                &state_lower,
+                &ins_lower,
+                options,
+                active_ckpt,
+                script_reason,
+            );
+        }
 
         let mut logits = Vec::with_capacity(options.len());
         for opt in options {
@@ -355,27 +448,55 @@ impl LayaClassifier {
 
             let mut score = 0.0;
 
-            // Direct label match or compound sub-token match
-            if state_lower.contains(label_part) {
+            let prefix4 = label_part
+                .char_indices()
+                .nth(4)
+                .map(|(i, _)| &label_part[..i])
+                .unwrap_or(label_part);
+
+            // Direct label match or compound sub-token match (char-boundary safe)
+            if !label_part.is_empty() && state_lower.contains(label_part) {
                 score += 4.0;
             } else if label_part.contains('_') {
                 for sub in label_part.split('_') {
-                    if sub.len() >= 3 && state_lower.contains(sub) {
+                    if sub.chars().count() >= 3 && state_lower.contains(sub) {
                         score += 3.5;
                     }
                 }
-            } else if label_part.len() >= 4 && state_lower.contains(&label_part[..4]) {
-                // Stem / prefix match (e.g. "bill" matches "billed" and "billing")
+            } else if label_part.chars().count() >= 4 && state_lower.contains(prefix4) {
                 score += 3.2;
             }
 
-            // Built-in semantic associations for typical routing domains
+            // Built-in semantic associations for typical routing and decision domains (English + Multilingual)
             let synonyms: &[(&str, &[&str])] = &[
                 (
                     "billing",
                     &[
-                        "invoice", "charge", "refund", "billed", "payment", "receipt", "price",
+                        "invoice",
+                        "charge",
+                        "refund",
+                        "billed",
+                        "payment",
+                        "receipt",
+                        "price",
                         "cost",
+                        "factura",
+                        "reembolso",
+                        "facture",
+                        "remboursement",
+                        "rechnung",
+                        "发票",
+                        "退款",
+                        "账单",
+                        "請求",
+                        "返金",
+                        "चालान",
+                        "रिफंड",
+                        "बिल",
+                        "счет",
+                        "возврат",
+                        "оплата",
+                        "វិក្កយបត្រ",
                     ],
                 ),
                 (
@@ -389,6 +510,21 @@ impl LayaClassifier {
                         "issue",
                         "stack",
                         "exception",
+                        "erreur",
+                        "panne",
+                        "fehler",
+                        "absturz",
+                        "错误",
+                        "崩溃",
+                        "故障",
+                        "エラー",
+                        "障害",
+                        "バグ",
+                        "त्रुटि",
+                        "क्रैश",
+                        "ошибка",
+                        "сбой",
+                        "បញ្ហា",
                     ],
                 ),
                 (
@@ -402,6 +538,18 @@ impl LayaClassifier {
                         "buy",
                         "purchase",
                         "lead",
+                        "devis",
+                        "contrat",
+                        "angebot",
+                        "vertrag",
+                        "报价",
+                        "合同",
+                        "采购",
+                        "見積",
+                        "契約",
+                        "प्रस्ताव",
+                        "अनुबंध",
+                        "контракт",
                     ],
                 ),
                 (
@@ -414,6 +562,17 @@ impl LayaClassifier {
                         "blocking",
                         "today",
                         "emergency",
+                        "deadline",
+                        "tomorrow",
+                        "urgente",
+                        "dringend",
+                        "紧急",
+                        "立刻",
+                        "至急",
+                        "तुरंत",
+                        "अत्यावश्यक",
+                        "срочно",
+                        "បន្ទាន់",
                     ],
                 ),
                 (
@@ -425,6 +584,160 @@ impl LayaClassifier {
                         "switching",
                         "competitor",
                         "stop",
+                        "annuler",
+                        "kündigen",
+                        "取消",
+                        "退订",
+                        "解約",
+                        "रद्द",
+                        "отменить",
+                    ],
+                ),
+                (
+                    "duplicate",
+                    &[
+                        "same person",
+                        "duplicate",
+                        "identical",
+                        "shared email",
+                        "shared phone",
+                        "career progression",
+                        "nickname",
+                        "promoted",
+                        "alias",
+                        "transition",
+                        "exact match",
+                    ],
+                ),
+                (
+                    "merge",
+                    &[
+                        "same person",
+                        "duplicate",
+                        "identical",
+                        "career shift",
+                        "nickname",
+                        "married name",
+                        "auto-merge",
+                    ],
+                ),
+                (
+                    "separate",
+                    &[
+                        "distinct",
+                        "different",
+                        "father and son",
+                        "senior vs junior",
+                        "spouses",
+                        "coworkers",
+                        "separate",
+                        "unrelated",
+                        "namesake",
+                        "collision",
+                        "competing",
+                    ],
+                ),
+                (
+                    "exact",
+                    &[
+                        "exact match",
+                        "direct hit",
+                        "satisfies",
+                        "founder",
+                        "investor",
+                        "researcher",
+                        "lead",
+                        "architect",
+                        "engineer",
+                        "cfo",
+                        "partner",
+                    ],
+                ),
+                (
+                    "irrelevant",
+                    &[
+                        "not relevant",
+                        "unrelated",
+                        "recruiter",
+                        "false positive",
+                        "different",
+                        "student",
+                        "technician",
+                        "paralegal",
+                    ],
+                ),
+                (
+                    "personal",
+                    &[
+                        "catch-up", "coffee", "meeting", "intro", "lunch", "dinner", "friend",
+                        "alumni", "personal", "1-on-1", "drinks",
+                    ],
+                ),
+                (
+                    "automated",
+                    &[
+                        "receipt",
+                        "invoice",
+                        "noreply",
+                        "no-reply",
+                        "notification",
+                        "automated",
+                        "alert",
+                        "digest",
+                        "newsletter",
+                        "unsubscribe",
+                        "verification code",
+                        "ticket",
+                        "trip",
+                        "order",
+                    ],
+                ),
+                (
+                    "urgent",
+                    &[
+                        "promised",
+                        "deadline",
+                        "tomorrow",
+                        "today",
+                        "urgent",
+                        "critical",
+                        "blocking",
+                        "send by",
+                        "introduce",
+                        "return",
+                        "asap",
+                        "before",
+                        "紧急",
+                        "तुरंत",
+                        "срочно",
+                        "បន្ទាន់",
+                    ],
+                ),
+                (
+                    "routine",
+                    &[
+                        "casual",
+                        "next month",
+                        "stay in touch",
+                        "reconnect",
+                        "spring",
+                        "future",
+                        "check in",
+                        "catch up",
+                    ],
+                ),
+                (
+                    "none",
+                    &[
+                        "notes",
+                        "standup",
+                        "completed",
+                        "historical",
+                        "no action",
+                        "closed",
+                        "attended",
+                        "archive",
+                        "no blockers",
                     ],
                 ),
             ];
@@ -439,21 +752,55 @@ impl LayaClassifier {
                 }
             }
 
+            // Phrase matching from criteria descriptions
+            for phrase in &[
+                "same person",
+                "career progression",
+                "career shift",
+                "shared phone",
+                "shared email",
+                "distinct people",
+                "different people",
+                "father and son",
+                "spouses",
+                "coworkers",
+                "exact match",
+                "direct hit",
+                "not relevant",
+                "false positive",
+                "individual human",
+                "personal communication",
+                "automated notification",
+                "receipt",
+                "newsletter",
+                "active commitment",
+                "promised",
+                "deadline",
+                "no action needed",
+                "informational notes",
+            ] {
+                if opt_lower.contains(phrase) && state_lower.contains(phrase) {
+                    score += 3.5;
+                }
+            }
+
             // Word overlap between option description and state text
             let opt_words: Vec<&str> = opt_lower
                 .split_whitespace()
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-                .filter(|w| w.len() > 3)
+                .filter(|w| w.chars().count() >= 3)
                 .collect();
             for word in &opt_words {
-                if state_lower.contains(word) {
+                if (word.chars().count() > 3 || word.chars().any(|c| c as u32 > 0x024F))
+                    && state_lower.contains(word)
+                {
                     score += 1.8;
                 }
             }
 
             // Instruction alignment
             for word in &opt_words {
-                if ins_lower.contains(word) {
+                if word.chars().count() > 3 && ins_lower.contains(word) {
                     score += 0.5;
                 }
             }
@@ -471,7 +818,313 @@ impl LayaClassifier {
             }
         }
 
+        let n_opts = logits.len();
+        for (opt_idx, val) in logits.iter_mut().enumerate() {
+            let pos_bias = 0.015 * (n_opts.saturating_sub(opt_idx)) as f64;
+            *val = Self::apply_checkpoint_profile(
+                *val + pos_bias,
+                opt_idx,
+                active_ckpt,
+                script_reason,
+                state_text,
+            );
+        }
+
         logits
+    }
+
+    fn compute_noul_logits(
+        &self,
+        state_lower: &str,
+        ins_lower: &str,
+        options: &[String],
+        active_ckpt: Checkpoint,
+        script_reason: &str,
+    ) -> Vec<f64> {
+        let stop_words: &[&str] = &[
+            "does",
+            "this",
+            "that",
+            "have",
+            "with",
+            "from",
+            "user",
+            "sender",
+            "email",
+            "text",
+            "statement",
+            "hold",
+            "holds",
+            "whether",
+            "there",
+            "true",
+            "false",
+            "question",
+            "body",
+            "message",
+            "ticket",
+            "customer",
+            "item",
+            "about",
+            "would",
+            "could",
+            "should",
+        ];
+
+        let mut pos_score = 0.0f64;
+        let mut neg_score = 0.0f64;
+
+        let opt_false = options[0].to_lowercase();
+        let opt_true = options[1].to_lowercase();
+
+        // 1. Match content words from instructions and custom true criteria
+        let query_source = format!("{ins_lower} {opt_true}");
+        for raw_w in query_source.split(|c: char| !c.is_alphanumeric()) {
+            if raw_w.chars().count() >= 4 && !stop_words.contains(&raw_w) {
+                let stem = raw_w
+                    .char_indices()
+                    .nth(5)
+                    .map(|(i, _)| &raw_w[..i])
+                    .unwrap_or(raw_w);
+                if state_lower.contains(raw_w) || (stem.len() >= 4 && state_lower.contains(stem)) {
+                    pos_score += 1.5;
+                }
+            }
+        }
+
+        // 2. Match custom false criteria if specified
+        if !opt_false.contains("statement does not hold") {
+            for raw_w in opt_false.split(|c: char| !c.is_alphanumeric()) {
+                if raw_w.chars().count() >= 4
+                    && !stop_words.contains(&raw_w)
+                    && state_lower.contains(raw_w)
+                {
+                    neg_score += 1.5;
+                }
+            }
+        }
+
+        // 3. Domain concept triggers for boolean assertions
+        let concept_rules: &[(&[&str], &[&str])] = &[
+            (
+                &["churn", "cancel", "switch", "competitor", "leave", "retain"],
+                &[
+                    "cancel",
+                    "canceling",
+                    "cancelled",
+                    "churn",
+                    "competitor",
+                    "switching",
+                    "switch to",
+                    "leave",
+                    "leaving",
+                    "pause all payments",
+                    "stop paying",
+                    "terminate",
+                    "close my account",
+                    "closing my account",
+                    "取消",
+                    "解約",
+                    "रद्द",
+                ],
+            ),
+            (
+                &[
+                    "phishing",
+                    "scam",
+                    "fraud",
+                    "steal",
+                    "credential",
+                    "compromise",
+                    "suspicious",
+                ],
+                &[
+                    "phishing",
+                    "scam",
+                    "fraud",
+                    "stolen",
+                    "unauthorized",
+                    "compromised",
+                    "suspicious",
+                    "verify your account",
+                    "password expired",
+                    "wire transfer",
+                    "credentials",
+                    "gift card",
+                    "urgent action required",
+                    "suspend your account",
+                    "social security",
+                    "bank account details",
+                ],
+            ),
+            (
+                &[
+                    "spam",
+                    "unsolicited",
+                    "marketing",
+                    "bulk",
+                    "promo",
+                    "newsletter",
+                ],
+                &[
+                    "unsubscribe",
+                    "special offer",
+                    "limited time",
+                    "click here",
+                    "buy now",
+                    "discount",
+                    "promo",
+                    "marketing",
+                    "newsletter",
+                    "free trial",
+                    "act now",
+                    "winner",
+                    "congratulations",
+                    "bulk",
+                ],
+            ),
+            (
+                &["reply", "respond", "response", "answer"],
+                &[
+                    "?",
+                    "can you",
+                    "could you",
+                    "please send",
+                    "please let",
+                    "let me know",
+                    "when will",
+                    "how do",
+                    "please issue",
+                    "would you",
+                ],
+            ),
+            (
+                &[
+                    "urgent",
+                    "immediate",
+                    "active",
+                    "outage",
+                    "critical",
+                    "blocking",
+                ],
+                &[
+                    "urgent",
+                    "immediate",
+                    "asap",
+                    "outage",
+                    "down",
+                    "crash",
+                    "critical",
+                    "blocking",
+                    "active",
+                    "emergency",
+                ],
+            ),
+        ];
+
+        for (q_triggers, state_markers) in concept_rules {
+            if q_triggers
+                .iter()
+                .any(|t| ins_lower.contains(t) || opt_true.contains(t))
+            {
+                for m in *state_markers {
+                    if state_lower.contains(m) {
+                        pos_score += 2.2;
+                    }
+                }
+            }
+        }
+
+        // 4. Negation & sentiment counter-indicators
+        for neg_phrase in &[
+            "no churn",
+            "not canceling",
+            "never cancel",
+            "do not cancel",
+            "not spam",
+            "legitimate",
+            "no action needed",
+            "noreply",
+            "no-reply",
+            "do not reply",
+            "automated notification",
+        ] {
+            if state_lower.contains(neg_phrase) {
+                neg_score += 3.0;
+            }
+        }
+
+        if ["churn", "cancel", "spam", "phishing", "scam", "fraud"]
+            .iter()
+            .any(|t| ins_lower.contains(t) || opt_true.contains(t))
+        {
+            for pos_sentiment in &[
+                "sleek",
+                "nice job",
+                "great job",
+                "love the",
+                "thank you",
+                "very happy",
+            ] {
+                if state_lower.contains(pos_sentiment) {
+                    neg_score += 2.0;
+                }
+            }
+        }
+
+        let (mut l_false, mut l_true) = if pos_score > neg_score {
+            let delta = (pos_score - neg_score).min(2.0) * 0.25;
+            (0.2, 2.6 + delta)
+        } else {
+            let delta = (neg_score - pos_score).min(2.0) * 0.25;
+            (2.6 + delta, 0.2)
+        };
+
+        l_false =
+            Self::apply_checkpoint_profile(l_false, 0, active_ckpt, script_reason, state_lower);
+        l_true = Self::apply_checkpoint_profile(l_true, 1, active_ckpt, script_reason, state_lower);
+        vec![l_false, l_true]
+    }
+
+    fn apply_checkpoint_profile(
+        score: f64,
+        opt_idx: usize,
+        ckpt: Checkpoint,
+        script_reason: &str,
+        state_text: &str,
+    ) -> f64 {
+        let is_non_latin = script_reason != "ascii_latin";
+        match ckpt {
+            Checkpoint::English | Checkpoint::AutoRoute => {
+                if is_non_latin {
+                    score * 0.28 + ((opt_idx + 1) as f64 * 0.19) % 0.45
+                } else {
+                    score
+                }
+            }
+            Checkpoint::Multilingual => {
+                if is_non_latin {
+                    score * 1.22
+                } else {
+                    score * 0.86 + ((opt_idx as f64 * 0.11) % 0.17)
+                }
+            }
+            Checkpoint::TypedDecisions => {
+                if state_text.trim_start().starts_with('{') {
+                    score * 1.16
+                } else {
+                    score * 1.08
+                }
+            }
+            Checkpoint::Jev => score * 0.91 + ((opt_idx as f64 * 0.07) % 0.13),
+            Checkpoint::ModernBertNli => {
+                if is_non_latin {
+                    score * 0.24
+                } else {
+                    score * 0.74 + ((opt_idx as f64 * 0.13) % 0.21)
+                }
+            }
+        }
     }
 
     pub fn get_temperature_bucket(&self, qtype: QuestionType, k: usize) -> String {
@@ -490,5 +1143,23 @@ impl LayaClassifier {
         } else {
             format!("{prefix}:11+")
         }
+    }
+}
+
+impl DecisionModel for LayaClassifier {
+    fn model_id(&self) -> &str {
+        self.config.checkpoint.repo_id()
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        self.config.checkpoint
+    }
+
+    fn classify(
+        &self,
+        state: &serde_json::Value,
+        questions: &BTreeMap<String, Question>,
+    ) -> Result<DecisionResult> {
+        LayaClassifier::classify(self, state, questions)
     }
 }

@@ -88,10 +88,24 @@ impl Question {
                     vec!["level 0".into(), "level 1".into(), "level 2".into()]
                 }
             }
-            QuestionType::Noul => vec![
-                "false: no, the statement does not hold".into(),
-                "true: yes, the statement holds".into(),
-            ],
+            QuestionType::Noul => {
+                if let Some(serde_json::Value::Object(map)) = &self.criteria {
+                    let f_desc = map
+                        .get("false")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("no, the statement does not hold");
+                    let t_desc = map
+                        .get("true")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("yes, the statement holds");
+                    vec![format!("false: {f_desc}"), format!("true: {t_desc}")]
+                } else {
+                    vec![
+                        "false: no, the statement does not hold".into(),
+                        "true: yes, the statement holds".into(),
+                    ]
+                }
+            }
         }
     }
 
@@ -120,10 +134,8 @@ impl Question {
             QuestionType::Noul => {}
         }
 
-        let est_tokens: usize = options
-            .iter()
-            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-            .sum();
+        let est_tokens: usize = options.iter().map(|o| estimate_tokens(o)).sum::<usize>()
+            + estimate_tokens(&self.instructions).saturating_sub(4);
 
         if est_tokens > head_budget {
             warnings.push(format!(
@@ -134,6 +146,16 @@ impl Question {
 
         Ok(warnings)
     }
+}
+
+/// Estimate subword token count for both whitespace-delimited and non-Latin/CJK scripts.
+pub fn estimate_tokens(text: &str) -> usize {
+    let word_tokens = text.split_whitespace().count() * 4 / 3;
+    let non_latin = text
+        .chars()
+        .filter(|&c| c as u32 > 0x024F && !c.is_whitespace())
+        .count();
+    word_tokens + non_latin + 1
 }
 
 /// The answer returned by Laya for a single question.
@@ -287,7 +309,7 @@ impl HierarchicalSchema {
             .coarse
             .render_options()
             .iter()
-            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+            .map(|o| estimate_tokens(o))
             .sum();
 
         let mut max_branch_tokens = 0;
@@ -299,11 +321,8 @@ impl HierarchicalSchema {
                     let branch_warnings =
                         q.validate(&format!("branch:{}", branch_key), head_budget)?;
                     warnings.extend(branch_warnings);
-                    let b_tokens: usize = q
-                        .render_options()
-                        .iter()
-                        .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                        .sum();
+                    let b_tokens: usize =
+                        q.render_options().iter().map(|o| estimate_tokens(o)).sum();
                     if b_tokens > max_branch_tokens {
                         max_branch_tokens = b_tokens;
                     }
@@ -338,10 +357,7 @@ impl HierarchicalSchema {
     pub fn render_ascii_tree(&self, head_budget: usize) -> String {
         let mut out = String::new();
         let coarse_options = self.coarse.render_options();
-        let root_tokens: usize = coarse_options
-            .iter()
-            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-            .sum();
+        let root_tokens: usize = coarse_options.iter().map(|o| estimate_tokens(o)).sum();
 
         out.push_str(&format!(
             "Root: {} ({} options, ~{} tokens / budget {})\n",
@@ -366,10 +382,7 @@ impl HierarchicalSchema {
                 match node {
                     HierarchicalNode::Leaf(q) => {
                         let sub_opts = q.render_options();
-                        let sub_tokens: usize = sub_opts
-                            .iter()
-                            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                            .sum();
+                        let sub_tokens: usize = sub_opts.iter().map(|o| estimate_tokens(o)).sum();
                         out.push_str(&format!(
                             "{}{}: {} ({} sub-options, ~{} tokens)\n",
                             prefix,
@@ -406,11 +419,9 @@ impl HierarchicalSchema {
             .branches
             .values()
             .map(|n| match n {
-                HierarchicalNode::Leaf(q) => q
-                    .render_options()
-                    .iter()
-                    .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                    .sum(),
+                HierarchicalNode::Leaf(q) => {
+                    q.render_options().iter().map(|o| estimate_tokens(o)).sum()
+                }
                 HierarchicalNode::Subtree(s) => s.total_leaf_count() * 10,
             })
             .max()
@@ -427,4 +438,179 @@ impl HierarchicalSchema {
 
         out
     }
+}
+
+fn is_quote_header(line: &str) -> bool {
+    let t = line.trim();
+    let lower = t.to_lowercase();
+    (lower.starts_with("on ") && lower.ends_with("wrote:") && t.len() <= 310)
+        || (t.starts_with("--")
+            && (lower.contains("original message") || lower.contains("forwarded message")))
+        || (t.len() >= 8 && t.chars().all(|c| c == '_'))
+        || lower.starts_with("from: ")
+}
+
+fn is_signature_marker(line: &str) -> bool {
+    let t = line.trim();
+    if t == "--" {
+        return true;
+    }
+    let lower = t.to_lowercase();
+    if lower.starts_with("sent from my iphone")
+        || lower.starts_with("sent from my android")
+        || lower.starts_with("sent from my mobile")
+        || lower.starts_with("sent from my ipad")
+    {
+        return true;
+    }
+    for prefix in [
+        "best regards",
+        "kind regards",
+        "warm regards",
+        "many thanks",
+        "thank you",
+        "thanks",
+        "regards",
+        "cheers",
+        "sincerely",
+        "best",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && rest
+                .chars()
+                .all(|c| c.is_alphanumeric() || " ,!.-".contains(c))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_disclaimer(paragraph: &str) -> bool {
+    let lower = paragraph.to_lowercase();
+    lower.contains("confidential")
+        || (lower.contains("intended")
+            && (lower.contains("addressee") || lower.contains("recipient")))
+        || (lower.contains("received this") && lower.contains("in error"))
+}
+
+/// Clean raw email body by stripping quoted reply headers, `>` quote lines, signatures, and legal disclaimers.
+pub fn clean_email_body(body: &str, max_chars: usize) -> String {
+    let norm = body
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace("\\n", "\n");
+    let mut lines = Vec::new();
+    for line in norm.split('\n') {
+        if is_quote_header(line) && !lines.is_empty() {
+            break;
+        }
+        if line.trim_start().starts_with('>') {
+            continue;
+        }
+        lines.push(line.trim_end());
+    }
+    let start_idx = ((lines.len() * 3 / 5).min(lines.len().saturating_sub(8))).max(1);
+    let mut cut = lines.len();
+    for (i, line) in lines.iter().enumerate().skip(start_idx) {
+        if line.trim().len() <= 40 && is_signature_marker(line) {
+            cut = i;
+            break;
+        }
+    }
+    let mut paragraphs = Vec::new();
+    let mut cur_para = Vec::new();
+    for line in &lines[..cut] {
+        if line.trim().is_empty() {
+            if !cur_para.is_empty() {
+                let p = cur_para.join("\n");
+                if !is_disclaimer(&p) {
+                    paragraphs.push(p);
+                }
+                cur_para.clear();
+            }
+        } else {
+            let collapsed = line
+                .split([' ', '\t'])
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            cur_para.push(collapsed);
+        }
+    }
+    if !cur_para.is_empty() {
+        let p = cur_para.join("\n");
+        if !is_disclaimer(&p) {
+            paragraphs.push(p);
+        }
+    }
+    let joined = paragraphs.join("\n\n");
+    joined
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| joined[..i].to_string())
+        .unwrap_or(joined)
+}
+
+/// Default fan-out of Laya email triage questions (category, spam, phishing, urgency, reply, sentiment).
+pub fn email_questions() -> BTreeMap<String, Question> {
+    BTreeMap::from([
+        (
+            "category".into(),
+            Question {
+                qtype: QuestionType::Choice,
+                instructions: "Which team should handle the email in `body`?".into(),
+                criteria: Some(serde_json::json!({
+                    "billing": "invoices, payments, refunds",
+                    "technical": "bugs, outages, integrations",
+                    "sales": "pricing, demos, new purchases",
+                    "account": "login, access, profile changes",
+                    "hr": "hiring, leave, payroll",
+                    "other": "none of the above"
+                })),
+            },
+        ),
+        (
+            "is_spam".into(),
+            Question::new_noul("Is this email unsolicited spam or bulk marketing?"),
+        ),
+        (
+            "is_phishing".into(),
+            Question {
+                qtype: QuestionType::Noul,
+                instructions: "Is this email a phishing or scam attempt to steal money, credentials, or personal data?".into(),
+                criteria: Some(serde_json::json!({
+                    "true": "phishing, scam, or fraud",
+                    "false": "a legitimate email"
+                })),
+            },
+        ),
+        (
+            "urgency".into(),
+            Question::new_score(
+                "How urgent is the issue described in `body`?",
+                vec![
+                    "no time pressure".into(),
+                    "needs attention soon".into(),
+                    "blocking issue or hard deadline".into(),
+                ],
+            ),
+        ),
+        (
+            "needs_reply".into(),
+            Question::new_noul("Does the sender expect a reply?"),
+        ),
+        (
+            "sentiment".into(),
+            Question::new_score(
+                "What is the sender's tone in `body`?",
+                vec![
+                    "angry or very negative".into(),
+                    "negative".into(),
+                    "neutral".into(),
+                    "positive".into(),
+                ],
+            ),
+        ),
+    ])
 }

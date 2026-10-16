@@ -51,12 +51,23 @@ impl ExperimentRunner {
                 let mut shuffled_q = question.clone();
                 match shuffled_q.qtype {
                     QuestionType::Choice => {
-                        let mut map = serde_json::Map::new();
-                        for opt in &shuffled_options {
-                            let key = opt.split(':').next().unwrap_or(opt).trim();
-                            map.insert(key.to_string(), serde_json::Value::Null);
-                        }
-                        shuffled_q.criteria = Some(serde_json::Value::Object(map));
+                        let arr = shuffled_options
+                            .iter()
+                            .cloned()
+                            .map(serde_json::Value::String)
+                            .collect();
+                        shuffled_q.criteria = Some(serde_json::Value::Array(arr));
+                    }
+                    QuestionType::Score => {
+                        let arr = shuffled_options
+                            .iter()
+                            .map(|opt| {
+                                let text =
+                                    opt.split_once(':').map(|(_, r)| r.trim()).unwrap_or(opt);
+                                serde_json::Value::String(text.to_string())
+                            })
+                            .collect();
+                        shuffled_q.criteria = Some(serde_json::Value::Array(arr));
                     }
                     _ => continue,
                 }
@@ -135,53 +146,56 @@ impl ExperimentRunner {
 
         let mut best_t = 1.0;
         let mut min_ece = f64::MAX;
+        let mut rows = Vec::with_capacity(temperatures.len());
 
         for &t in temperatures {
-            let cfg = classifier_config_with_t(t);
-            let cls = LayaClassifier::new(cfg);
-            let evaluator = Evaluator::new(cls);
+            let cls = LayaClassifier::new(classifier_config_with_t(t));
+            let batch_res = cls.classify_batch(items, questions)?;
+            let mut conf_sum = 0.0;
+            let mut conf_cnt = 0usize;
+            for (_, res) in &batch_res {
+                for ans in res.answers.values() {
+                    conf_sum += ans.confidence;
+                    conf_cnt += 1;
+                }
+            }
+            let avg_conf = if conf_cnt > 0 {
+                conf_sum / conf_cnt as f64
+            } else {
+                0.0
+            };
 
+            let evaluator = Evaluator::new(cls);
             match evaluator.evaluate(items, questions) {
                 Ok(metrics) => {
-                    let mut confs = Vec::new();
-                    for item in items {
-                        if let Ok(res) = evaluator_classifier(&t).classify(&item.state, questions) {
-                            for ans in res.answers.values() {
-                                confs.push(ans.confidence);
-                            }
-                        }
-                    }
-                    let avg_conf = if !confs.is_empty() {
-                        confs.iter().sum::<f64>() / confs.len() as f64
-                    } else {
-                        0.0
-                    };
-
                     if metrics.ece < min_ece {
                         min_ece = metrics.ece;
                         best_t = t;
                     }
-
-                    let status = if (t - best_t).abs() < 1e-6 {
-                        "⭐ Optimal (Lowest ECE)"
-                    } else if t < 1.0 {
-                        "Sharpened (High Confidence)"
-                    } else {
-                        "Smoothed (Calibrated)"
-                    };
-
-                    table.add_row(vec![
-                        Cell::new(format!("{:.2}", t)),
-                        Cell::new(format!("{:.4}", metrics.ece)),
-                        Cell::new(format!("{:.2}%", metrics.accuracy * 100.0)),
-                        Cell::new(format!("{:.4}", avg_conf)),
-                        Cell::new(status),
-                    ]);
+                    rows.push((t, metrics.ece, metrics.accuracy, avg_conf));
                 }
                 Err(err) => {
                     eprintln!("Skipping T={}: {}", t, err);
                 }
             }
+        }
+
+        for (t, ece, acc, avg_conf) in rows {
+            let status = if (t - best_t).abs() < 1e-6 {
+                "⭐ Optimal (Lowest ECE)"
+            } else if t < 1.0 {
+                "Sharpened (High Confidence)"
+            } else {
+                "Smoothed (Calibrated)"
+            };
+
+            table.add_row(vec![
+                Cell::new(format!("{:.2}", t)),
+                Cell::new(format!("{:.4}", ece)),
+                Cell::new(format!("{:.2}%", acc * 100.0)),
+                Cell::new(format!("{:.4}", avg_conf)),
+                Cell::new(status),
+            ]);
         }
 
         println!("{table}");
@@ -192,12 +206,12 @@ impl ExperimentRunner {
         Ok(())
     }
 
-    /// Compare performance across all three Laya model checkpoints.
+    /// Compare performance across System 1 model checkpoints.
     pub fn compare_checkpoints(
         items: &[DataItem],
         questions: &BTreeMap<String, Question>,
     ) -> Result<()> {
-        println!("\n🏛️  Comparing Laya Model Checkpoints");
+        println!("\n🏛️  Comparing System 1 Model Checkpoints");
         let checkpoints = Checkpoint::all();
 
         let mut table = Table::new();
@@ -214,27 +228,29 @@ impl ExperimentRunner {
         for &ckpt in checkpoints {
             let cls = LayaClassifier::with_checkpoint(ckpt);
             let evaluator = Evaluator::new(cls);
+            let t0 = std::time::Instant::now();
 
-            let (acc_str, ece_str) = match evaluator.evaluate(items, questions) {
-                Ok(m) => (
-                    format!("{:.2}%", m.accuracy * 100.0),
-                    format!("{:.4}", m.ece),
-                ),
-                Err(_) => ("N/A".into(), "N/A".into()),
-            };
-
-            // Measure sample latency
-            let cls_for_lat = LayaClassifier::with_checkpoint(ckpt);
-            let mut latencies = Vec::new();
-            for item in items.iter().take(20) {
-                if let Ok(res) = cls_for_lat.classify(&item.state, questions) {
-                    latencies.push(res.latency_ms);
+            let (acc_str, ece_str, avg_lat) = match evaluator.evaluate(items, questions) {
+                Ok(m) => {
+                    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    (
+                        format!("{:.2}%", m.accuracy * 100.0),
+                        format!("{:.4}", m.ece),
+                        elapsed_ms / items.len().max(1) as f64,
+                    )
                 }
-            }
-            let avg_lat = if !latencies.is_empty() {
-                latencies.iter().sum::<f64>() / latencies.len() as f64
-            } else {
-                0.0
+                Err(_) => {
+                    let cls_lat = LayaClassifier::with_checkpoint(ckpt);
+                    let sample = &items[..items.len().min(20)];
+                    let t_sub = std::time::Instant::now();
+                    let _ = cls_lat.classify_batch(sample, questions);
+                    let elapsed_ms = t_sub.elapsed().as_secs_f64() * 1000.0;
+                    (
+                        "N/A".into(),
+                        "N/A".into(),
+                        elapsed_ms / sample.len().max(1) as f64,
+                    )
+                }
             };
 
             table.add_row(vec![
@@ -262,8 +278,4 @@ fn classifier_config_with_t(t: f64) -> crate::engine::classifier::ClassifierConf
         *val = t;
     }
     cfg
-}
-
-fn evaluator_classifier(t: &f64) -> LayaClassifier {
-    LayaClassifier::new(classifier_config_with_t(*t))
 }
