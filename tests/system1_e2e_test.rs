@@ -136,7 +136,7 @@ fn test_script_router_and_autoroute_multilingual_dispatch() {
     let res_routed = router_clf.classify(&cjk_state, &questions).unwrap();
     let res_eng = eng_clf.classify(&cjk_state, &questions).unwrap();
 
-    assert_eq!(res_routed.model, "convaiinnovations/laya-multilingual");
+    assert_eq!(res_routed.model, "mock:convaiinnovations/laya-multilingual");
     assert_eq!(
         res_routed.answers["dept"].choice.as_deref(),
         Some("technical")

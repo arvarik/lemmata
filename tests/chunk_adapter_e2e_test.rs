@@ -159,7 +159,7 @@ fn test_chunk_text_for_window_on_golden_benchmark_long_items() {
         let dept_opts = dept_q.render_options();
         let dept_win_logits: Vec<Vec<f64>> = sw_chunks
             .iter()
-            .map(|c| clf.compute_option_logits(c, dept_q, &dept_opts))
+            .map(|c| clf.compute_option_logits(c, dept_q, &dept_opts).unwrap())
             .collect();
         let pooled_dept = pool_window_logits(&dept_win_logits);
         let best_dept_idx = pooled_dept
@@ -181,7 +181,7 @@ fn test_chunk_text_for_window_on_golden_benchmark_long_items() {
         let urg_opts = urg_q.render_options();
         let urg_win_logits: Vec<Vec<f64>> = sw_chunks
             .iter()
-            .map(|c| clf.compute_option_logits(c, urg_q, &urg_opts))
+            .map(|c| clf.compute_option_logits(c, urg_q, &urg_opts).unwrap())
             .collect();
         let pooled_urg = pool_window_logits(&urg_win_logits);
         let best_urg_idx = pooled_urg
@@ -199,7 +199,7 @@ fn test_chunk_text_for_window_on_golden_benchmark_long_items() {
         let esc_opts = esc_q.render_options();
         let esc_win_logits: Vec<Vec<f64>> = sw_chunks
             .iter()
-            .map(|c| clf.compute_option_logits(c, esc_q, &esc_opts))
+            .map(|c| clf.compute_option_logits(c, esc_q, &esc_opts).unwrap())
             .collect();
         let pooled_esc = pool_window_logits(&esc_win_logits);
         assert_eq!(

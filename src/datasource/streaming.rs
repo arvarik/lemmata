@@ -233,7 +233,8 @@ macro_rules! impl_buffered_streaming_source {
     };
 }
 
-/// Apache Kafka streaming connector with consumer group and offset commit tracking.
+/// Replays items with Kafka-style consumer offsets. It does not connect to a Kafka broker:
+/// a `kafka://` URI reads the local JSONL file named by its `file=` parameter.
 pub struct KafkaSource {
     broker: String,
     topic: String,
@@ -281,8 +282,8 @@ impl KafkaSource {
 
 impl_buffered_streaming_source!(KafkaSource, "KafkaSource");
 
-/// Analytical Lakehouse connector (Iceberg / Delta Lake / DuckDB / Parquet projection).
-/// Scans strictly selected columns to preserve RAM and memory bus bandwidth.
+/// Reads a local JSON, JSONL, or CSV file and keeps only the selected columns.
+/// It does not read Iceberg, Delta Lake, or Parquet tables.
 pub struct LakehouseColumnarSource {
     path: PathBuf,
     columns: Vec<String>,
@@ -334,58 +335,6 @@ impl LakehouseColumnarSource {
 }
 
 impl_buffered_streaming_source!(LakehouseColumnarSource, "LakehouseColumnarSource");
-
-/// Cloud Object Store connector (AWS S3, Google Cloud Storage, Azure Blob).
-pub struct ObjectStoreSource {
-    provider: String,
-    bucket: String,
-    key: String,
-    stream: BufferedStream,
-}
-
-impl ObjectStoreSource {
-    pub fn new(
-        provider: impl Into<String>,
-        bucket: impl Into<String>,
-        key: impl Into<String>,
-    ) -> Result<Self> {
-        let mut source = Self {
-            provider: provider.into(),
-            bucket: bucket.into(),
-            key: key.into(),
-            stream: BufferedStream::default(),
-        };
-        source.load_or_simulate()?;
-        Ok(source)
-    }
-
-    fn load_or_simulate(&mut self) -> Result<()> {
-        let uri = format!("{}://{}/{}", self.provider, self.bucket, self.key);
-        let direct = PathBuf::from(&self.key);
-        let candidate = direct.exists().then_some(direct).or_else(|| {
-            let d = PathBuf::from("data").join(&self.key);
-            d.exists().then_some(d)
-        });
-
-        if let Some(path) = candidate {
-            self.stream.load_file(&path, Some(&uri))?;
-        } else {
-            self.stream.items.push_back(DataItem::new(
-                format!("{}:{}:0", self.bucket, self.key),
-                serde_json::json!({
-                    "object_uri": uri,
-                    "bucket": self.bucket,
-                    "key": self.key,
-                    "body": format!("Cloud archive event payload from {}/{}", self.bucket, self.key)
-                }),
-                uri,
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl_buffered_streaming_source!(ObjectStoreSource, "ObjectStoreSource");
 
 /// Line-delimited JSON or plain text streaming connector (for stdin, pipes, or files).
 pub struct LineStreamSource {
@@ -506,7 +455,8 @@ pub enum StreamSink {
 impl StreamSink {
     /// Constructs a StreamSink from a URI or file path.
     /// - `-` or `stdout`: writes to stdout
-    /// - `kafka://broker:port/topic?file=output/out.jsonl`: Kafka sink
+    /// - `kafka://broker:port/topic?file=output/out.jsonl`: writes to the local file in `file=`
+    ///   (lemma has no Kafka producer)
     /// - path: writes to local file
     pub fn from_target(target: &str) -> Result<Self> {
         let trimmed = target.trim();
@@ -531,6 +481,11 @@ impl StreamSink {
                 }
             }
 
+            if out_file.is_none() {
+                bail!(
+                    "lemma has no Kafka producer. A kafka:// sink writes to the local file named by ?file=, for example kafka://{broker}/{topic}?file=output/routed.jsonl"
+                );
+            }
             return Ok(StreamSink::Kafka {
                 broker,
                 topic,

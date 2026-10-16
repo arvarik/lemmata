@@ -27,9 +27,25 @@
 | **`convaiinnovations/laya-multilingual`** | mmBERT-base | 322M | 1024 tokens | 256 tokens | 100+ languages, 2.2x faster forward pass (~32.8ms) |
 | **`convaiinnovations/laya-typed-decisions`** | ModernBERT-large | 421M | 1024 tokens | 256 tokens | Specialized enterprise workflows (0.766 acc, beats Jev teacher) |
 
+Latency and accuracy figures above are Convai's own measurements on a Tesla T4, not lemma benchmarks. Convai also reports that the base checkpoints are close to chance on zero-shot typed decisions, and that the shipped checkpoints are over-confident until you recalibrate them on your own data.
+
+### Inference backends
+
+lemma runs the Laya weights natively on CPU (a Rust port of the reference code, built on [candle](https://github.com/huggingface/candle)). `tests/laya_parity_test.rs` checks the port against the upstream Python code.
+
+| `--backend` (or `LEMMA_BACKEND`) | Behavior |
+|---|---|
+| `auto` (default) | Native inference when weights are in `models/laya`. Otherwise the mock, with a warning on stderr |
+| `native` | Native inference. Fails when the weights are missing |
+| `mock` | Keyword-rule simulator for tests and demos. It runs no model, and every result has a `mock:` model id |
+
+Native inference supports `english`, `multilingual`, `typed-decisions`, and `route`. The NLI baselines (`deberta-v3`, `modernbert-zeroshot`, `eurobert`, `neobert`, `jev`, `modernbert-nli`) exist only in the mock.
+
 ---
 
 ## 🚀 Installation & Quickstart
+
+> No release is published yet. Options 1 to 4 need a tagged release. Until then, use option 5 or 6.
 
 ### 1. Standalone Installer (macOS & Linux)
 Installs the pre-built binary for your platform and verifies SHA-256 checksum:
@@ -38,8 +54,9 @@ curl -fsSL https://raw.githubusercontent.com/arvarik/lemma/main/install.sh | sh
 ```
 
 ### 2. Via `cargo binstall` (Fast Prebuilt Binary)
+The crates.io name `lemma` belongs to an unrelated project, so point binstall at this repository:
 ```bash
-cargo binstall lemma
+cargo binstall --git https://github.com/arvarik/lemma lemma
 ```
 
 ### 3. Via GitHub Container Registry (GHCR Package)
@@ -123,10 +140,10 @@ lemma classify \
 lemma classify --file data/customer_support.jsonl --schema schema/questions.json --format csv --output results.csv
 lemma classify --file data/customer_support.jsonl --schema schema/questions.json --format jsonl
 
-# Filter for human supervisor review only (using Laya's Act/Escalate head)
+# Filter for human supervisor review only (escalation signal from normalized entropy, not Laya's act head)
 lemma classify --data-dir data --schema schema/questions.json --escalate-only --escalate-threshold 0.60
 
-# Enable sub-millisecond semantic decision cache (<0.35ms)
+# Reuse decisions for repeated inputs within one run (exact-match cache)
 lemma classify --file data/customer_support.jsonl --schema schema/questions.json --cache --cache-stats
 
 # Intercept out-of-distribution inputs via free-energy profiling
@@ -269,8 +286,8 @@ lemma classify \
   --multi-label-threshold 0.40
 ```
 
-### 16. Sub-Millisecond Semantic Decision Cache (`lemma cache`)
-Two-tier decision caching engine: exact SHA-256 match (<10 µs) and dense cosine similarity match over normalized 128-d representation hashes (~0.35 ms). Includes an admission guard so only high-confidence, non-escalated decisions are committed to cache:
+### 16. Decision Cache (`lemma cache`)
+An in-memory cache for one run. The exact tier reuses a decision when the input text and schema repeat. The semantic tier (`--cache-semantic`, off by default) also reuses a decision for similar text, using cosine similarity over hashed 128-d word features. Those features do not come from the model, so a negated sentence can match the original. An admission guard caches only high-confidence, non-escalated decisions:
 
 ```bash
 # Display cache statistics and hit ratios
@@ -279,7 +296,7 @@ lemma cache stats
 # Benchmark exact vs semantic cache lookup latency and speedups
 lemma cache bench --file data/customer_support.jsonl --schema schema/questions.json
 
-# Clear the persistent decision cache
+# The cache is not persisted, so this only confirms there is nothing to clear
 lemma cache clear
 ```
 
@@ -321,22 +338,23 @@ lemma cascade run \
   --system2-cost 0.01
 ```
 
-### 19. Cryptographic Decision Attestation & Merkle Audit Trail (`lemma attest`)
-Generates RFC 8785 canonical JSON-digested and HMAC-signed audit receipts with Merkle hash chaining ($H_i = \text{Hash}(H_{i-1} \Vert \text{Payload}_i)$) to guarantee tamper-proof audit trails:
+### 19. Signed Decision Receipts & Hash Chain (`lemma attest`)
+Each receipt holds a SHA-256 digest of its payload and an HMAC-SHA256 signature of that digest. Each receipt also stores the digest of the previous one ($H_i = \text{SHA256}(\text{Payload}_i)$, with $H_{i-1}$ inside the payload), so a changed, removed, or reordered receipt breaks the chain. HMAC is a shared-key scheme: anyone who can verify can also sign.
+
+Read the key from the `LEMMA_ATTEST_KEY` environment variable. A key typed on the command line stays in your shell history:
 
 ```bash
-# Generate cryptographically signed audit receipts during policy evaluation
+export LEMMA_ATTEST_KEY="$(openssl rand -hex 32)"
+
+# Generate signed receipts during policy evaluation
 lemma guard \
   --policy schema/policy.json \
   --file data/customer_support.jsonl \
   --schema schema/questions.json \
-  --attest-key "enterprise_secret_signing_key_2026" \
   --receipt-log logs/receipts.jsonl
 
-# Verify Merkle chain integrity and digital signatures across the receipt log
-lemma attest verify \
-  --receipt-log logs/receipts.jsonl \
-  --secret-key "enterprise_secret_signing_key_2026"
+# Verify digests, signatures, and chain links across the receipt log
+lemma attest verify --receipt-log logs/receipts.jsonl
 ```
 
 ### 20. Dynamic Schema Criteria Knapsack Optimizer (`lemma schema optimize`)
@@ -372,7 +390,7 @@ lemma hierarchical bench --schema schema/banking_hierarchy.json --file data/bank
 ```
 
 ### 22. Automated Temperature Calibration & ECE Tuner (`lemma calibrate`)
-Tunes per-bucket temperature parameters (`choice:2`, `choice:3-5`, `choice:6-10`, `choice:11+`, `score:3-5`, `noul:2`) from labeled validation sets using Golden-Section optimization to minimize ECE, NLL, or Brier score, with optional Quantile-Adaptive Temperature Scaling (**Q-ATS**):
+Tunes per-bucket temperature parameters (`choice:2`, `choice:3-5`, `choice:6-10`, `choice:11+`, `score:3-5`, `noul:2`) from labeled validation sets using Golden-Section optimization to minimize ECE, NLL, or Brier score, with optional Quantile-Adaptive Temperature Scaling (**Q-ATS**). Fitted temperatures stay in [0.5, 5.0]. A bucket with fewer than 30 labeled samples (`--min-bucket-samples`) keeps its prior temperature:
 
 ```bash
 # 1. Calibrate temperatures using Negative Log-Likelihood loss and export to config
@@ -391,8 +409,8 @@ lemma calibrate \
   --export-config config/laya_qats.json
 ```
 
-### 23. Pluggable Streaming & Lakehouse Connectors (`lemma stream`)
-Ingests streaming event queues (Kafka) and cloud lakehouses (Iceberg, S3) with micro-batching, columnar projection, semantic caching, and attestation receipt chaining:
+### 23. Micro-Batch Streaming (`lemma stream`)
+Classifies a stream of records in micro-batches, with optional caching and signed receipts. lemma has no Kafka, S3, or Iceberg client. A `kafka://` source replays the local file in `?file=` with Kafka-style offsets, a `kafka://` sink writes the local file in `?file=`, and `lakehouse://` projects columns from a local file. `s3://`, `gcs://`, and `blob://` URIs return an error:
 
 ```bash
 # 1. Ingest streaming events from Kafka topic and route to primary and escalation sinks
@@ -403,7 +421,7 @@ lemma stream \
   --escalate-sink "output/human_review_queue.jsonl" \
   --batch-size 32 \
   --attest \
-  --cache
+  --cache  # --attest reads the key from LEMMA_ATTEST_KEY
 
 # 2. Lakehouse columnar projection
 lemma stream \

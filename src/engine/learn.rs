@@ -1217,7 +1217,7 @@ fn build_phase_5() -> PhaseLesson {
             "2. Multi-Paradigm Consensus (lemma consensus): Combining models with different inductive biases (e.g. Laya JointSinglePass + DeBERTa-v3 NLI + ModernBERT-ZS) ",
             "lets us separate Aleatoric Uncertainty (the text itself is vague, so all models have flat probabilities) from Epistemic Uncertainty (models strongly disagree with each other, measured via Jensen-Shannon Divergence).\n\n",
             "3. Closed-Loop Flywheel (lemma slice-by -> drift -> active -> attest): Disaggregated slice matrices reveal where models fail; ",
-            "PSI/JS drift alerts catch distribution shift; active learning distills hard System 2 teacher labels back into System 1 (RLCD); and SHA-256 Merkle receipts provide tamper-evident compliance."
+            "PSI/JS drift alerts catch distribution shift; active learning distills hard System 2 teacher labels back into System 1 (RLCD); and SHA-256 hash-chained, HMAC-signed receipts provide tamper-evident compliance."
         )
         .to_string(),
         ascii_diagram: concat!(
