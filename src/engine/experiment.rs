@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
-use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
@@ -11,7 +10,7 @@ use crate::model::{Checkpoint, Question, QuestionType};
 pub struct ExperimentRunner;
 
 impl ExperimentRunner {
-    /// Test option order permutation invariance (testing for positional bias in [MASK] markers).
+    /// Test option order permutation invariance (testing for positional bias in `[MASK]` markers).
     pub fn test_option_order_invariance(
         classifier: &LayaClassifier,
         items: &[DataItem],
@@ -31,7 +30,7 @@ impl ExperimentRunner {
             bail!("Option order invariance requires at least 2 options");
         }
 
-        let mut rng = rand::rng();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut flip_count = 0;
         let mut total_checks = 0;
         let mut conf_deltas = Vec::new();
@@ -46,7 +45,13 @@ impl ExperimentRunner {
 
             for _ in 0..permutations {
                 let mut shuffled_options = original_options.clone();
-                shuffled_options.shuffle(&mut rng);
+                for i in (1..shuffled_options.len()).rev() {
+                    seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = (seed ^ (seed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    let j = ((z ^ (z >> 31)) as usize) % (i + 1);
+                    shuffled_options.swap(i, j);
+                }
 
                 let mut shuffled_q = question.clone();
                 match shuffled_q.qtype {

@@ -3,7 +3,7 @@
 [![CI](https://github.com/arvarik/lemma/actions/workflows/ci.yml/badge.svg)](https://github.com/arvarik/lemma/actions/workflows/ci.yml)
 [![Security Audit](https://github.com/arvarik/lemma/actions/workflows/audit.yml/badge.svg)](https://github.com/arvarik/lemma/actions/workflows/audit.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 > **A high-performance Rust CLI and engine for Laya System 1 decision and classification models.**
 
@@ -42,12 +42,22 @@ curl -fsSL https://raw.githubusercontent.com/arvarik/lemma/main/install.sh | sh
 cargo binstall lemma
 ```
 
-### 3. From Source via Cargo
+### 3. Via GitHub Container Registry (GHCR Package)
+```bash
+docker run --rm ghcr.io/arvarik/lemma:latest classify --text "Refund my duplicate charge" --labels "billing,tech,sales"
+```
+
+### 4. Verify Release Provenance Attestation
+```bash
+gh attestation verify lemma-<target>.tar.gz --repo arvarik/lemma
+```
+
+### 5. From Source via Cargo
 ```bash
 cargo install --git https://github.com/arvarik/lemma.git
 ```
 
-### 4. Build from Local Repository
+### 6. Build from Local Repository
 ```bash
 git clone https://github.com/arvarik/lemma.git
 cd lemma
