@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::engine::metrics::fnv1a64;
 use crate::model::{DecisionResult, Question};
 
 /// Configuration for the sub-millisecond semantic decision cache.
@@ -292,20 +293,17 @@ pub fn compute_schema_hash(questions: &BTreeMap<String, Question>) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Compute cosine similarity between two vectors with norm-safe calculation.
+/// Compute cosine similarity between two unit-normalized vectors.
 pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
     let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a = a.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let norm_b = b.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let denom = norm_a * norm_b;
-    if !denom.is_finite() || denom <= 1e-12 {
-        return 0.0;
+    if dot.is_finite() {
+        dot.clamp(-1.0, 1.0)
+    } else {
+        0.0
     }
-    let sim = (dot / denom).clamp(-1.0, 1.0);
-    if sim.is_nan() { 0.0 } else { sim }
 }
 
 /// Convert input text into a normalized 128-dimensional dense feature representation.
@@ -333,17 +331,17 @@ pub fn vectorize_text(text: &str) -> Vec<f64> {
 
     // Word hashing into feature buckets
     for token in &tokens {
-        let hash = fnv1a_hash(token.as_bytes());
-        let idx = (hash as usize) % DIM;
-        vec[idx] += 1.5;
+        let hash = fnv1a64(token.as_bytes());
+        vec[(hash as usize) % DIM] += 1.5;
 
-        // Subword bigram hashing for stem/morphology generalization
+        // Subword bigram hashing for stem/morphology generalization without heap allocation
         let chars: Vec<char> = token.chars().collect();
         for window in chars.windows(2) {
-            let bi_str: String = window.iter().collect();
-            let bi_hash = fnv1a_hash(bi_str.as_bytes());
-            let bi_idx = (bi_hash as usize) % DIM;
-            vec[bi_idx] += 0.5;
+            let mut buf = [0u8; 8];
+            let len0 = window[0].encode_utf8(&mut buf).len();
+            let len1 = window[1].encode_utf8(&mut buf[len0..]).len();
+            let bi_hash = fnv1a64(&buf[..len0 + len1]);
+            vec[(bi_hash as usize) % DIM] += 0.5;
         }
     }
 
@@ -357,15 +355,6 @@ pub fn vectorize_text(text: &str) -> Vec<f64> {
     }
 
     vec
-}
-
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 fn now_secs() -> u64 {

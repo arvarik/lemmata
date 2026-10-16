@@ -153,7 +153,7 @@ impl SchemaSynthesizer {
                 .filter_map(|l| l.parse::<i64>().ok())
                 .collect();
             int_vals.sort();
-            let levels: Vec<String> = int_vals.into_iter().map(|v| format!("level {v}")).collect();
+            let levels: Vec<String> = int_vals.into_iter().map(|v| v.to_string()).collect();
             let instructions = format!("Rate {} on ordinal rubric", target_col.replace('_', " "));
             let q = Question::new_score(instructions, levels);
             let est_tokens = q

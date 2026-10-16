@@ -645,30 +645,24 @@ impl HierarchicalRouter {
 
     /// Format results as an ASCII table.
     pub fn format_table(results: &[HierarchicalDecisionResult]) -> String {
-        let mut out = String::new();
-        out.push_str(&format!(
-            "{:<4} | {:<28} | {:<16} | {:<18} | {:<8} | {:<19} | {:<7}\n",
+        let mut table = comfy_table::Table::new();
+        table.set_header(vec![
             "#",
             "Input Snippet",
             "Coarse Intent",
             "Branch Intent",
             "Comp.Conf",
             "Status",
-            "Latency"
-        ));
-        out.push_str(&format!(
-            "{:-<4}-+-{:-<28}-+-{:-<16}-+-{:-<18}-+-{:-<8}-+-{:-<19}-+-{:-<7}\n",
-            "", "", "", "", "", "", ""
-        ));
+            "Latency",
+        ]);
 
         for (i, r) in results.iter().enumerate() {
             let snippet: String = r.input_text.chars().take(26).collect();
-            let snippet = if r.input_text.len() > 26 {
-                format!("{}..", snippet)
+            let snippet = if r.input_text.chars().count() > 26 {
+                format!("{snippet}..")
             } else {
                 snippet
             };
-
             let coarse = r
                 .steps
                 .first()
@@ -676,7 +670,7 @@ impl HierarchicalRouter {
                 .or_else(|| {
                     r.path
                         .first()
-                        .map(|p| format!("{}:{:.2}", p, r.coarse_confidence))
+                        .map(|p| format!("{p}:{:.2}", r.coarse_confidence))
                 })
                 .unwrap_or_else(|| "-".into());
             let fine = r
@@ -686,27 +680,25 @@ impl HierarchicalRouter {
                 .or_else(|| {
                     r.path.get(1).map(|p| {
                         format!(
-                            "{}:{:.2}",
-                            p,
+                            "{p}:{:.2}",
                             r.fine_confidence.unwrap_or(r.compound_confidence)
                         )
                     })
                 })
                 .unwrap_or_else(|| "-".into());
 
-            out.push_str(&format!(
-                "{:<4} | {:<28} | {:<16} | {:<18} | {:<8.3} | {:<19} | {:<5.1}ms\n",
-                i + 1,
+            table.add_row(vec![
+                (i + 1).to_string(),
                 snippet,
                 coarse,
                 fine,
-                r.compound_confidence,
-                r.status,
-                r.total_latency_ms
-            ));
+                format!("{:.3}", r.compound_confidence),
+                r.status.clone(),
+                format!("{:.1}ms", r.total_latency_ms),
+            ]);
         }
 
-        out
+        table.to_string()
     }
 
     /// Format results as CSV string.

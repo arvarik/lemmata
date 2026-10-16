@@ -11,9 +11,7 @@ use lemma::engine::{
     SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
     SystemStatsReport, SystemTier, UncertaintyStrategy,
 };
-use lemma::model::{
-    Checkpoint, DecisionResult, HierarchicalSchema, Question, QuestionType, inspect_safetensors,
-};
+use lemma::model::{Checkpoint, HierarchicalSchema, Question, QuestionType, inspect_safetensors};
 use lemma::{resolve_data_source_filtered, resolve_streaming_source};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -354,6 +352,32 @@ fn test_guardrail_policy_engine() {
     assert_eq!(record.final_action, GuardAction::Escalate);
     assert_eq!(record.matched_rule.as_deref(), Some("RULE_BILLING_URGENT"));
     assert_eq!(record.target.as_deref(), Some("finance_team"));
+
+    // Verify parenthesized clause in schema/policy.json (RULE_VIP_CHURN_ESCALATION)
+    let schema_policy = GuardrailPolicy::from_file(Path::new("schema/policy.json")).unwrap();
+    let schema_questions =
+        lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let schema_engine = GuardrailEngine::new(schema_policy);
+    let mut churn_dec = classifier.classify(&item.state, &schema_questions).unwrap();
+    for ans in churn_dec.answers.values_mut() {
+        ans.act_probability = Some(0.10);
+        ans.confidence = 0.90;
+    }
+    if let Some(dept) = churn_dec.answers.get_mut("department") {
+        dept.choice = Some("billing".into());
+    }
+    if let Some(churn) = churn_dec.answers.get_mut("churn_risk") {
+        churn.noul = Some(0.10);
+    }
+    if let Some(urg) = churn_dec.answers.get_mut("urgency") {
+        urg.score = Some(2.0);
+    }
+    let churn_rec = schema_engine.evaluate(&item, &churn_dec);
+    assert_eq!(
+        churn_rec.matched_rule.as_deref(),
+        Some("RULE_VIP_CHURN_ESCALATION")
+    );
+    assert_eq!(churn_rec.final_action, GuardAction::Escalate);
 }
 
 #[test]
@@ -586,25 +610,25 @@ fn test_cost_aware_cascade_pareto_tuning() {
         Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
     );
 
-    let mut gt_bill = BTreeMap::new();
-    gt_bill.insert("dept".into(), serde_json::json!("billing"));
-
-    let mut gt_tech = BTreeMap::new();
-    gt_tech.insert("dept".into(), serde_json::json!("technical"));
-
     let items = vec![
         DataItem::new(
             "s1",
             serde_json::json!({ "text": "Invoice refund payment billing charge" }),
             "test",
         )
-        .with_ground_truth(gt_bill),
+        .with_ground_truth(BTreeMap::from([(
+            "dept".into(),
+            serde_json::json!("billing"),
+        )])),
         DataItem::new(
             "s2",
             serde_json::json!({ "text": "Server crash bug exception stack trace" }),
             "test",
         )
-        .with_ground_truth(gt_tech),
+        .with_ground_truth(BTreeMap::from([(
+            "default".into(),
+            serde_json::json!("technical"),
+        )])),
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
@@ -613,7 +637,6 @@ fn test_cost_aware_cascade_pareto_tuning() {
     assert!(policy.system1_coverage_rate >= 0.50);
     assert!(policy.cost_savings_percent >= 50.0);
 
-    // Test routing decision
     let router = CascadeRouter::new(CascadeConfig::default());
     let decision = router.route(&items[0], &questions, &classifier).unwrap();
 
@@ -637,12 +660,13 @@ fn test_cryptographic_attestation_and_merkle_chain() {
         "test",
     );
 
-    let decision = DecisionResult {
-        model: "convaiinnovations/laya".into(),
-        answers: BTreeMap::new(),
-        input_tokens: 25,
-        latency_ms: 33.2,
-    };
+    let mut questions = BTreeMap::new();
+    questions.insert(
+        "dept".into(),
+        Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
+    );
+    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+    let decision = classifier.classify(&item1.state, &questions).unwrap();
 
     let rec1 = engine
         .create_receipt(
@@ -677,10 +701,18 @@ fn test_cryptographic_attestation_and_merkle_chain() {
     // Verify tampered parent hash breaks chain
     let mut tampered_rec2 = rec2.clone();
     tampered_rec2.parent_hash = "corrupted_hash".to_string();
-    let broken_ledger = vec![rec1, tampered_rec2];
-    let broken_report =
-        AttestationEngine::verify_ledger(&broken_ledger, "enterprise_hmac_secret_2026");
+    let broken_report = AttestationEngine::verify_ledger(
+        &[rec1.clone(), tampered_rec2],
+        "enterprise_hmac_secret_2026",
+    );
     assert!(!broken_report.chain_intact);
+
+    // Verify tampered confidence breaks cryptographic digest verification
+    let mut tampered_conf_rec = rec1.clone();
+    tampered_conf_rec.confidences.insert("dept".into(), 0.01);
+    let conf_report =
+        AttestationEngine::verify_ledger(&[tampered_conf_rec], "enterprise_hmac_secret_2026");
+    assert!(!conf_report.chain_intact && conf_report.invalid_receipts > 0);
 }
 
 #[test]

@@ -42,35 +42,28 @@ impl Evaluator {
         let mut score_err_sum = 0.0;
         let mut score_count = 0;
 
-        for item in items {
-            let gt_map = match &item.ground_truth {
-                Some(map) => map,
-                None => continue, // Skip items without ground-truth labels
+        let batch_results = self.classifier.classify_batch(items, questions)?;
+
+        for (item, (_, result)) in items.iter().zip(batch_results.iter()) {
+            let Some(gt_map) = &item.ground_truth else {
+                continue; // Skip items without ground-truth labels
             };
 
-            let result = self.classifier.classify(&item.state, questions)?;
-
             for (qid, answer) in &result.answers {
-                let question = match questions.get(qid) {
-                    Some(q) => q,
-                    None => continue,
+                let Some(question) = questions.get(qid) else {
+                    continue;
                 };
-                let target_val = match resolve_ground_truth_for_question(
-                    Some(gt_map),
-                    qid,
-                    question,
-                    questions.len(),
-                ) {
-                    Some(v) => v,
-                    None => continue,
+                let Some(target_val) =
+                    resolve_ground_truth_for_question(Some(gt_map), qid, question, questions.len())
+                else {
+                    continue;
                 };
 
                 total_samples += 1;
-                let conf = answer.confidence;
-                confidences.push(conf);
+                confidences.push(answer.confidence);
 
                 if let Some(act) = answer.act_probability
-                    && act > self.classifier.config().escalate_threshold
+                    && act >= self.classifier.config().escalate_threshold
                 {
                     escalate_count += 1;
                 }
@@ -86,15 +79,18 @@ impl Evaluator {
                         }
                         correctness.push(is_correct);
 
-                        // Soft accuracy: probability assigned to the target class
-                        let p_target = answer.probabilities.get(target_str).copied().unwrap_or(0.0);
+                        let p_target = answer
+                            .probabilities
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
+                            .map(|(_, &v)| v)
+                            .unwrap_or(0.0);
                         soft_acc_sum += p_target;
 
-                        // Brier score prep
                         let keys: Vec<&String> = answer.probabilities.keys().collect();
-                        let target_idx =
-                            keys.iter().position(|k| k.eq_ignore_ascii_case(target_str));
-                        if let Some(t_idx) = target_idx {
+                        if let Some(t_idx) =
+                            keys.iter().position(|k| k.eq_ignore_ascii_case(target_str))
+                        {
                             let p_vec: Vec<f64> = keys
                                 .iter()
                                 .map(|k| answer.probabilities.get(*k).copied().unwrap_or(0.0))
@@ -167,6 +163,10 @@ impl Evaluator {
             None
         };
 
+        let avg_conf = confidences.iter().sum::<f64>() / total_samples as f64;
+        let avg_lat = batch_results.iter().map(|(_, r)| r.latency_ms).sum::<f64>()
+            / batch_results.len().max(1) as f64;
+
         Ok(EvaluationMetrics {
             accuracy: (accuracy * 10000.0).round() / 10000.0,
             soft_accuracy: (soft_accuracy * 10000.0).round() / 10000.0,
@@ -175,6 +175,8 @@ impl Evaluator {
             score_mae: score_mae.map(|v| (v * 10000.0).round() / 10000.0),
             act_escalate_rate: (act_escalate_rate * 10000.0).round() / 10000.0,
             sample_count: total_samples,
+            avg_confidence: (avg_conf * 10000.0).round() / 10000.0,
+            avg_latency_ms: (avg_lat * 1000.0).round() / 1000.0,
         })
     }
 

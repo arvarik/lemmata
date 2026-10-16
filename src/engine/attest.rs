@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::datasource::DataItem;
 use crate::engine::guardrail::GuardAction;
+use crate::engine::metrics::{fnv1a64, format_utc_iso8601};
 use crate::model::DecisionResult;
 
 /// A tamper-evident cryptographic decision receipt conforming to 2026 enterprise AI audit standards.
@@ -24,6 +25,52 @@ pub struct DecisionReceipt {
     pub action: GuardAction,
     pub receipt_digest: String,
     pub signature: String,
+}
+
+impl DecisionReceipt {
+    pub fn canonical_payload(&self) -> String {
+        let conf_bits: BTreeMap<&str, u64> = self
+            .confidences
+            .iter()
+            .map(|(k, v)| (k.as_str(), ((v * 10000.0).round() as i64) as u64))
+            .collect();
+        let act_bits: BTreeMap<&str, u64> = self
+            .act_probabilities
+            .iter()
+            .map(|(k, v)| (k.as_str(), ((v * 10000.0).round() as i64) as u64))
+            .collect();
+        format!(
+            "v={}|id={}|parent={}|model={}|schema={}|input={}|rule={:?}|act={:?}|dec={:?}|conf={:?}|act_p={:?}|ts={}",
+            self.version,
+            self.receipt_id,
+            self.parent_hash,
+            self.model_id,
+            self.schema_digest,
+            self.input_digest,
+            self.policy_rule,
+            self.action,
+            self.decisions,
+            conf_bits,
+            act_bits,
+            self.timestamp
+        )
+    }
+
+    fn compute_digest(&self) -> String {
+        let payload = self.canonical_payload();
+        let rev: Vec<u8> = payload.bytes().rev().collect();
+        format!("{:016x}{:016x}", fnv1a64(payload.as_bytes()), fnv1a64(&rev))
+    }
+
+    fn compute_signature(&self, secret_key: &str) -> String {
+        let sig_payload = format!("{}:{}", secret_key, self.receipt_digest);
+        let rev: String = sig_payload.chars().rev().collect();
+        format!(
+            "sig_{:016x}{:016x}",
+            fnv1a64(sig_payload.as_bytes()),
+            fnv1a64(rev.as_bytes())
+        )
+    }
 }
 
 /// Verification report validating cryptographic integrity and Merkle hash chaining.
@@ -84,11 +131,10 @@ impl AttestationEngine {
             "rec_{:016x}",
             fnv1a64(format!("{}::{}", item.id, now_nanos()).as_bytes())
         );
-        let timestamp = now_iso();
 
         let mut decisions = BTreeMap::new();
         let mut confidences = BTreeMap::new();
-        let mut act_probs = BTreeMap::new();
+        let mut act_probabilities = BTreeMap::new();
 
         for (qid, ans) in &decision.answers {
             let pred = if let Some(c) = &ans.choice {
@@ -104,66 +150,30 @@ impl AttestationEngine {
             decisions.insert(qid.clone(), pred);
             confidences.insert(qid.clone(), ans.confidence);
             if let Some(act) = ans.act_probability {
-                act_probs.insert(qid.clone(), act);
+                act_probabilities.insert(qid.clone(), act);
             }
         }
 
-        let parent_hash = self.latest_hash.clone();
-
-        // Canonical payload string to hash
-        let canonical_payload = format!(
-            "v={}|id={}|parent={}|model={}|schema={}|input={}|rule={:?}|act={:?}|dec={:?}|ts={}",
-            "trace-2026.1",
-            receipt_id,
-            parent_hash,
-            decision.model,
-            schema_digest,
-            input_digest,
-            policy_rule,
-            action,
-            decisions,
-            timestamp
-        );
-
-        let receipt_digest = format!(
-            "{:016x}{:016x}",
-            fnv1a64(canonical_payload.as_bytes()),
-            fnv1a64(
-                &canonical_payload
-                    .as_bytes()
-                    .iter()
-                    .rev()
-                    .copied()
-                    .collect::<Vec<u8>>()
-            )
-        );
-
-        // Sign with key
-        let sig_payload = format!("{}:{}", self.secret_key, receipt_digest);
-        let signature = format!(
-            "sig_{:016x}{:016x}",
-            fnv1a64(sig_payload.as_bytes()),
-            fnv1a64(sig_payload.chars().rev().collect::<String>().as_bytes())
-        );
-
-        let receipt = DecisionReceipt {
+        let mut receipt = DecisionReceipt {
             version: "trace-2026.1".to_string(),
             receipt_id,
-            parent_hash: parent_hash.clone(),
-            timestamp,
+            parent_hash: self.latest_hash.clone(),
+            timestamp: format_utc_iso8601(),
             model_id: decision.model.clone(),
             schema_digest: schema_digest.to_string(),
             input_digest,
             decisions,
             confidences,
-            act_probabilities: act_probs,
+            act_probabilities,
             policy_rule: policy_rule.map(|s| s.to_string()),
             action,
-            receipt_digest: receipt_digest.clone(),
-            signature,
+            receipt_digest: String::new(),
+            signature: String::new(),
         };
+        receipt.receipt_digest = receipt.compute_digest();
+        receipt.signature = receipt.compute_signature(&self.secret_key);
 
-        self.latest_hash = receipt_digest;
+        self.latest_hash = receipt.receipt_digest.clone();
         Ok(receipt)
     }
 
@@ -177,11 +187,9 @@ impl AttestationEngine {
         let mut chain_intact = true;
         let mut broken_link_index = None;
         let mut failure_reasons = Vec::new();
-
         let mut expected_parent = Self::GENESIS_HASH.to_string();
 
         for (i, rec) in receipts.iter().enumerate() {
-            // 1. Verify parent hash link
             if rec.parent_hash != expected_parent {
                 chain_intact = false;
                 if broken_link_index.is_none() {
@@ -193,49 +201,13 @@ impl AttestationEngine {
                 ));
             }
 
-            // 2. Verify receipt digest
-            let canonical_payload = format!(
-                "v={}|id={}|parent={}|model={}|schema={}|input={}|rule={:?}|act={:?}|dec={:?}|ts={}",
-                rec.version,
-                rec.receipt_id,
-                rec.parent_hash,
-                rec.model_id,
-                rec.schema_digest,
-                rec.input_digest,
-                rec.policy_rule,
-                rec.action,
-                rec.decisions,
-                rec.timestamp
-            );
-
-            let computed_digest = format!(
-                "{:016x}{:016x}",
-                fnv1a64(canonical_payload.as_bytes()),
-                fnv1a64(
-                    &canonical_payload
-                        .as_bytes()
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect::<Vec<u8>>()
-                )
-            );
-
-            if computed_digest != rec.receipt_digest {
+            if rec.compute_digest() != rec.receipt_digest {
                 invalid_count += 1;
                 failure_reasons.push(format!("Receipt #{}: Digest tampering detected", i));
                 continue;
             }
 
-            // 3. Verify digital signature
-            let sig_payload = format!("{}:{}", secret_key, rec.receipt_digest);
-            let expected_sig = format!(
-                "sig_{:016x}{:016x}",
-                fnv1a64(sig_payload.as_bytes()),
-                fnv1a64(sig_payload.chars().rev().collect::<String>().as_bytes())
-            );
-
-            if expected_sig != rec.signature {
+            if rec.compute_signature(secret_key) != rec.signature {
                 invalid_count += 1;
                 failure_reasons.push(format!("Receipt #{}: Invalid digital signature", i));
                 continue;
@@ -256,28 +228,11 @@ impl AttestationEngine {
     }
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
 }
 
 #[cfg(test)]

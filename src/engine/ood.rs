@@ -6,7 +6,8 @@ use crate::datasource::DataItem;
 use crate::engine::cache::vectorize_text;
 use crate::engine::classifier::LayaClassifier;
 use crate::engine::guardrail::GuardAction;
-use crate::model::Question;
+use crate::engine::metrics::resolve_ground_truth_for_question;
+use crate::model::{DecisionResult, Question};
 
 /// Out-of-distribution (OOD) detection profile fitted on in-distribution data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,24 +68,36 @@ impl OodDetector {
         }
 
         let mut class_features: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
-        let mut energy_scores = Vec::new();
+        let mut energy_scores = Vec::with_capacity(items.len());
+        let batch_results = classifier.classify_batch(items, questions)?;
 
-        for item in items {
+        for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
             let text = match &item.state {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other)?,
             };
 
             let feat = vectorize_text(&text);
-            let res = classifier.classify(&item.state, questions)?;
             let ans = res
                 .answers
                 .get(target_qid)
                 .ok_or_else(|| anyhow::anyhow!("No answer for '{}'", target_qid))?;
 
-            let assigned_class = ans.choice.clone().unwrap_or_else(|| "unknown".into());
+            let assigned_class = resolve_ground_truth_for_question(
+                item.ground_truth.as_ref(),
+                target_qid,
+                q,
+                questions.len(),
+            )
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(b) => Some(b.to_string()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .or_else(|| ans.choice.clone())
+            .unwrap_or_else(|| "unknown".into());
 
-            // Compute Free Energy from option probabilities: E = -T * ln(sum exp(z/T))
             let energy = compute_free_energy(&ans.probabilities, classifier.config().temperature);
             energy_scores.push(energy);
 
@@ -95,7 +108,6 @@ impl OodDetector {
             bail!("Cannot fit OOD profile on empty dataset");
         }
 
-        // Calculate energy mean and variance
         let n = energy_scores.len() as f64;
         let mean_energy = energy_scores.iter().sum::<f64>() / n;
         let var_energy = energy_scores
@@ -105,7 +117,6 @@ impl OodDetector {
             / n;
         let std_energy = var_energy.sqrt().max(1e-4);
 
-        // Compute centroids and variances per class
         let mut centroids = BTreeMap::new();
         let mut class_variances = BTreeMap::new();
         let mut target_classes = Vec::new();
@@ -122,13 +133,11 @@ impl OodDetector {
                 }
             }
 
-            // L2 normalize centroid
             let norm = mean_vec.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-6);
             for val in &mut mean_vec {
                 *val /= norm;
             }
 
-            // Compute average distance to centroid
             let avg_dist = feats
                 .iter()
                 .map(|feat| euclidean_distance(feat, &mean_vec))
@@ -139,9 +148,8 @@ impl OodDetector {
             class_variances.insert(cls, avg_dist.max(1e-3));
         }
 
-        // Standard 2026 OOD calibration: 2.5 standard deviations from ID mean
         let energy_threshold = mean_energy + 2.33 * std_energy;
-        let distance_threshold = 1.65; // Hypersphere distance threshold
+        let distance_threshold = 1.65;
 
         Ok(OodProfile {
             name: name.into(),
@@ -156,25 +164,21 @@ impl OodDetector {
         })
     }
 
-    /// Evaluate an input item against the OOD profile.
-    pub fn evaluate(
+    /// Evaluate an input item against the OOD profile using a pre-computed DecisionResult.
+    pub fn evaluate_with_decision(
         &self,
         item_id: &str,
         text: &str,
-        classifier: &LayaClassifier,
-        questions: &BTreeMap<String, Question>,
+        res: &DecisionResult,
     ) -> Result<OodEvaluation> {
-        let state = serde_json::Value::String(text.to_string());
-        let res = classifier.classify(&state, questions)?;
         let ans = res.answers.get(&self.profile.question_id).ok_or_else(|| {
             anyhow::anyhow!("No answer for question '{}'", self.profile.question_id)
         })?;
 
         let feat = vectorize_text(text);
-        let energy = compute_free_energy(&ans.probabilities, classifier.config().temperature);
+        let energy = compute_free_energy(&ans.probabilities, 1.0);
         let energy_z = (energy - self.profile.mean_energy) / self.profile.std_energy;
 
-        // Compute Mahalanobis++ distance to nearest centroid
         let mut min_dist = f64::INFINITY;
         let mut closest_class = "unknown".to_string();
 
@@ -185,8 +189,7 @@ impl OodDetector {
                 .get(cls)
                 .copied()
                 .unwrap_or(1.0);
-            let raw_dist = euclidean_distance(&feat, centroid);
-            let scaled_dist = raw_dist / variance;
+            let scaled_dist = euclidean_distance(&feat, centroid) / variance;
 
             if scaled_dist < min_dist {
                 min_dist = scaled_dist;
@@ -194,7 +197,6 @@ impl OodDetector {
             }
         }
 
-        // Composite anomaly score: logistic sigmoid over normalized energy and distance
         let energy_factor = 1.0 / (1.0 + (-energy_z + 1.5).exp());
         let dist_factor = 1.0 / (1.0 + (-(min_dist - self.profile.distance_threshold) * 2.0).exp());
         let anomaly_score = (0.5 * energy_factor + 0.5 * dist_factor).clamp(0.0, 1.0);
@@ -228,6 +230,19 @@ impl OodDetector {
         })
     }
 
+    /// Evaluate an input item against the OOD profile.
+    pub fn evaluate(
+        &self,
+        item_id: &str,
+        text: &str,
+        classifier: &LayaClassifier,
+        questions: &BTreeMap<String, Question>,
+    ) -> Result<OodEvaluation> {
+        let state = serde_json::Value::String(text.to_string());
+        let res = classifier.classify(&state, questions)?;
+        self.evaluate_with_decision(item_id, text, &res)
+    }
+
     /// Evaluate a batch of items.
     pub fn evaluate_batch(
         &self,
@@ -235,29 +250,40 @@ impl OodDetector {
         classifier: &LayaClassifier,
         questions: &BTreeMap<String, Question>,
     ) -> Result<Vec<OodEvaluation>> {
+        let batch_results = classifier.classify_batch(items, questions)?;
         let mut results = Vec::with_capacity(items.len());
-        for item in items {
+        for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
             let text = match &item.state {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other)?,
             };
-            let eval = self.evaluate(&item.id, &text, classifier, questions)?;
-            results.push(eval);
+            results.push(self.evaluate_with_decision(&item.id, &text, res)?);
         }
         Ok(results)
     }
 }
 
-/// Compute Helmholtz Free Energy surrogate: E(x) = -T * ln(p_max).
-/// For in-distribution inputs with confident predictions (p_max ~ 1.0), energy is low (~0.0).
-/// For out-of-distribution inputs with diffuse/uncertain predictions, energy is high.
+/// Compute Helmholtz Free Energy over the full probability distribution.
+/// Combines Shannon entropy, Rényi collision energy, and max-probability concentration
+/// so diffuse/uncertain OOD distributions yield significantly higher energy than confident ID inputs.
 pub fn compute_free_energy(probs: &BTreeMap<String, f64>, temperature: f64) -> f64 {
     if probs.is_empty() {
         return 10.0;
     }
     let temp = temperature.max(0.01);
-    let p_max = probs.values().copied().fold(0.0, f64::max).max(1e-9);
-    -temp * p_max.ln()
+    let p_max = probs.values().copied().fold(0.0, f64::max).clamp(1e-9, 1.0);
+    let shannon: f64 = -probs
+        .values()
+        .filter(|&&p| p > 1e-9)
+        .map(|&p| p * p.ln())
+        .sum::<f64>();
+    let renyi: f64 = -probs
+        .values()
+        .map(|&p| p * p)
+        .sum::<f64>()
+        .clamp(1e-9, 1.0)
+        .ln();
+    temp * (0.5 * shannon + 0.3 * renyi - 0.2 * p_max.ln()).max(1e-6)
 }
 
 pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {

@@ -225,52 +225,59 @@ impl CascadeRouter {
 
         let router = Self::new(config.clone());
         let mut sample_evals: Vec<(f64, bool)> = Vec::new(); // (risk, is_s1_correct)
+        let batch_results = classifier.classify_batch(items, questions)?;
 
-        for item in items {
-            let gt = match &item.ground_truth {
-                Some(g) if !g.is_empty() => g,
-                _ => continue, // Skip unlabeled items for accuracy tuning
+        for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
+            let Some(gt) = &item.ground_truth else {
+                continue;
             };
+            if gt.is_empty() {
+                continue;
+            }
 
-            let res = classifier.classify(&item.state, questions)?;
-            let (risk, _, _, _) = router.compute_risk(&res);
+            let (risk, _, _, _) = router.compute_risk(res);
 
-            // Determine if System 1 prediction matches ground truth across all questions
             let mut correct = true;
-            for (qid, val) in gt {
+            let mut matched_any = false;
+            for (qid, question) in questions {
+                let Some(val) = crate::engine::metrics::resolve_ground_truth_for_question(
+                    Some(gt),
+                    qid,
+                    question,
+                    questions.len(),
+                ) else {
+                    continue;
+                };
+                matched_any = true;
+
                 if let Some(ans) = res.answers.get(qid) {
                     let matches = match &ans.qtype {
                         crate::model::QuestionType::Choice => {
-                            let expected = match val {
-                                serde_json::Value::String(s) => s.as_str(),
-                                _ => "",
-                            };
-                            ans.choice.as_deref() == Some(expected)
-                                || ans
-                                    .selected_labels
-                                    .as_ref()
-                                    .map(|v| v.iter().any(|s| s == expected))
-                                    .unwrap_or(false)
+                            let expected = val.as_str().unwrap_or("");
+                            ans.choice
+                                .as_deref()
+                                .is_some_and(|c| c.eq_ignore_ascii_case(expected))
+                                || ans.selected_labels.as_ref().is_some_and(|v| {
+                                    v.iter().any(|s| s.eq_ignore_ascii_case(expected))
+                                })
                         }
                         crate::model::QuestionType::Score => {
-                            let expected = match val {
-                                serde_json::Value::Number(n) => n.as_f64(),
-                                serde_json::Value::String(s) => s.parse::<f64>().ok(),
-                                _ => None,
-                            };
-                            match (expected, ans.score) {
-                                (Some(e), Some(s)) => (e - s).abs() < 0.5,
-                                _ => false,
-                            }
+                            let expected = val
+                                .as_f64()
+                                .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()));
+                            expected
+                                .zip(ans.score)
+                                .is_some_and(|(e, s)| (e - s).abs() < 0.5)
                         }
                         crate::model::QuestionType::Noul => {
-                            let expected = match val {
-                                serde_json::Value::Bool(b) => Some(*b),
-                                serde_json::Value::String(s) => s.parse::<bool>().ok(),
-                                serde_json::Value::Number(n) => Some(n.as_i64().unwrap_or(0) != 0),
-                                _ => None,
-                            };
-                            let pred_bool = ans.noul.map(|n| n > 0.5);
+                            let expected = val
+                                .as_bool()
+                                .or_else(|| {
+                                    val.as_str()
+                                        .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+                                })
+                                .or_else(|| val.as_i64().map(|n| n != 0));
+                            let pred_bool = ans.noul.map(|n| n >= 0.5);
                             expected.is_some() && expected == pred_bool
                         }
                     };
@@ -283,7 +290,9 @@ impl CascadeRouter {
                     break;
                 }
             }
-            sample_evals.push((risk, correct));
+            if matched_any {
+                sample_evals.push((risk, correct));
+            }
         }
 
         if sample_evals.is_empty() {

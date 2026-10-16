@@ -146,29 +146,23 @@ impl<'a> DriftEngine<'a> {
                     options.clone()
                 };
 
-                let mut base_counts: BTreeMap<String, usize> = BTreeMap::new();
-                for (_, r) in &base_results {
-                    if let Some(ans) = r.answers.get(qid) {
-                        if let Some(c) = &ans.choice {
-                            *base_counts.entry(c.clone()).or_default() += 1;
-                        } else if let Some(n) = ans.noul {
-                            let label = if n > 0.5 { "true" } else { "false" };
-                            *base_counts.entry(label.to_string()).or_default() += 1;
+                let count_labels = |res: &[(String, crate::model::DecisionResult)]| {
+                    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                    for (_, r) in res {
+                        if let Some(ans) = r.answers.get(qid) {
+                            if let Some(c) = &ans.choice {
+                                *counts.entry(c.clone()).or_default() += 1;
+                            } else if let Some(n) = ans.noul {
+                                *counts
+                                    .entry(if n > 0.5 { "true" } else { "false" }.to_string())
+                                    .or_default() += 1;
+                            }
                         }
                     }
-                }
-
-                let mut curr_counts: BTreeMap<String, usize> = BTreeMap::new();
-                for (_, r) in &curr_results {
-                    if let Some(ans) = r.answers.get(qid) {
-                        if let Some(c) = &ans.choice {
-                            *curr_counts.entry(c.clone()).or_default() += 1;
-                        } else if let Some(n) = ans.noul {
-                            let label = if n > 0.5 { "true" } else { "false" };
-                            *curr_counts.entry(label.to_string()).or_default() += 1;
-                        }
-                    }
-                }
+                    counts
+                };
+                let base_counts = count_labels(&base_results);
+                let curr_counts = count_labels(&curr_results);
 
                 let base_total = base_results.len().max(1) as f64;
                 let curr_total = curr_results.len().max(1) as f64;
@@ -245,15 +239,12 @@ impl<'a> DriftEngine<'a> {
     }
 
     pub fn print_report(report: &DriftReport) {
-        println!("\n📊 Lemma Distribution Drift & Concept Shift Report");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!(
-            "Reference Baseline: {} samples | Live Production: {} samples",
-            report.baseline_count, report.current_count
-        );
-        println!(
-            "Configured Thresholds: PSI >= {:.2} (Critical), W1 >= {:.2} (Critical)\n",
-            report.psi_threshold, report.wasserstein_threshold
+            "\n📊 Lemma Distribution Drift & Concept Shift Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nReference Baseline: {} samples | Live Production: {} samples\nConfigured Thresholds: PSI >= {:.2} (Critical), W1 >= {:.2} (Critical)\n",
+            report.baseline_count,
+            report.current_count,
+            report.psi_threshold,
+            report.wasserstein_threshold
         );
 
         let mut table = Table::new();
@@ -268,47 +259,34 @@ impl<'a> DriftEngine<'a> {
             Cell::new("Drift Status").fg(Color::White),
         ]);
 
+        let fmt_opt = |v: Option<f64>| v.map_or_else(|| "N/A".into(), |x| format!("{x:.4}"));
         for (qid, m) in &report.question_metrics {
-            let status_cell = match m.overall_status {
-                DriftSeverity::Stable => Cell::new(m.overall_status.badge()).fg(Color::Green),
-                DriftSeverity::Moderate => Cell::new(m.overall_status.badge()).fg(Color::Yellow),
-                DriftSeverity::Severe => Cell::new(m.overall_status.badge()).fg(Color::Red),
+            let color = match m.overall_status {
+                DriftSeverity::Stable => Color::Green,
+                DriftSeverity::Moderate => Color::Yellow,
+                DriftSeverity::Severe => Color::Red,
             };
-
-            let prior_psi_str = m
-                .class_prior_psi
-                .map(|p| format!("{:.4}", p))
-                .unwrap_or_else(|| "N/A".into());
-            let prior_jsd_str = m
-                .class_prior_jsd
-                .map(|j| format!("{:.4}", j))
-                .unwrap_or_else(|| "N/A".into());
-            let act_w1_str = m
-                .act_head_wasserstein
-                .map(|w| format!("{:.4}", w))
-                .unwrap_or_else(|| "N/A".into());
-
             table.add_row(vec![
                 Cell::new(qid),
                 Cell::new(format!("{:?}", m.qtype)),
                 Cell::new(format!("{:.4}", m.confidence_psi)),
                 Cell::new(format!("{:.4}", m.confidence_wasserstein)),
-                Cell::new(prior_psi_str),
-                Cell::new(prior_jsd_str),
-                Cell::new(act_w1_str),
-                status_cell,
+                Cell::new(fmt_opt(m.class_prior_psi)),
+                Cell::new(fmt_opt(m.class_prior_jsd)),
+                Cell::new(fmt_opt(m.act_head_wasserstein)),
+                Cell::new(m.overall_status.badge()).fg(color),
             ]);
         }
 
         println!("{table}\n");
-
         if report.has_critical_drift {
-            println!("🚨 CRITICAL DRIFT DETECTED!");
-            println!("   Production distributions have diverged significantly from baseline.");
-            println!("   Calibrated probabilities may fail silently without recalibration.\n");
+            println!(
+                "🚨 CRITICAL DRIFT DETECTED!\n   Production distributions have diverged significantly from baseline.\n   Calibrated probabilities may fail silently without recalibration.\n"
+            );
         } else if report.has_moderate_drift {
-            println!("⚠️  Moderate drift detected in one or more questions.");
-            println!("   Monitor calibration ECE and consider scheduling temperature refitting.\n");
+            println!(
+                "⚠️  Moderate drift detected in one or more questions.\n   Monitor calibration ECE and consider scheduling temperature refitting.\n"
+            );
         } else {
             println!("✅ Distribution is STABLE: no significant concept drift detected.\n");
         }
@@ -319,18 +297,14 @@ impl<'a> DriftEngine<'a> {
 /// PSI = sum( (P_curr - P_base) * ln( (P_curr + eps) / (P_base + eps) ) )
 pub fn calculate_psi(baseline_probs: &[f64], current_probs: &[f64]) -> f64 {
     let eps = 1e-6;
-    let max_len = baseline_probs.len().max(current_probs.len());
-    let mut psi = 0.0;
-
-    for i in 0..max_len {
-        let p_base = baseline_probs.get(i).copied().unwrap_or(0.0);
-        let p_curr = current_probs.get(i).copied().unwrap_or(0.0);
-        let diff = p_curr - p_base;
-        let ratio = (p_curr + eps) / (p_base + eps);
-        psi += diff * ratio.ln();
-    }
-
-    psi.max(0.0)
+    (0..baseline_probs.len().max(current_probs.len()))
+        .map(|i| {
+            let p_base = baseline_probs.get(i).copied().unwrap_or(0.0);
+            let p_curr = current_probs.get(i).copied().unwrap_or(0.0);
+            (p_curr - p_base) * ((p_curr + eps) / (p_base + eps)).ln()
+        })
+        .sum::<f64>()
+        .max(0.0)
 }
 
 /// Two-sample Kolmogorov-Smirnov (KS) test statistic D = sup_x |F_1(x) - F_2(x)|
@@ -343,32 +317,22 @@ pub fn calculate_ks_statistic(sample_a: &[f64], sample_b: &[f64]) -> f64 {
     a.sort_by(|x, y| x.total_cmp(y));
     b.sort_by(|x, y| x.total_cmp(y));
 
-    let n_a = a.len() as f64;
-    let n_b = b.len() as f64;
-    let mut i = 0;
-    let mut j = 0;
-    let mut max_diff = 0.0f64;
-
+    let (n_a, n_b) = (a.len() as f64, b.len() as f64);
+    let (mut i, mut j, mut max_diff) = (0, 0, 0.0f64);
     while i < a.len() || j < b.len() {
-        let val = if i < a.len() && j < b.len() {
-            a[i].min(b[j])
-        } else if i < a.len() {
-            a[i]
-        } else {
-            b[j]
+        let val = match (a.get(i), b.get(j)) {
+            (Some(&va), Some(&vb)) => va.min(vb),
+            (Some(&va), None) => va,
+            (None, Some(&vb)) => vb,
+            (None, None) => break,
         };
-
         while i < a.len() && a[i] <= val {
             i += 1;
         }
         while j < b.len() && b[j] <= val {
             j += 1;
         }
-
-        let diff = (i as f64 / n_a - j as f64 / n_b).abs();
-        if diff > max_diff {
-            max_diff = diff;
-        }
+        max_diff = max_diff.max((i as f64 / n_a - j as f64 / n_b).abs());
     }
     max_diff.clamp(0.0, 1.0)
 }
@@ -400,20 +364,19 @@ pub fn calculate_wasserstein_1(sample_a: &[f64], sample_b: &[f64], num_quantiles
     if sample_a.is_empty() || sample_b.is_empty() || num_quantiles == 0 {
         return 0.0;
     }
-
     let mut a_sorted = sample_a.to_vec();
     let mut b_sorted = sample_b.to_vec();
-    a_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-    b_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    a_sorted.sort_by(|x, y| x.total_cmp(y));
+    b_sorted.sort_by(|x, y| x.total_cmp(y));
 
-    let mut sum_diff = 0.0;
-    for i in 0..num_quantiles {
-        let q = (i as f64 + 0.5) / num_quantiles as f64;
-        let idx_a = ((a_sorted.len() - 1) as f64 * q).round() as usize;
-        let idx_b = ((b_sorted.len() - 1) as f64 * q).round() as usize;
-        sum_diff += (a_sorted[idx_a] - b_sorted[idx_b]).abs();
-    }
-
+    let sum_diff: f64 = (0..num_quantiles)
+        .map(|i| {
+            let q = (i as f64 + 0.5) / num_quantiles as f64;
+            let idx_a = ((a_sorted.len() - 1) as f64 * q).round() as usize;
+            let idx_b = ((b_sorted.len() - 1) as f64 * q).round() as usize;
+            (a_sorted[idx_a] - b_sorted[idx_b]).abs()
+        })
+        .sum();
     sum_diff / num_quantiles as f64
 }
 
@@ -424,28 +387,18 @@ pub fn calculate_jsd(p: &[f64], q: &[f64]) -> f64 {
         return 0.0;
     }
     let eps = 1e-9;
-    let mut m = Vec::with_capacity(n);
+    let mut jsd = 0.0;
     for i in 0..n {
         let pi = p.get(i).copied().unwrap_or(0.0);
         let qi = q.get(i).copied().unwrap_or(0.0);
-        m.push(0.5 * (pi + qi));
-    }
-
-    let mut kl_pm = 0.0;
-    let mut kl_qm = 0.0;
-
-    for (i, &mi) in m.iter().enumerate().take(n) {
-        let pi = p.get(i).copied().unwrap_or(0.0);
-        let qi = q.get(i).copied().unwrap_or(0.0);
+        let mi = 0.5 * (pi + qi);
         if pi > eps {
-            kl_pm += pi * (pi / (mi + eps)).ln();
+            jsd += 0.5 * pi * (pi / (mi + eps)).ln();
         }
         if qi > eps {
-            kl_qm += qi * (qi / (mi + eps)).ln();
+            jsd += 0.5 * qi * (qi / (mi + eps)).ln();
         }
     }
-
-    let jsd = 0.5 * kl_pm + 0.5 * kl_qm;
     if jsd.is_nan() || jsd < 0.0 { 0.0 } else { jsd }
 }
 

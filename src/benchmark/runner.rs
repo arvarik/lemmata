@@ -90,21 +90,15 @@ impl BenchmarkRunner {
             }
         }
 
-        let total_elapsed = start_total.elapsed().as_secs_f64();
+        let total_elapsed = start_total.elapsed().as_secs_f64().max(1e-9);
         let total_items = items.len() * iterations;
         let total_questions = total_items * questions.len();
 
-        latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        latencies_ms.sort_by(|a, b| a.total_cmp(b));
 
         let min = *latencies_ms.first().unwrap_or(&0.0);
         let max = *latencies_ms.last().unwrap_or(&0.0);
-        let sum: f64 = latencies_ms.iter().sum();
-        let avg = sum / latencies_ms.len() as f64;
-
-        let p50 = percentile(&latencies_ms, 0.50);
-        let p90 = percentile(&latencies_ms, 0.90);
-        let p95 = percentile(&latencies_ms, 0.95);
-        let p99 = percentile(&latencies_ms, 0.99);
+        let avg = latencies_ms.iter().sum::<f64>() / latencies_ms.len().max(1) as f64;
 
         let report = BenchmarkReport {
             total_items,
@@ -113,10 +107,10 @@ impl BenchmarkRunner {
             throughput_items_per_sec: total_items as f64 / total_elapsed,
             throughput_questions_per_sec: total_questions as f64 / total_elapsed,
             latency_min_ms: min,
-            latency_p50_ms: p50,
-            latency_p90_ms: p90,
-            latency_p95_ms: p95,
-            latency_p99_ms: p99,
+            latency_p50_ms: percentile(&latencies_ms, 0.50),
+            latency_p90_ms: percentile(&latencies_ms, 0.90),
+            latency_p95_ms: percentile(&latencies_ms, 0.95),
+            latency_p99_ms: percentile(&latencies_ms, 0.99),
             latency_max_ms: max,
             latency_avg_ms: avg,
         };
