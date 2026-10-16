@@ -139,7 +139,25 @@ impl ExperimentRunner {
         questions: &BTreeMap<String, Question>,
         temperatures: &[f64],
     ) -> Result<()> {
-        println!("\n🌡️  Running Temperature Calibration Sweep");
+        Self::sweep_temperature_calibration_for_checkpoint(
+            Checkpoint::English,
+            items,
+            questions,
+            temperatures,
+        )
+    }
+
+    /// Sweep over a grid of temperature values for a specific checkpoint to find optimal calibration (lowest ECE).
+    pub fn sweep_temperature_calibration_for_checkpoint(
+        checkpoint: Checkpoint,
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        temperatures: &[f64],
+    ) -> Result<()> {
+        println!(
+            "\n🌡️  Running Temperature Calibration Sweep ({})",
+            checkpoint.repo_id()
+        );
         let mut table = Table::new();
         table.set_header(vec![
             Cell::new("Temperature (T)").fg(Color::Cyan),
@@ -154,7 +172,10 @@ impl ExperimentRunner {
         let mut rows = Vec::with_capacity(temperatures.len());
 
         for &t in temperatures {
-            let cls = LayaClassifier::new(classifier_config_with_t(t));
+            let cls = LayaClassifier::new(
+                super::classifier::ClassifierConfig::with_checkpoint(checkpoint)
+                    .with_temperature(t),
+            );
             let batch_res = cls.classify_batch(items, questions)?;
             let mut conf_sum = 0.0;
             let mut conf_cnt = 0usize;
@@ -228,6 +249,27 @@ impl ExperimentRunner {
         checkpoints: &[Checkpoint],
         top_disagreements: usize,
     ) -> Result<ModelArenaReport> {
+        Self::run_arena_with_options(
+            items,
+            questions,
+            checkpoints,
+            top_disagreements,
+            crate::model::ChunkStrategy::default(),
+            None,
+            0,
+        )
+    }
+
+    /// Head-to-Head Model Arena with configurable chunking strategy, hypothesis template, and bi-encoder shortlisting.
+    pub fn run_arena_with_options(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        checkpoints: &[Checkpoint],
+        top_disagreements: usize,
+        chunk_strategy: crate::model::ChunkStrategy,
+        hypothesis_template: Option<&str>,
+        shortlist_k: usize,
+    ) -> Result<ModelArenaReport> {
         if items.is_empty() {
             bail!("No items provided for Model Arena comparison");
         }
@@ -239,7 +281,12 @@ impl ExperimentRunner {
         let mut raw_entries = Vec::new();
 
         for &ckpt in checkpoints {
-            let cls = LayaClassifier::with_checkpoint(ckpt);
+            let mut cls = LayaClassifier::with_checkpoint(ckpt)
+                .with_chunk_strategy(chunk_strategy)
+                .with_shortlist_k(shortlist_k);
+            if let Some(tpl) = hypothesis_template {
+                cls = cls.with_hypothesis_template(tpl);
+            }
             let t0 = std::time::Instant::now();
             let batch = cls.classify_batch(items, questions)?;
             let avg_lat = (t0.elapsed().as_secs_f64() * 1000.0) / items.len().max(1) as f64;
@@ -668,15 +715,4 @@ pub struct AdversarialReport {
     pub overall_flip_rate: f64,
     pub robustness_score: f64,
     pub perturbations: Vec<AdversarialPerturbationStat>,
-}
-
-fn classifier_config_with_t(t: f64) -> crate::engine::classifier::ClassifierConfig {
-    let mut cfg = crate::engine::classifier::ClassifierConfig {
-        temperature: t,
-        ..Default::default()
-    };
-    for val in cfg.temperature_by_options.values_mut() {
-        *val = t;
-    }
-    cfg
 }
