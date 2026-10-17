@@ -9,13 +9,13 @@ use std::path::PathBuf;
     author
 )]
 pub struct Cli {
-    /// Inference backend. `auto` runs real weights for each checkpoint that has them in models/
+    /// Inference backend. `native` runs real weights and fails when a checkpoint has none
     #[arg(
         long,
         global = true,
         value_enum,
         env = "LEMMATA_BACKEND",
-        default_value_t = Backend::Auto
+        default_value_t = Backend::Native
     )]
     pub backend: Backend,
 

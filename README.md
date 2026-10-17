@@ -35,8 +35,8 @@ lemmata runs every checkpoint's real weights natively with [candle](https://gith
 
 | `--backend` (or `LEMMATA_BACKEND`) | Behavior |
 |---|---|
-| `auto` (default) | Each checkpoint runs natively when lemmata supports it and its weights are in `models/`. Every other checkpoint uses the mock, with one warning on stderr per checkpoint |
-| `native` | Native inference only. Fails for a checkpoint without weights or native support |
+| `auto` | Each checkpoint runs natively when lemmata supports it and its weights are in `models/`. Every other checkpoint uses the mock, with one warning on stderr per checkpoint |
+| `native` (default) | Native inference only. Fails for a checkpoint without weights or native support, and names the `lemmata download` command to run |
 | `mock` | Keyword-rule simulator for tests and demos. It runs no model |
 
 Every mock result has a `mock:` model id, so simulated decisions cannot pass for model output.
