@@ -508,8 +508,7 @@ fn test_positional_classify_auto_explain_and_download_all_e2e() {
 #[test]
 fn test_learn_never_panics_under_real_backends() {
     let bin = env!("CARGO_BIN_EXE_lemma");
-    // `auto` runs real weights where installed (DeBERTa in phase 2) and the labelled mock
-    // elsewhere (EuroBERT in phase 3).
+    // `auto` runs real weights where installed and the labelled mock elsewhere.
     for phase in ["2", "3"] {
         let out = Command::new(bin)
             .env("LEMMA_BACKEND", "auto")
@@ -522,12 +521,18 @@ fn test_learn_never_panics_under_real_backends() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    // `native` cannot run EuroBERT, so learn stops with an error (exit 1), not a panic (exit 101).
+    // `native` either runs every lesson model or stops with an error (exit 1), never a panic (101).
     let out = Command::new(bin)
         .env("LEMMA_BACKEND", "native")
         .args(["learn", "3"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("EuroBERT"));
+    match out.status.code() {
+        Some(0) => {}
+        Some(1) => assert!(String::from_utf8_lossy(&out.stderr).contains("--backend auto")),
+        other => panic!(
+            "learn under native exited with {other:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
 }

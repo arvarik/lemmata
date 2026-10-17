@@ -12,7 +12,6 @@ fn test_head_paradigm_mapping_all_checkpoints() {
         Checkpoint::Multilingual,
         Checkpoint::TypedDecisions,
         Checkpoint::AutoRoute,
-        Checkpoint::Jev,
     ] {
         let p = head_paradigm_for(ckpt);
         assert_eq!(p, HeadParadigm::JointSinglePass);

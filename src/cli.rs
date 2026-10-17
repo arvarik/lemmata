@@ -188,7 +188,7 @@ pub struct ClassifyArgs {
     #[arg(short = 'u', long)]
     pub url: Option<String>,
 
-    /// Path to a JSON schema file defining questions (Jev/Laya format)
+    /// Path to a JSON schema file defining questions (Laya format)
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 

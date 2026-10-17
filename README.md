@@ -25,13 +25,13 @@
 |---|---|---|---|---|---|
 | **`convaiinnovations/laya`** | ModernBERT-large | 421M | 512 tokens | 192 tokens | English classification, guardrails, email triage (~39.5ms) |
 | **`convaiinnovations/laya-multilingual`** | mmBERT-base | 322M | 1024 tokens | 256 tokens | 100+ languages, 2.2x faster forward pass (~32.8ms) |
-| **`convaiinnovations/laya-typed-decisions`** | ModernBERT-large | 421M | 1024 tokens | 256 tokens | Specialized enterprise workflows (0.766 acc, beats Jev teacher) |
+| **`convaiinnovations/laya-typed-decisions`** | ModernBERT-large | 421M | 1024 tokens | 256 tokens | Specialized enterprise workflows (0.766 acc after fine-tuning) |
 
 Latency and accuracy figures above are Convai's own measurements on a Tesla T4, not lemma benchmarks. Convai also reports that the base checkpoints are close to chance on zero-shot typed decisions, and that the shipped checkpoints are over-confident until you recalibrate them on your own data.
 
 ### Inference backends
 
-lemma runs model weights natively on CPU with [candle](https://github.com/huggingface/candle). `tests/native_parity_test.rs` checks the Laya port against the upstream Python code, and the NLI models against `transformers`.
+lemma runs every checkpoint's real weights natively on CPU with [candle](https://github.com/huggingface/candle). On macOS it does the matrix math through Apple's Accelerate framework. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
 
 | `--backend` (or `LEMMA_BACKEND`) | Behavior |
 |---|---|
@@ -41,13 +41,31 @@ lemma runs model weights natively on CPU with [candle](https://github.com/huggin
 
 Every mock result has a `mock:` model id, so simulated decisions cannot pass for model output.
 
-| Native support | Checkpoints |
+| How lemma scores options | Checkpoints |
 |---|---|
 | Laya decision head | `english`, `multilingual`, `typed-decisions` |
-| NLI zero-shot cross-encoder | `modernbert-zeroshot`, `deberta-v3` |
-| Mock only | `eurobert`, `neobert` (no candle implementation), `jev` (hosted model), `modernbert-nli` (no weights of its own) |
+| NLI zero-shot cross-encoder | `modernbert-zeroshot`, `modernbert-nli`, `deberta-v3` |
+| Masked-LM label words | `eurobert`, `neobert` |
 
-NLI checkpoints score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
+**NLI checkpoints** score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. All of a question's hypotheses run as one padded batch. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
+
+**Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions} Options: {labels}.\nAnswer:` with one mask per label token. An option's score is the mean log-probability of its label tokens, minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
+
+Measured on `data/system1_golden_benchmark.jsonl` (24 items, 3 questions each, so 72 questions) with `lemma compare`, on an Apple Silicon laptop CPU with Accelerate. Latency is per item, all 3 questions:
+
+| Checkpoint | Accuracy | Latency per item |
+|---|---|---|
+| `typed-decisions` | 79.2% | 325 ms |
+| `route` | 76.4% | 269 ms |
+| `deberta-v3` | 73.6% | 1204 ms |
+| `english` | 66.7% | 271 ms |
+| `multilingual` | 65.3% | 139 ms |
+| `modernbert-nli` | 59.7% | 615 ms |
+| `neobert` | 56.9% | 230 ms |
+| `modernbert-zeroshot` | 54.2% | 571 ms |
+| `eurobert` | 41.7% | 185 ms |
+
+These are zero-shot results on a small set. Calibrate on your own labelled data with `lemma calibrate`.
 
 `route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not send long text to `modernbert-zeroshot`, because that fine-tune was trained at 512 tokens.
 

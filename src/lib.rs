@@ -14,7 +14,7 @@ use datasource::{DataItem, DataSource, DirectorySource, FileSource, MemorySource
 use model::{Question, QuestionType};
 
 /// Load question definitions from a JSON file.
-/// Format follows Laya / Jev questions dict:
+/// Format follows the Laya questions dict:
 /// {
 ///   "department": { "type": "choice", "instructions": "...", "criteria": { ... } },
 ///   "urgency": { "type": "score", "instructions": "...", "criteria": [ ... ] },

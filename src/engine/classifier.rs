@@ -104,7 +104,7 @@ impl Default for ClassifierConfig {
     }
 }
 
-/// Jev/Laya normalized negentropy confidence: `1 - H(p) / ln(k)`.
+/// Laya normalized negentropy confidence: `1 - H(p) / ln(k)`.
 pub fn confidence_from_probs(probs: &[f64]) -> f64 {
     let k = probs.len();
     if k < 2 {
@@ -1827,7 +1827,6 @@ impl LayaClassifier {
                     score * 0.95 + ((opt_idx as f64 * 0.08) % 0.15)
                 }
             }
-            Checkpoint::Jev => score * 0.91 + ((opt_idx as f64 * 0.07) % 0.13),
             Checkpoint::ModernBertNli => {
                 if is_non_latin {
                     score * 0.24
