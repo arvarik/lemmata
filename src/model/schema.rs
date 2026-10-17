@@ -13,7 +13,7 @@ pub enum QuestionType {
     Noul,
 }
 
-/// A typed question schema definition conforming to Laya / Jev request specification.
+/// A typed question schema definition conforming to the Laya request specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
     #[serde(rename = "type")]
@@ -99,24 +99,38 @@ impl Question {
                 }
             }
             QuestionType::Noul => {
-                if let Some(serde_json::Value::Object(map)) = &self.criteria {
-                    let f_desc = map
-                        .get("false")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("no, the statement does not hold");
-                    let t_desc = map
-                        .get("true")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("yes, the statement holds");
-                    vec![format!("false: {f_desc}"), format!("true: {t_desc}")]
-                } else {
-                    vec![
-                        "false: no, the statement does not hold".into(),
-                        "true: yes, the statement holds".into(),
-                    ]
-                }
+                let (f_desc, t_desc) = self.noul_descriptions().unwrap_or_default();
+                let or =
+                    |d: String, default: &str| if d.is_empty() { default.to_string() } else { d };
+                vec![
+                    format!("false: {}", or(f_desc, "no, the statement does not hold")),
+                    format!("true: {}", or(t_desc, "yes, the statement holds")),
+                ]
             }
         }
+    }
+
+    /// The `noul` false and true descriptions the schema gives, from either
+    /// `{"false": "...", "true": "..."}` or `["false: ...", "true: ..."]`. `None` when it gives neither.
+    pub fn noul_descriptions(&self) -> Option<(String, String)> {
+        let (mut f, mut t) = (String::new(), String::new());
+        match &self.criteria {
+            Some(serde_json::Value::Object(map)) => {
+                let get = |k: &str| map.get(k).and_then(|v| v.as_str()).unwrap_or("").trim();
+                (f, t) = (get("false").to_string(), get("true").to_string());
+            }
+            Some(serde_json::Value::Array(arr)) => {
+                for (key, desc) in arr.iter().filter_map(|v| v.as_str()?.split_once(':')) {
+                    match key.trim().to_lowercase().as_str() {
+                        "false" => f = desc.trim().to_string(),
+                        "true" => t = desc.trim().to_string(),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        (!f.is_empty() || !t.is_empty()).then_some((f, t))
     }
 
     /// Validate that the question has sufficient options and fits within the Laya head token budget.
@@ -629,4 +643,36 @@ pub fn email_questions() -> BTreeMap<String, Question> {
             ),
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noul_descriptions_read_object_and_array_forms() {
+        let q = |criteria| Question {
+            qtype: QuestionType::Noul,
+            instructions: "Escalate?".into(),
+            criteria,
+            hypothesis_template: None,
+        };
+        let object = q(Some(
+            serde_json::json!({"false": "routine", "true": "urgent"}),
+        ));
+        let array = q(Some(serde_json::json!(["false: routine", "true: urgent"])));
+        for question in [object, array] {
+            assert_eq!(
+                question.noul_descriptions(),
+                Some(("routine".into(), "urgent".into()))
+            );
+            assert_eq!(
+                question.render_options(),
+                ["false: routine", "true: urgent"]
+            );
+        }
+        let bare = q(None);
+        assert_eq!(bare.noul_descriptions(), None);
+        assert_eq!(bare.render_options()[1], "true: yes, the statement holds");
+    }
 }

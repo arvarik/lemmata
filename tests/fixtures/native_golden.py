@@ -67,7 +67,7 @@ PAIRS = [
     ("statement", "Production database crashed with OOM after the deploy.", "The customer asks for money back."),
     ("long_premise", LONG, "This text is about billing."),
 ]
-for name in ["modernbert-zeroshot", "deberta-v3"]:
+for name in ["modernbert-zeroshot", "modernbert-nli", "deberta-v3"]:
     path = os.path.join(models_dir, name)
     tok = AutoTokenizer.from_pretrained(path)
     model = AutoModelForSequenceClassification.from_pretrained(path, dtype=torch.float32).eval()

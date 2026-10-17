@@ -8,7 +8,7 @@ use super::schema::Question;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadParadigm {
-    /// Laya (`mask_scorer` + `act_head`), Jev, and GLiClass-style single-pass token scoring.
+    /// Laya (`mask_scorer` + `act_head`) and GLiClass-style single-pass token scoring.
     JointSinglePass,
     /// DeBERTa-v3 / ModernBERT-zeroshot pairwise NLI cross-encoder (`entailment` vs `contradiction`).
     PairwiseNliCrossEncoder,
@@ -60,8 +60,7 @@ pub fn head_paradigm_for(ckpt: Checkpoint) -> HeadParadigm {
         Checkpoint::English
         | Checkpoint::Multilingual
         | Checkpoint::TypedDecisions
-        | Checkpoint::AutoRoute
-        | Checkpoint::Jev => HeadParadigm::JointSinglePass,
+        | Checkpoint::AutoRoute => HeadParadigm::JointSinglePass,
         Checkpoint::ModernBertZeroShot
         | Checkpoint::DebertaV3ZeroShot
         | Checkpoint::ModernBertNli => HeadParadigm::PairwiseNliCrossEncoder,

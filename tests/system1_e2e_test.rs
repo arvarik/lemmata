@@ -60,7 +60,6 @@ fn test_decision_model_trait_and_all_system1_checkpoints() {
         Box::new(LayaClassifier::with_checkpoint(Checkpoint::Multilingual)),
         Box::new(LayaClassifier::with_checkpoint(Checkpoint::TypedDecisions)),
         Box::new(LayaClassifier::with_checkpoint(Checkpoint::AutoRoute)),
-        Box::new(LayaClassifier::with_checkpoint(Checkpoint::Jev)),
         Box::new(LayaClassifier::with_checkpoint(Checkpoint::ModernBertNli)),
         Box::new(CustomMockSystem1Model),
     ];
@@ -82,7 +81,7 @@ fn test_decision_model_trait_and_all_system1_checkpoints() {
         Checkpoint::from_str("route").unwrap(),
         Checkpoint::AutoRoute
     );
-    assert_eq!(Checkpoint::from_str("jev").unwrap(), Checkpoint::Jev);
+    assert!(Checkpoint::from_str("jev").is_err());
     assert_eq!(
         Checkpoint::from_str("modernbert-nli").unwrap(),
         Checkpoint::ModernBertNli

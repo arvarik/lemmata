@@ -43,10 +43,6 @@ pub enum Checkpoint {
     #[serde(rename = "chandar-lab/NeoBERT")]
     NeoBert,
 
-    /// TypeSafe AI Jev 1.13.0 System 1 decision model profile for benchmarking/comparison.
-    #[serde(rename = "typesafe/jev-1.13")]
-    Jev,
-
     /// Zero-shot NLI encoder baseline for System 1 comparison.
     #[serde(rename = "tasksource/ModernBERT-large-nli")]
     ModernBertNli,
@@ -63,7 +59,6 @@ impl Checkpoint {
             Self::DebertaV3ZeroShot => "MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
             Self::EuroBert => "EuroBERT/EuroBERT-210m",
             Self::NeoBert => "chandar-lab/NeoBERT",
-            Self::Jev => "typesafe/jev-1.13",
             Self::ModernBertNli => "tasksource/ModernBERT-large-nli",
         }
     }
@@ -78,14 +73,13 @@ impl Checkpoint {
             Self::DebertaV3ZeroShot => "deberta-v3-zs",
             Self::EuroBert => "eurobert-210m",
             Self::NeoBert => "neobert-250m",
-            Self::Jev => "jev-1.13",
             Self::ModernBertNli => "modernbert-nli",
         }
     }
 
     pub fn backbone(&self) -> &'static str {
         match self {
-            Self::English | Self::TypedDecisions | Self::Jev => "ModernBERT-large",
+            Self::English | Self::TypedDecisions => "ModernBERT-large",
             Self::Multilingual => "mmBERT-base",
             Self::AutoRoute => "ModernBERT-large + mmBERT-base",
             Self::ModernBertZeroShot | Self::ModernBertNli => "ModernBERT-large (NLI)",
@@ -97,7 +91,7 @@ impl Checkpoint {
 
     pub fn param_count(&self) -> &'static str {
         match self {
-            Self::English | Self::TypedDecisions | Self::Jev => "421M",
+            Self::English | Self::TypedDecisions => "421M",
             Self::Multilingual => "322M",
             Self::AutoRoute => "421M/322M",
             Self::ModernBertZeroShot | Self::ModernBertNli => "395M",
@@ -109,7 +103,7 @@ impl Checkpoint {
 
     pub fn context_window(&self) -> usize {
         match self {
-            Self::English | Self::Jev | Self::ModernBertNli | Self::DebertaV3ZeroShot => 512,
+            Self::English | Self::ModernBertNli | Self::DebertaV3ZeroShot => 512,
             Self::Multilingual | Self::TypedDecisions | Self::AutoRoute => 1024,
             Self::NeoBert => 4096,
             Self::ModernBertZeroShot | Self::EuroBert => 8192,
@@ -118,7 +112,7 @@ impl Checkpoint {
 
     pub fn head_budget(&self) -> usize {
         match self {
-            Self::English | Self::Jev => 192,
+            Self::English => 192,
             Self::Multilingual
             | Self::TypedDecisions
             | Self::AutoRoute
@@ -141,12 +135,11 @@ impl Checkpoint {
     /// Canonical local directory where this checkpoint's weights & configs reside.
     pub fn local_dir(&self) -> std::path::PathBuf {
         match self {
-            Self::English | Self::AutoRoute | Self::Jev => std::path::PathBuf::from("models/laya"),
+            Self::English | Self::AutoRoute => std::path::PathBuf::from("models/laya"),
             Self::Multilingual => std::path::PathBuf::from("models/laya/multilingual"),
             Self::TypedDecisions => std::path::PathBuf::from("models/laya/typed-decisions"),
-            Self::ModernBertZeroShot | Self::ModernBertNli => {
-                std::path::PathBuf::from("models/modernbert-zeroshot")
-            }
+            Self::ModernBertZeroShot => std::path::PathBuf::from("models/modernbert-zeroshot"),
+            Self::ModernBertNli => std::path::PathBuf::from("models/modernbert-nli"),
             Self::DebertaV3ZeroShot => std::path::PathBuf::from("models/deberta-v3"),
             Self::EuroBert => std::path::PathBuf::from("models/eurobert"),
             Self::NeoBert => std::path::PathBuf::from("models/neobert"),
@@ -161,13 +154,13 @@ impl Checkpoint {
             }
             Self::Multilingual => [1.0, 1.0, 1.0],
             Self::TypedDecisions => [1.0148024559020996, 1.0374259948730469, 1.0575125217437744],
-            // No fitted temperatures exist for these NLI fine-tunes. T = 1 matches the
-            // transformers zero-shot pipeline.
-            Self::ModernBertZeroShot | Self::DebertaV3ZeroShot => [1.0, 1.0, 1.0],
-            Self::EuroBert => [1.18, 1.15, 1.30],
-            Self::NeoBert => [1.22, 1.18, 1.35],
-            Self::Jev => [1.45, 1.35, 1.65],
-            Self::ModernBertNli => [1.85, 1.60, 2.10],
+            // No fitted temperatures exist for the NLI and MLM baselines. T = 1 matches the
+            // transformers zero-shot pipeline and leaves MLM log-probabilities unscaled.
+            Self::ModernBertZeroShot
+            | Self::DebertaV3ZeroShot
+            | Self::ModernBertNli
+            | Self::EuroBert
+            | Self::NeoBert => [1.0, 1.0, 1.0],
         }
     }
 
@@ -188,14 +181,6 @@ impl Checkpoint {
             | Self::DebertaV3ZeroShot
             | Self::EuroBert
             | Self::NeoBert => HashMap::new(),
-            Self::Jev => HashMap::from([
-                ("choice:2".into(), 1.55),
-                ("choice:3-5".into(), 1.45),
-                ("choice:6-10".into(), 1.10),
-                ("choice:11+".into(), 0.25),
-                ("score:3-5".into(), 1.35),
-                ("noul:2".into(), 1.65),
-            ]),
         }
     }
 
@@ -263,7 +248,6 @@ impl Checkpoint {
             Self::DebertaV3ZeroShot,
             Self::EuroBert,
             Self::NeoBert,
-            Self::Jev,
             Self::ModernBertNli,
         ]
     }
@@ -316,12 +300,11 @@ impl std::str::FromStr for Checkpoint {
             | "moritzlaurer/deberta-v3-large-zeroshot-v2.0" => Ok(Self::DebertaV3ZeroShot),
             "eurobert" | "eurobert-210m" | "eurobert/eurobert-210m" => Ok(Self::EuroBert),
             "neobert" | "neobert-250m" | "chandar-lab/neobert" => Ok(Self::NeoBert),
-            "jev" | "jev-1.13" | "typesafe/jev" | "typesafe/jev-1.13" => Ok(Self::Jev),
             "modernbert-nli" | "nli" | "deberta-nli" | "tasksource/modernbert-large-nli" => {
                 Ok(Self::ModernBertNli)
             }
             other => Err(format!(
-                "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions, route, modernbert-zeroshot, deberta-v3, eurobert, neobert, jev, modernbert-nli",
+                "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions, route, modernbert-zeroshot, deberta-v3, eurobert, neobert, modernbert-nli",
                 other
             )),
         }

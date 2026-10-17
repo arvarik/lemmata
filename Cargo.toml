@@ -28,6 +28,12 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-
 sha2 = "0.11.1"
 hmac = "0.13.0"
 
+# Apple's Accelerate framework runs candle's matrix multiplies on macOS (Intel and Apple Silicon).
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11.0", features = ["accelerate"] }
+candle-nn = { version = "0.11.0", features = ["accelerate"] }
+candle-transformers = { version = "0.11.0", features = ["accelerate"] }
+
 [lib]
 name = "lemma"
 path = "src/lib.rs"
