@@ -502,22 +502,22 @@ The bias helps most where a model prefers some label words (NeoBERT on AG News: 
 `--fit-label-bias` fits one bias per choice label that maximizes the likelihood of the labelled answers (vector scaling with a bias term, Guo et al. 2017), and exports it as `cost_weights`. Zero-shot models favor some label words regardless of the text, and the bias removes that prior. Temperatures do not change which option wins, but the bias does.
 
 ### 22b. Supervised Linear Probes (`lemma probe fit`)
-With labelled data, a probe learns one choice question directly. It fits a softmax regression on the checkpoint's mean-pooled final hidden states (standardized per dimension), and picks the L2 strength on a held-out fifth of the training data. `--probe` then replaces zero-shot scoring for that question in `classify` and `test`. Probes need real weights, and they lift the base encoders the most (EuroBERT on AG News: 65.8% zero-shot, 86.3% with a probe fitted on 500 items):
+With labelled data, a probe learns one choice question directly. It fits a softmax regression on the checkpoint's mean-pooled final hidden states (standardized per dimension), and picks the L2 strength on a held-out fifth of the training data. `--probe` then replaces zero-shot scoring for that question in `classify` and `test`. Probes need real weights. They lift the base encoders the most (NeoBERT on Banking77: 42.8% zero-shot, 71.8% with a probe fitted on 500 items):
 
 Accuracy (%) as zero-shot / `--fit-label-bias` / probe, each fitted on the same 500 training items (600 for multilingual sentiment) and tested on the sets of the accuracy table above. Bold marks the best of the three:
 
 | Checkpoint | AG News | SST-2 | Banking77 | Multilingual sentiment |
 |---|---|---|---|---|
-| `english` | 92.3 / **92.4** / 83.8 | 88.9 / **91.3** / 81.5 | 58.3 / **60.1** / 46.4 | 47.6 / **51.6** / 41.7 |
-| `multilingual` | **92.6** / 92.6 / 86.3 | 82.2 / **84.3** / 80.8 | 54.0 / **55.2** / 49.9 | 49.9 / **55.0** / 54.6 |
-| `typed-decisions` | 92.5 / **93.0** / 85.6 | 88.9 / **92.1** / 80.4 | 57.1 / **60.2** / 48.4 | 48.9 / **49.3** / 42.0 |
-| `modernbert-zeroshot` | 87.4 / **88.0** / 87.1 | 94.7 / **95.0** / 86.5 | 70.5 / **73.6** / 55.9 | 47.6 / 49.9 / **51.3** |
-| `modernbert-nli` | 89.8 / **89.9** / 82.7 | 96.0 / **96.2** / 95.9 | 71.0 / **74.3** / 53.7 | 48.4 / **55.1** / 53.4 |
-| `deberta-v3` | 89.3 / **90.1** / 71.1 | 95.2 / **95.3** / 76.4 | 67.8 / **72.5** / 32.2 | 61.2 / **61.3** / 54.7 |
-| `eurobert` | 65.8 / 71.3 / **86.3** | **78.7** / 78.7 / 77.1 | 34.3 / 39.8 / **51.7** | 46.4 / 41.9 / **51.9** |
-| `neobert` | 62.1 / 76.5 / **87.7** | 78.9 / **85.3** / 79.4 | 42.8 / 47.7 / **64.7** | 37.9 / 40.9 / **45.0** |
+| `english` | 92.3 / **92.4** / 91.5 | 88.9 / **91.3** / 91.3 | 58.3 / 60.1 / **67.5** | 47.6 / **51.6** / 46.4 |
+| `multilingual` | **92.6** / 92.6 / 92.4 | 82.2 / 84.3 / **85.2** | 54.0 / 55.2 / **60.9** | 49.9 / 55.0 / **59.0** |
+| `typed-decisions` | 92.5 / **93.0** / 92.4 | 88.9 / **92.1** / 91.9 | 57.1 / **60.2** / 60.0 | 48.9 / **49.3** / 46.2 |
+| `modernbert-zeroshot` | 87.4 / 88.0 / **88.2** | 94.7 / **95.0** / 94.8 | 70.5 / 73.6 / **79.7** | 47.6 / 49.9 / **50.7** |
+| `modernbert-nli` | 89.8 / **89.9** / 86.9 | 96.0 / 96.2 / **96.4** | 71.0 / 74.3 / **78.4** | 48.4 / 55.1 / **59.8** |
+| `deberta-v3` | 89.3 / **90.1** / 89.8 | 95.2 / **95.3** / 95.0 | 67.8 / **72.5** / 70.8 | 61.2 / 61.3 / **61.7** |
+| `eurobert` | 65.8 / 71.3 / **86.3** | 78.7 / 78.7 / **81.0** | 34.3 / 39.8 / **61.4** | 46.4 / 41.9 / **54.0** |
+| `neobert` | 62.1 / 76.5 / **88.5** | 78.9 / 85.3 / **87.5** | 42.8 / 47.7 / **71.8** | 37.9 / 40.9 / **44.8** |
 
-Probes suit the base encoders (EuroBERT, NeoBERT), whose embeddings are general. The fine-tuned checkpoints (Laya, NLI) do better zero-shot or with `--fit-label-bias`, because their embeddings serve their own scoring heads. `lemma probe fit` reports the probe's and the zero-shot accuracy on the same held-out fifth, and warns when the probe loses.
+`lemma probe fit` fits two probes and keeps the one with the better held-out accuracy. A **plain** probe replaces zero-shot scoring, which suits the base encoders (EuroBERT, NeoBERT), whose embeddings are general. A **residual** probe adds a learned correction to the checkpoint's zero-shot logits, which suits the fine-tuned checkpoints (Laya, NLI), whose embeddings serve their own scoring heads. With a large L2 the residual probe reduces to zero-shot plus a per-label bias. Across these 32 cells the probe was best in 19, label bias in 12, and zero-shot in 1. `probe fit` reports the probe's and the zero-shot accuracy on the same held-out fifth, and warns when the probe loses.
 
 ```bash
 # Fit on labelled training data (not on the data you test on)
