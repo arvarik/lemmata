@@ -47,13 +47,21 @@ Every mock result has a `mock:` model id, so simulated decisions cannot pass for
 | `cpu` | The CPU |
 | `metal` | The Metal GPU. Fails when none is present |
 
-On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Median latency for one item with 3 questions (`lemma bench`, Apple M5 Pro):
+On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Latency for one item with 3 questions, and the peak memory of the process (`lemma --device <d> bench -m <ckpt> --iterations 5 --warmup 2` on `data/customer_support.jsonl`, Apple M5 Pro, peak memory from `/usr/bin/time -l`):
 
-| Checkpoint | CPU | Metal |
-|---|---|---|
-| `english` | 354 ms | 94 ms |
-| `deberta-v3` | 1299 ms | 231 ms |
-| `eurobert` | 125 ms | 33 ms |
+| Checkpoint | CPU p50 / p95 | CPU peak memory | Metal p50 / p95 | Metal peak memory |
+|---|---|---|---|---|
+| `english` | 306 / 332 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `multilingual` | 126 / 148 ms | 2.7 GB | 44 / 51 ms | 1.7 GB |
+| `typed-decisions` | 309 / 335 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `route` | 310 / 335 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `modernbert-zeroshot` | 501 / 554 ms | 2.4 GB | 140 / 152 ms | 1.5 GB |
+| `modernbert-nli` | 511 / 558 ms | 3.0 GB | 140 / 152 ms | 3.0 GB |
+| `deberta-v3` | 1286 / 1384 ms | 2.9 GB | 230 / 243 ms | 1.8 GB |
+| `eurobert` | 112 / 118 ms | 2.6 GB | 31 / 32 ms | 2.6 GB |
+| `neobert` | 186 / 189 ms | 1.9 GB | 44 / 45 ms | 1.9 GB |
+
+The robustness, consistency, and probe tests pass on both devices (`LEMMA_DEVICE=metal cargo test --release --test native_robustness_test --test native_consistency_test --test native_probe_test`).
 
 | How lemma scores options | Checkpoints |
 |---|---|
