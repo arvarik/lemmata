@@ -12,8 +12,26 @@ permissions:
   attestations: write
 
 jobs:
+  verify-version:
+    name: Check Tag Matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Compare the tag with the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match the Cargo.toml version $version."
+            exit 1
+          fi
+
   create-release:
     name: Create GitHub Release
+    needs: [verify-version]
     runs-on: ubuntu-latest
     environment:
       name: release
