@@ -90,7 +90,7 @@ fn test_render_mlm_verbalizer_prompt() {
         render_mlm_verbalizer_prompt("Please send a copy of our April invoice receipt.", &q);
     assert!(plain_prompt.contains("[MASK]"));
     assert!(plain_prompt.contains("The issue is [MASK]."));
-    assert!(plain_prompt.contains("billing, security, technical"));
+    assert!(plain_prompt.contains("billing, technical, security"));
 
     let contrast_prompt = render_mlm_verbalizer_prompt(
         "We were NOT charged twice; instead, our production database is crashing!",

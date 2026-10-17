@@ -69,22 +69,22 @@ Zero-shot accuracy, measured with `lemma test`. AG News, SST-2, and Banking77 ar
 
 | Checkpoint | AG News (4 topics) | SST-2 (sentiment) | Banking77 (77 intents) | Golden | Support |
 |---|---|---|---|---|---|
-| `english` | 95.0% | 86.5% | 36.0% | 66.7% | 77.8% |
-| `multilingual` | 93.5% | 79.0% | 32.0% | 65.3% | 72.2% |
-| `typed-decisions` | 95.5% | 86.0% | 37.0% | 79.2% | 88.9% |
-| `route` | 88.0% | 93.0% | 73.0% | 76.4% | 88.9% |
-| `modernbert-zeroshot` | 83.5% | 95.5% | 70.5% | 54.2% | 83.3% |
+| `english` | 95.0% | 86.5% | 36.0% | 62.5% | 83.3% |
+| `multilingual` | 93.5% | 79.0% | 32.0% | 68.1% | 66.7% |
+| `typed-decisions` | 95.5% | 86.0% | 37.0% | 79.2% | 94.4% |
+| `route` | 88.0% | 93.0% | 73.0% | 76.4% | 94.4% |
+| `modernbert-zeroshot` | 83.5% | 95.5% | 70.5% | 52.8% | 83.3% |
 | `modernbert-nli` | 88.0% | 96.5% | 73.0% | 59.7% | 77.8% |
-| `deberta-v3` | 88.0% | 93.0% | 68.5% | 73.6% | 88.9% |
-| `eurobert` | 69.5% | 78.5% | 34.5% | 52.8% | 50.0% |
-| `neobert` | 62.5% | 77.5% | 44.5% | 66.7% | 50.0% |
+| `deberta-v3` | 88.0% | 93.0% | 68.5% | 73.6% | 83.3% |
+| `eurobert` | 69.5% | 78.5% | 34.5% | 52.8% | 55.6% |
+| `neobert` | 62.5% | 77.5% | 44.5% | 66.7% | 44.4% |
 
 What the table shows:
 - Laya leads on topic classification and on the typed-decision benchmarks. Convai lists topic classification as an in-task family for Laya.
 - The NLI models lead on sentiment and on many labels. Laya drops to 32-37% at 77 labels, which matches Convai's own Banking77 result (0.425).
 - EuroBERT and NeoBERT are pretrained encoders without a classifier, so label-word scoring is their ceiling.
 
-For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
+Choice options keep the order the schema lists them in, as Laya was trained. For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
 
 `route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy table below).
 
