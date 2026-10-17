@@ -82,6 +82,11 @@ fn native_inference_matches_python_reference() {
             .score_batch(&reqs)
             .unwrap();
         for (scored, case) in batched.iter().zip(cases) {
+            // 40 long options overflow the head budget, so lemma runs its tournament there instead
+            // of upstream's even shrink. `option_logits` above still checks the upstream behavior.
+            if case["name"] == "many_options" {
+                continue;
+            }
             let expected: Vec<f64> = serde_json::from_value(case["logits"].clone()).unwrap();
             for (got, want) in scored.logits.iter().zip(&expected) {
                 max_diff = max_diff.max((got - want).abs());

@@ -376,7 +376,9 @@ impl LayaClassifier {
                 .map(|o| estimate_tokens(o))
                 .sum::<usize>();
 
-            if est_option_tokens > head_budget {
+            // Only Laya has a head budget. NLI and masked-LM models score each option on its own.
+            let laya = Checkpoint::laya_checkpoints().contains(&active_ckpt);
+            if laya && est_option_tokens > head_budget {
                 let warn_set = WARNED_HEAD_BUDGET.get_or_init(|| Mutex::new(HashSet::new()));
                 if let Ok(mut guard) = warn_set.lock()
                     && guard.insert(format!(
@@ -387,7 +389,7 @@ impl LayaClassifier {
                     ))
                 {
                     eprintln!(
-                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed head budget ({} tokens). High cardinality may degrade accuracy.",
+                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed the Laya head budget ({} tokens). lemma scores them in rounds, which is slower. `route` sends questions with more than 20 options to an NLI model.",
                         qid, est_option_tokens, head_budget
                     );
                 }
