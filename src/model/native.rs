@@ -227,6 +227,16 @@ pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     Ok(model)
 }
 
+/// Drop every cached model. Callers that use one checkpoint at a time call this between
+/// checkpoints, so memory holds one model instead of all of them.
+pub fn release_models() {
+    if let Some(models) = MODELS.get()
+        && let Ok(mut models) = models.lock()
+    {
+        models.clear();
+    }
+}
+
 /// One scoring call: a state text, a question, and its rendered options.
 pub struct ScoreRequest<'a> {
     pub state: &'a str,

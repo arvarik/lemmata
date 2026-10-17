@@ -296,6 +296,8 @@ impl ExperimentRunner {
             let batch = cls.classify_batch(items, questions)?;
             let avg_lat = (t0.elapsed().as_secs_f64() * 1000.0) / items.len().max(1) as f64;
             let eval_metrics = Evaluator::new(cls).evaluate(items, questions).ok();
+            // The arena runs one checkpoint at a time. Keeping all nine models loaded took 14.6 GB.
+            crate::model::native::release_models();
 
             let mut preds = Vec::new();
             for (item, (_, res)) in items.iter().zip(batch.iter()) {
