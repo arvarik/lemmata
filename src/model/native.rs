@@ -781,8 +781,19 @@ impl NliModel {
     /// not-entailment, so a sigmoid gives the pipeline's per-label probability.
     fn score(&self, req: &ScoreRequest) -> Result<Scored> {
         let q = req.question;
-        let hypotheses: Vec<String> = if q.qtype == QuestionType::Noul {
+        // A `noul` question with false/true descriptions scores them as two competing hypotheses,
+        // like a choice. Without descriptions, its statement is the one hypothesis.
+        let noul_pair = q.qtype == QuestionType::Noul && q.noul_descriptions().is_some();
+        let hypotheses: Vec<String> = if q.qtype == QuestionType::Noul && !noul_pair {
             vec![q.instructions.clone()]
+        } else if noul_pair {
+            req.options
+                .iter()
+                .map(|o| {
+                    let desc = o.split_once(':').map_or(o.as_str(), |(_, d)| d).trim();
+                    format!("{}.", desc.trim_end_matches('.'))
+                })
+                .collect()
         } else {
             req.options
                 .iter()
@@ -805,7 +816,7 @@ impl NliModel {
             let mut scores = Vec::with_capacity(req.options.len());
             for z in self.forward_batch(&pairs)? {
                 let (ent, not) = (z[self.entail], z[self.not_entail]);
-                if q.qtype == QuestionType::Noul {
+                if q.qtype == QuestionType::Noul && !noul_pair {
                     scores.extend([not, ent]);
                 } else if req.multi_label {
                     scores.push(ent - not);
@@ -918,16 +929,7 @@ impl MlmModel {
         }
         options
             .iter()
-            .map(|o| {
-                let label = render(q, o, Some("{label}"));
-                let desc = render(q, o, Some("{description}"));
-                let described = desc != label && desc != q.instructions.trim();
-                if q.qtype == QuestionType::Score && described {
-                    desc
-                } else {
-                    label
-                }
-            })
+            .map(|o| level_description(q, o).unwrap_or_else(|| render(q, o, Some("{label}"))))
             .collect()
     }
 
@@ -983,11 +985,11 @@ impl MlmModel {
     fn score(&self, req: &ScoreRequest) -> Result<Scored> {
         let q = req.question;
         let words = Self::label_words(q, req.options);
-        let question = if q.qtype == QuestionType::Noul {
-            format!(
-                "\nStatement: {}\nIs the statement true? Answer:",
-                q.instructions.trim()
-            )
+        let ins = q.instructions.trim();
+        let question = if q.qtype == QuestionType::Noul && ins.ends_with('?') {
+            format!("\nQuestion: {ins}\nAnswer:")
+        } else if q.qtype == QuestionType::Noul {
+            format!("\nStatement: {ins}\nIs the statement true? Answer:")
         } else {
             format!(
                 "\nQuestion: {} Options: {}.\nAnswer:",
@@ -1049,12 +1051,29 @@ fn log_softmax(row: &[f32]) -> Vec<f64> {
     row.iter().map(|&z| z as f64 - lse).collect()
 }
 
+/// A score level's own description, without the "level N:" and "N:" prefixes that schemas add.
+fn level_description(q: &Question, option: &str) -> Option<String> {
+    if q.qtype != QuestionType::Score {
+        return None;
+    }
+    let desc = option.split_once(':')?.1.trim();
+    let desc = match desc.split_once(':') {
+        Some((n, rest)) if n.trim().chars().all(|c| c.is_ascii_digit()) => rest.trim(),
+        _ => desc,
+    };
+    (!desc.is_empty()).then(|| desc.trim_end_matches('.').to_string())
+}
+
 /// The question's or the caller's template when one is set. Otherwise "This text is about
-/// {label}.", with the option's description in parentheses when it has one.
+/// {label}.", with the option's description in parentheses when it has one. A score level is
+/// "This text is about {description}.".
 fn hypothesis(q: &Question, option: &str, template: Option<&str>) -> String {
     use super::render_nli_hypothesis as render;
     if template.is_some() || q.hypothesis_template.is_some() {
         return render(q, option, template);
+    }
+    if let Some(desc) = level_description(q, option) {
+        return format!("This text is about {desc}.");
     }
     let label = render(q, option, Some("{label}"));
     let desc = render(q, option, Some("{description}"));

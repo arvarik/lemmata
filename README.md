@@ -55,15 +55,15 @@ Measured on `data/system1_golden_benchmark.jsonl` (24 items, 3 questions each, s
 
 | Checkpoint | Accuracy | Latency per item |
 |---|---|---|
-| `typed-decisions` | 73.6% | 279 ms |
-| `route` | 66.7% | 250 ms |
-| `deberta-v3` | 63.9% | 1138 ms |
-| `english` | 62.5% | 250 ms |
-| `multilingual` | 59.7% | 123 ms |
-| `neobert` | 58.3% | 206 ms |
-| `modernbert-nli` | 51.4% | 574 ms |
-| `modernbert-zeroshot` | 47.2% | 553 ms |
-| `eurobert` | 43.1% | 158 ms |
+| `typed-decisions` | 79.2% | 325 ms |
+| `route` | 76.4% | 269 ms |
+| `deberta-v3` | 73.6% | 1204 ms |
+| `english` | 66.7% | 271 ms |
+| `multilingual` | 65.3% | 139 ms |
+| `modernbert-nli` | 59.7% | 615 ms |
+| `neobert` | 56.9% | 230 ms |
+| `modernbert-zeroshot` | 54.2% | 571 ms |
+| `eurobert` | 41.7% | 185 ms |
 
 These are zero-shot results on a small set. Calibrate on your own labelled data with `lemma calibrate`.
 
