@@ -2,7 +2,7 @@
 
 Laya cases come from the upstream code that ships with the checkpoint. NLI cases
 come from transformers' AutoModelForSequenceClassification. The Rust parity test
-(tests/native_parity_test.rs) compares lemma's native inference with these token
+(tests/native_parity_test.rs) compares lemmata's native inference with these token
 IDs and raw logits.
 
 Usage (needs torch, transformers, safetensors, numpy):

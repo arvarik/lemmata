@@ -240,7 +240,7 @@ impl<'a> DriftEngine<'a> {
 
     pub fn print_report(report: &DriftReport) {
         println!(
-            "\n📊 Lemma Distribution Drift & Concept Shift Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nReference Baseline: {} samples | Live Production: {} samples\nConfigured Thresholds: PSI >= {:.2} (Critical), W1 >= {:.2} (Critical)\n",
+            "\n📊 Lemmata Distribution Drift & Concept Shift Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nReference Baseline: {} samples | Live Production: {} samples\nConfigured Thresholds: PSI >= {:.2} (Critical), W1 >= {:.2} (Critical)\n",
             report.baseline_count,
             report.current_count,
             report.psi_threshold,

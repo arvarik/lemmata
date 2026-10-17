@@ -58,7 +58,7 @@ pub enum StreamSourceKind {
 impl StreamSourceKind {
     /// Parses a URI into a structured `StreamSourceKind`.
     /// Examples:
-    /// - `kafka://localhost:9092/inbound_tickets?group_id=lemma_workers&file=data/customer_support.jsonl`
+    /// - `kafka://localhost:9092/inbound_tickets?group_id=lemmata_workers&file=data/customer_support.jsonl`
     /// - `s3://analytics-bucket/lakehouse/tickets.jsonl`
     /// - `lakehouse://data/banking_tickets.jsonl?columns=id,body,target`
     /// - `stdin` or `-`
@@ -79,7 +79,7 @@ impl StreamSourceKind {
             let topic_parts: Vec<&str> = topic_and_query.splitn(2, '?').collect();
             let topic = topic_parts[0].to_string();
 
-            let mut group_id = "lemma_consumer_group".to_string();
+            let mut group_id = "lemmata_consumer_group".to_string();
             let mut payload_path = None;
 
             if let Some(query) = topic_parts.get(1) {
@@ -456,7 +456,7 @@ impl StreamSink {
     /// Constructs a StreamSink from a URI or file path.
     /// - `-` or `stdout`: writes to stdout
     /// - `kafka://broker:port/topic?file=output/out.jsonl`: writes to the local file in `file=`
-    ///   (lemma has no Kafka producer)
+    ///   (lemmata has no Kafka producer)
     /// - path: writes to local file
     pub fn from_target(target: &str) -> Result<Self> {
         let trimmed = target.trim();
@@ -483,7 +483,7 @@ impl StreamSink {
 
             if out_file.is_none() {
                 bail!(
-                    "lemma has no Kafka producer. A kafka:// sink writes to the local file named by ?file=, for example kafka://{broker}/{topic}?file=output/routed.jsonl"
+                    "lemmata has no Kafka producer. A kafka:// sink writes to the local file named by ?file=, for example kafka://{broker}/{topic}?file=output/routed.jsonl"
                 );
             }
             return Ok(StreamSink::Kafka {
@@ -617,7 +617,7 @@ mod tests {
         let path_str = if path.exists() {
             path.to_str().unwrap().to_string()
         } else {
-            let tmp = std::env::temp_dir().join("lemma_test_support.jsonl");
+            let tmp = std::env::temp_dir().join("lemmata_test_support.jsonl");
             std::fs::write(&tmp, "{\"body\":\"test message\",\"label\":\"test\"}\n").unwrap();
             tmp.to_str().unwrap().to_string()
         };

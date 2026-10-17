@@ -1,14 +1,14 @@
 [package]
-name = "lemma"
+name = "lemmata"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88.0"
-authors = ["Lemma Developers"]
+authors = ["Lemmata Developers"]
 description = "A fast CLI for Laya System 1 decision and classification models"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/arvarik/lemma"
-homepage = "https://github.com/arvarik/lemma"
+repository = "https://github.com/arvarik/lemmata"
+homepage = "https://github.com/arvarik/lemmata"
 keywords = ["cli", "machine-learning", "decision-models", "routing", "classification"]
 categories = ["command-line-utilities", "science"]
 
@@ -35,11 +35,11 @@ candle-nn = { version = "0.11.0", features = ["accelerate", "metal"] }
 candle-transformers = { version = "0.11.0", features = ["accelerate", "metal"] }
 
 [lib]
-name = "lemma"
+name = "lemmata"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lemma"
+name = "lemmata"
 path = "src/main.rs"
 
 # cargo-binstall configuration for direct binary release downloads

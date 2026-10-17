@@ -1,31 +1,31 @@
 use std::path::Path;
 
-use lemma::datasource::{DataSource, FileSource};
-use lemma::engine::classifier::{ClassifierConfig, LayaClassifier};
-use lemma::engine::model_calibration::{
+use lemmata::datasource::{DataSource, FileSource};
+use lemmata::engine::classifier::{ClassifierConfig, LayaClassifier};
+use lemmata::engine::model_calibration::{
     MODEL_CALIBRATION_FILENAME, apply_persisted_calibration, calibrate_and_persist_checkpoints,
     calibration_path_for, load_checkpoint_calibration_from, save_checkpoint_calibration_at,
 };
-use lemma::load_questions_from_file;
-use lemma::model::Checkpoint;
+use lemmata::load_questions_from_file;
+use lemmata::model::Checkpoint;
 
 #[test]
 fn test_calibration_path_for_heterogeneous_checkpoints() {
     assert_eq!(
         calibration_path_for(Checkpoint::DebertaV3ZeroShot),
-        Path::new("models/deberta-v3/lemma_calibration.json")
+        Path::new("models/deberta-v3/lemmata_calibration.json")
     );
     assert_eq!(
         calibration_path_for(Checkpoint::ModernBertZeroShot),
-        Path::new("models/modernbert-zeroshot/lemma_calibration.json")
+        Path::new("models/modernbert-zeroshot/lemmata_calibration.json")
     );
     assert_eq!(
         calibration_path_for(Checkpoint::EuroBert),
-        Path::new("models/eurobert/lemma_calibration.json")
+        Path::new("models/eurobert/lemmata_calibration.json")
     );
     assert_eq!(
         calibration_path_for(Checkpoint::NeoBert),
-        Path::new("models/neobert/lemma_calibration.json")
+        Path::new("models/neobert/lemmata_calibration.json")
     );
 }
 
@@ -44,7 +44,8 @@ fn test_calibrate_and_persist_checkpoints_e2e_with_qats() {
         Checkpoint::NeoBert,
     ];
 
-    let temp_dir = std::env::temp_dir().join(format!("lemma_model_cal_e2e_{}", std::process::id()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("lemmata_model_cal_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
 
     let reports =

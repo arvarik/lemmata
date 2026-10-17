@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug or unexpected behavior in lemma.
+description: Report a bug or unexpected behavior in lemmata.
 title: "[BUG]: "
 labels: ["bug"]
 body:
@@ -10,8 +10,8 @@ body:
   - type: input
     id: cli-version
     attributes:
-      label: Lemma Version
-      description: Output of `lemma --version`
+      label: Lemmata Version
+      description: Output of `lemmata --version`
       placeholder: "e.g. 0.1.0"
     validations:
       required: true
@@ -33,7 +33,7 @@ body:
       label: Installation Method
       options:
         - Prebuilt binary (curl install.sh)
-        - cargo binstall lemma
+        - cargo binstall lemmata
         - cargo install (built from source)
         - Local git checkout
     validations:
@@ -43,7 +43,7 @@ body:
     attributes:
       label: Steps to Reproduce
       description: Exact command line run, arguments, and input schema/data.
-      placeholder: "lemma classify --data-dir data/ --schema schema/questions.json"
+      placeholder: "lemmata classify --data-dir data/ --schema schema/questions.json"
     validations:
       required: true
   - type: textarea

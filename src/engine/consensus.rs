@@ -244,7 +244,7 @@ impl ConsensusEngine {
     }
 
     pub fn print_report(results: &[ConsensusResult]) {
-        println!("\n🏛️  Lemma Multi-Checkpoint Consensus & Epistemic Uncertainty");
+        println!("\n🏛️  Lemmata Multi-Checkpoint Consensus & Epistemic Uncertainty");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         let mut table = Table::new();

@@ -587,7 +587,7 @@ impl StatsEngine {
     /// Renders the statistics report as a formatted ANSI table.
     pub fn format_table(report: &SystemStatsReport) -> String {
         let mut out = format!(
-            "\n📊 Lemma System 1 Diagnostics & Performance Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nModel Checkpoint : {} (Head Budget: {} tokens)\nDataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n⚡ Speed & Latency Distribution\n",
+            "\n📊 Lemmata System 1 Diagnostics & Performance Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nModel Checkpoint : {} (Head Budget: {} tokens)\nDataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n⚡ Speed & Latency Distribution\n",
             report.checkpoint,
             report.head_budget,
             report.dataset_items,

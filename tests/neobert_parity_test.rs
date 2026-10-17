@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use lemma::model::neobert::NeoBertMlm;
+use lemmata::model::neobert::NeoBertMlm;
 use tokenizers::Tokenizer;
 
 #[test]

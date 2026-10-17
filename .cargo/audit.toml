@@ -5,8 +5,8 @@ ignore = [
     "RUSTSEC-2024-0436",
     # zip 8.x: ZipArchive::extract() mishandles symlinks, permissions, and SUID/SGID bits.
     # The fix is zip >= 9, but candle-core 0.11.0 (the newest release) requires zip 8.
-    # lemma cannot reach extract(): candle only reads entries from .npz/.pth archives, and
-    # lemma loads safetensors only. Remove these when candle moves to zip 9.
+    # lemmata cannot reach extract(): candle only reads entries from .npz/.pth archives, and
+    # lemmata loads safetensors only. Remove these when candle moves to zip 9.
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",

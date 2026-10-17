@@ -15,7 +15,7 @@ use crate::datasource::DataItem;
 use crate::model::{Checkpoint, ChunkStrategy, Question, QuestionType};
 
 /// File format of this build's probes.
-pub const PROBE_KIND: &str = "lemma-probe-v1";
+pub const PROBE_KIND: &str = "lemmata-probe-v1";
 /// L2 strengths tried on the held-out fifth of the training data. The large values let a
 /// residual probe shrink to the zero-shot logits plus a per-label bias.
 const L2_GRID: [f64; 6] = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0];
@@ -56,7 +56,7 @@ impl Probe {
             .with_context(|| format!("Malformed probe {}", path.display()))?;
         if probe.kind != PROBE_KIND {
             bail!(
-                "{} is a '{}' probe, and this build reads '{PROBE_KIND}'. Refit it with `lemma probe fit`.",
+                "{} is a '{}' probe, and this build reads '{PROBE_KIND}'. Refit it with `lemmata probe fit`.",
                 path.display(),
                 probe.kind
             );

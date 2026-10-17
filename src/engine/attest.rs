@@ -165,7 +165,7 @@ impl AttestationEngine {
         schema_digest: &str,
     ) -> Result<DecisionReceipt> {
         if self.secret_key.is_empty() {
-            bail!("Attestation needs a signing key. Set LEMMA_ATTEST_KEY or pass the key flag.");
+            bail!("Attestation needs a signing key. Set LEMMATA_ATTEST_KEY or pass the key flag.");
         }
         let input_text = match &item.state {
             serde_json::Value::String(s) => s.clone(),

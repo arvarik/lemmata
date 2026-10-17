@@ -1,6 +1,6 @@
-use lemma::datasource::{DataItem, FileSource};
-use lemma::engine::{ConsensusEngine, ExperimentRunner, LayaClassifier};
-use lemma::model::{
+use lemmata::datasource::{DataItem, FileSource};
+use lemmata::engine::{ConsensusEngine, ExperimentRunner, LayaClassifier};
+use lemmata::model::{
     Checkpoint, DecisionAnswer, DecisionModel, DecisionResult, Downloader, Question,
     clean_email_body, email_questions, estimate_tokens, inspect_safetensors,
 };

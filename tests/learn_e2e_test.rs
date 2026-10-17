@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::str::FromStr;
 
-use lemma::engine::learn::{
+use lemmata::engine::learn::{
     CurriculumPhase, build_all_quiz_questions, build_glossary, build_phase_lesson,
     build_reading_list, build_workflow_recipes, print_curriculum_overview, print_glossary,
     print_phase_lesson, print_reading_list, print_workflow_guide,
@@ -129,7 +129,7 @@ fn test_build_all_five_phase_lessons_and_live_labs() {
             "Phase {} live lab should compute at least 5 runtime metrics",
             lesson.phase
         );
-        assert!(lesson.live_lab.try_command.starts_with("lemma "));
+        assert!(lesson.live_lab.try_command.starts_with("lemmata "));
         assert_eq!(lesson.quiz.len(), 3);
         for q in &lesson.quiz {
             assert_eq!(q.phase, phase.number());

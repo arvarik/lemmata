@@ -1,6 +1,6 @@
-# Contributing to Lemma
+# Contributing to Lemmata
 
-Thank you for contributing to `lemma`! We keep the codebase lean, fast, and minimal.
+Thank you for contributing to `lemmata`! We keep the codebase lean, fast, and minimal.
 
 ## Development Workflow
 

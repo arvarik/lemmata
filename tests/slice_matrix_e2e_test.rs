@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use lemma::datasource::{DataSource, FileSource};
-use lemma::engine::LayaClassifier;
-use lemma::engine::slicing::{
+use lemmata::datasource::{DataSource, FileSource};
+use lemmata::engine::LayaClassifier;
+use lemmata::engine::slicing::{
     SliceBy, compute_arena_slice_matrix, evaluate_slices, extract_item_slice,
 };
-use lemma::load_questions_from_file;
-use lemma::model::Checkpoint;
+use lemmata::load_questions_from_file;
+use lemmata::model::Checkpoint;
 
 #[test]
 fn test_slice_by_parsing_and_item_extraction() {

@@ -1,6 +1,6 @@
 use comfy_table::Cell;
-use lemma::engine::learn::{CurriculumPhase, build_phase_lesson};
-use lemma::engine::learn_visuals::{
+use lemmata::engine::learn::{CurriculumPhase, build_phase_lesson};
+use lemmata::engine::learn_visuals::{
     c_blue, c_bold, c_cyan, c_dim, c_green, c_magenta, c_red, c_strike_red, c_yellow,
     colorize_ascii_diagram, colorize_math_block, pill_cyan, pill_green, pill_magenta, pill_red,
     pill_yellow, render_callout_card, render_phase_breadcrumb, render_phase_visual_demonstration,

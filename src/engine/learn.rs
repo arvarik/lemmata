@@ -120,12 +120,12 @@ impl CurriculumPhase {
             Self::Phase4CalibrationAndUncertainty => &[
                 "Raw softmax probabilities are often overconfident; normalized negentropy 1 - H(p)/ln(K) + top-2 margin yields a richer confidence signal.",
                 "Temperature scaling (z_i / T) and Quantile-Adaptive Temperature Scaling (Q-ATS) align confidence with empirical accuracy (minimizing ECE).",
-                "Split Conformal Prediction (lemma conformal --alpha 0.05) guarantees >=95% true-label coverage via adaptive prediction sets C(x).",
+                "Split Conformal Prediction (lemmata conformal --alpha 0.05) guarantees >=95% true-label coverage via adaptive prediction sets C(x).",
             ],
             Self::Phase5ProductionCascadingAndOps => &[
-                "Pareto Cascading (lemma cascade) resolves 75-85% of traffic in System 1 (<40ms) and escalates only high-risk items to System 2.",
-                "Multi-Model Consensus (lemma consensus) combines diverse paradigms and quantifies epistemic disagreement via Jensen-Shannon Divergence.",
-                "Diagnostic slicing (--slice-by), drift monitoring (lemma drift), active learning (lemma active), and attestation (lemma attest) close the production loop.",
+                "Pareto Cascading (lemmata cascade) resolves 75-85% of traffic in System 1 (<40ms) and escalates only high-risk items to System 2.",
+                "Multi-Model Consensus (lemmata consensus) combines diverse paradigms and quantifies epistemic disagreement via Jensen-Shannon Divergence.",
+                "Diagnostic slicing (--slice-by), drift monitoring (lemmata drift), active learning (lemmata active), and attestation (lemmata attest) close the production loop.",
             ],
         }
     }
@@ -222,7 +222,7 @@ pub struct PhaseLesson {
     pub next_step_commands: Vec<String>,
 }
 
-/// Searchable glossary entry linking theoretical ML concepts to concrete `lemma` CLI flags.
+/// Searchable glossary entry linking theoretical ML concepts to concrete `lemmata` CLI flags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlossaryEntry {
     pub term: String,
@@ -231,7 +231,7 @@ pub struct GlossaryEntry {
     pub cli_flag_or_cmd: String,
 }
 
-/// End-to-end operational workflow recipe for common `lemma` tasks.
+/// End-to-end operational workflow recipe for common `lemmata` tasks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRecipe {
     pub slug: String,
@@ -383,7 +383,7 @@ fn build_phase_1() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma explain \"Our April invoice was charged twice\" --labels \"billing,technical,security\"".to_string(),
+        try_command: "lemmata explain \"Our April invoice was charged twice\" --labels \"billing,technical,security\"".to_string(),
     };
 
     PhaseLesson {
@@ -455,9 +455,9 @@ fn build_phase_1() -> PhaseLesson {
         quiz: build_phase_1_quiz(),
         further_reading: build_reading_list(Some(1)),
         next_step_commands: vec![
-            "lemma info --inventory".to_string(),
-            "lemma explain \"We did not have a technical outage; our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
-            "lemma learn --phase 2".to_string(),
+            "lemmata info --inventory".to_string(),
+            "lemmata explain \"We did not have a technical outage; our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
+            "lemmata learn --phase 2".to_string(),
         ],
     }
 }
@@ -570,7 +570,7 @@ fn build_phase_2() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+        try_command: "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
     };
 
     PhaseLesson {
@@ -635,9 +635,9 @@ fn build_phase_2() -> PhaseLesson {
         quiz: build_phase_2_quiz(),
         further_reading: build_reading_list(Some(2)),
         next_step_commands: vec![
-            "lemma classify --model deberta-v3 --hypothesis-template \"The customer is reporting a {label} issue ({description}).\" --text \"Invoice charged twice\" --labels \"billing,technical\"".to_string(),
-            "lemma experiment --mode adversarial".to_string(),
-            "lemma learn --phase 3".to_string(),
+            "lemmata classify --model deberta-v3 --hypothesis-template \"The customer is reporting a {label} issue ({description}).\" --text \"Invoice charged twice\" --labels \"billing,technical\"".to_string(),
+            "lemmata experiment --mode adversarial".to_string(),
+            "lemmata learn --phase 3".to_string(),
         ],
     }
 }
@@ -781,7 +781,7 @@ fn build_phase_3() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma classify --model auto-best --chunk-strategy head-tail --shortlist-k 4 --file data/customer_support.jsonl".to_string(),
+        try_command: "lemmata classify --model auto-best --chunk-strategy head-tail --shortlist-k 4 --file data/customer_support.jsonl".to_string(),
     };
 
     PhaseLesson {
@@ -824,11 +824,11 @@ fn build_phase_3() -> PhaseLesson {
                 "Computes fast character/word n-gram & multilingual domain-synonym cosine similarity in O(1) to prune K options down to top-k before running heavy cross-encoder or joint scoring.".to_string(),
             ),
             (
-                "0/1 Knapsack Schema Compression (lemma schema optimize)".to_string(),
-                "When your JSON schema exceeds a checkpoint's head token budget (e.g., 192 tokens), lemma's dynamic programming optimizer prunes low-Mutual-Information filler words while preserving discriminative keywords.".to_string(),
+                "0/1 Knapsack Schema Compression (lemmata schema optimize)".to_string(),
+                "When your JSON schema exceeds a checkpoint's head token budget (e.g., 192 tokens), lemmata's dynamic programming optimizer prunes low-Mutual-Information filler words while preserving discriminative keywords.".to_string(),
             ),
             (
-                "Coarse-to-Fine Hierarchical Trees (lemma route)".to_string(),
+                "Coarse-to-Fine Hierarchical Trees (lemmata route)".to_string(),
                 "Splits a flat 50-way taxonomy into a root router (e.g., 5 departments) followed by specialized leaf schemas (10 sub-queues each), bounding complexity to O(log K).".to_string(),
             ),
         ],
@@ -839,7 +839,7 @@ fn build_phase_3() -> PhaseLesson {
             ),
             (
                 "Information-Theoretic Knapsack Schema Compression".to_string(),
-                "Verbose option descriptions overflow JointSinglePass head token budgets (192–256 tokens). `lemma schema optimize` scores each description clause by Mutual Information density I(w; Y) (non-stopword discriminative triggers) and solves a 0/1 Knapsack dynamic program to pack maximum semantic separability into tight token budgets.".to_string(),
+                "Verbose option descriptions overflow JointSinglePass head token budgets (192–256 tokens). `lemmata schema optimize` scores each description clause by Mutual Information density I(w; Y) (non-stopword discriminative triggers) and solves a 0/1 Knapsack dynamic program to pack maximum semantic separability into tight token budgets.".to_string(),
             ),
         ],
         under_the_hood_math: concat!(
@@ -856,9 +856,9 @@ fn build_phase_3() -> PhaseLesson {
         quiz: build_phase_3_quiz(),
         further_reading: build_reading_list(Some(3)),
         next_step_commands: vec![
-            "lemma schema optimize --schema schema/questions.json --budget 128".to_string(),
-            "lemma compare --models laya,deberta-v3,modernbert-zeroshot,auto-best --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
-            "lemma learn --phase 4".to_string(),
+            "lemmata schema optimize --schema schema/questions.json --budget 128".to_string(),
+            "lemmata compare --models laya,deberta-v3,modernbert-zeroshot,auto-best --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+            "lemmata learn --phase 4".to_string(),
         ],
     }
 }
@@ -994,7 +994,7 @@ fn build_phase_4() -> PhaseLesson {
             (
                 "Free-Energy Translation Proof (ID vs OOD)".to_string(),
                 format!(
-                    "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (lemma ood: {:+.2} vs {:+.2})",
+                    "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (lemmata ood: {:+.2} vs {:+.2})",
                     id_top_p * 100.0,
                     ood_top_p * 100.0,
                     id_helmholtz,
@@ -1020,7 +1020,7 @@ fn build_phase_4() -> PhaseLesson {
                 ),
             ),
         ],
-        try_command: "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
+        try_command: "lemmata conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
     };
 
     PhaseLesson {
@@ -1031,7 +1031,7 @@ fn build_phase_4() -> PhaseLesson {
         mental_model: concat!(
             "A raw neural network logit is NOT a calibrated probability! If a model predicts 'billing' with 0.95 softmax score, ",
             "is it actually right 95% of the time? In uncalibrated zero-shot NLI models, empirical accuracy at 0.95 softmax is often only 70-78%.\n\n",
-            "To make System 1 decisions trustworthy enough for automated execution, lemma implements FOUR mathematical layers of uncertainty quantification:\n",
+            "To make System 1 decisions trustworthy enough for automated execution, lemmata implements FOUR mathematical layers of uncertainty quantification:\n",
             "1. Blended Negentropy + Margin Confidence: Measures the entire probability distribution shape (Shannon entropy) AND top-2 separation, not just the top class probability.\n",
             "2. Temperature Scaling & Q-ATS (Quantile-Adaptive Temperature Scaling): Learns per-bucket temperatures T_k to minimize Expected Calibration Error (ECE), and dynamically inflates T(x) when an input lies far from in-distribution class centroids.\n",
             "3. Helmholtz Free-Energy OOD Detection: Distinguishes in-distribution ambiguity (two known classes tie) from Out-of-Distribution inputs (none of the classes match).\n",
@@ -1056,8 +1056,8 @@ fn build_phase_4() -> PhaseLesson {
                 "ECE partitions predictions into M confidence bins and measures the weighted gap |acc(B_m) - conf(B_m)|. Brier Score measures mean squared probability error 1/N sum (p_i - y_i)^2.".to_string(),
             ),
             (
-                "Persisted Model Calibration (lemma calibrate --persist-to-model)".to_string(),
-                "Tunes optimal temperatures and Q-ATS profiles on a validation dataset and writes them to <model_dir>/lemma_calibration.json, which LayaClassifier auto-loads on every future run.".to_string(),
+                "Persisted Model Calibration (lemmata calibrate --persist-to-model)".to_string(),
+                "Tunes optimal temperatures and Q-ATS profiles on a validation dataset and writes them to <model_dir>/lemmata_calibration.json, which LayaClassifier auto-loads on every future run.".to_string(),
             ),
             (
                 "Free-Energy OOD vs Softmax Entropy".to_string(),
@@ -1092,10 +1092,10 @@ fn build_phase_4() -> PhaseLesson {
         quiz: build_phase_4_quiz(),
         further_reading: build_reading_list(Some(4)),
         next_step_commands: vec![
-            "lemma calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
-            "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
-            "lemma ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
-            "lemma learn --phase 5".to_string(),
+            "lemmata calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
+            "lemmata conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
+            "lemmata ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+            "lemmata learn --phase 5".to_string(),
         ],
     }
 }
@@ -1192,7 +1192,7 @@ fn build_phase_5() -> PhaseLesson {
                 "$1,016 / 1M reqs vs $5,000 / 1M pure System 2 (79.7% cost savings)".to_string(),
             ),
         ],
-        try_command: "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+        try_command: "lemmata consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
     };
 
     PhaseLesson {
@@ -1202,12 +1202,12 @@ fn build_phase_5() -> PhaseLesson {
         subtitle: phase.subtitle().to_string(),
         mental_model: concat!(
             "In production, System 1 and System 2 are not competitors—they form a symbiotic cognitive mesh:\n\n",
-            "1. Pareto Cost/Quality Cascading (lemma cascade): System 1 processes 100% of incoming traffic in <40ms. ",
+            "1. Pareto Cost/Quality Cascading (lemmata cascade): System 1 processes 100% of incoming traffic in <40ms. ",
             "For the 75-85% of items where calibrated confidence is high and conformal sets are singletons, System 1 auto-executes immediately. ",
             "Only the 15-25% high-risk tail is escalated to a System 2 LLM—achieving System 2 accuracy at 5x lower latency and 80% lower cloud spend.\n\n",
-            "2. Multi-Paradigm Consensus (lemma consensus): Combining models with different inductive biases (e.g. Laya JointSinglePass + DeBERTa-v3 NLI + ModernBERT-ZS) ",
+            "2. Multi-Paradigm Consensus (lemmata consensus): Combining models with different inductive biases (e.g. Laya JointSinglePass + DeBERTa-v3 NLI + ModernBERT-ZS) ",
             "lets us separate Aleatoric Uncertainty (the text itself is vague, so all models have flat probabilities) from Epistemic Uncertainty (models strongly disagree with each other, measured via Jensen-Shannon Divergence).\n\n",
-            "3. Closed-Loop Flywheel (lemma slice-by -> drift -> active -> attest): Disaggregated slice matrices reveal where models fail; ",
+            "3. Closed-Loop Flywheel (lemmata slice-by -> drift -> active -> attest): Disaggregated slice matrices reveal where models fail; ",
             "PSI/JS drift alerts catch distribution shift; active learning distills hard System 2 teacher labels back into System 1 (RLCD); and SHA-256 hash-chained, HMAC-signed receipts provide tamper-evident compliance."
         )
         .to_string(),
@@ -1231,7 +1231,7 @@ fn build_phase_5() -> PhaseLesson {
                 "Aleatoric uncertainty is average within-model entropy E_m[H(p_m)] (inherently ambiguous input). Epistemic uncertainty is Jensen-Shannon Divergence H(sum w_m p_m) - sum w_m H(p_m) (models disagree and need teacher data).".to_string(),
             ),
             (
-                "Pareto Cascade Risk Score (lemma cascade sweep)".to_string(),
+                "Pareto Cascade Risk Score (lemmata cascade sweep)".to_string(),
                 "Combines 1 - confidence, conformal set size |C(x)|, and Free-Energy OOD score into a composite risk metric, sweeping thresholds tau to find the Pareto frontier of accuracy vs $/1k items.".to_string(),
             ),
             (
@@ -1239,7 +1239,7 @@ fn build_phase_5() -> PhaseLesson {
                 "Aggregate accuracy hides failure modes! Slicing by auto prefix (neg, multi, long, struct), Unicode script, or token length bucket exposes exactly which sub-population needs routing or calibration.".to_string(),
             ),
             (
-                "Active Learning & RLCD Distillation (lemma active)".to_string(),
+                "Active Learning & RLCD Distillation (lemmata active)".to_string(),
                 "Selects high-uncertainty / OOD items via diversity-aware farthest-first traversal and exports Contrastive Teacher-Student distillation pairs so System 1 continuously absorbs System 2 intelligence.".to_string(),
             ),
         ],
@@ -1250,7 +1250,7 @@ fn build_phase_5() -> PhaseLesson {
             ),
             (
                 "When to Escalate to User vs. Teacher LLM".to_string(),
-                "Not all uncertainty should be routed the same way! High Aleatoric uncertainty (every model in `lemma consensus` outputs flat probabilities) means the user's prompt is genuinely underspecified—ask the user a clarifying question. High Epistemic uncertainty (high JSD between Laya, DeBERTa-v3, and ModernBERT) means System 1 lacks domain coverage—escalate to the System 2 teacher LLM and distill via `lemma active`.".to_string(),
+                "Not all uncertainty should be routed the same way! High Aleatoric uncertainty (every model in `lemmata consensus` outputs flat probabilities) means the user's prompt is genuinely underspecified—ask the user a clarifying question. High Epistemic uncertainty (high JSD between Laya, DeBERTa-v3, and ModernBERT) means System 1 lacks domain coverage—escalate to the System 2 teacher LLM and distill via `lemmata active`.".to_string(),
             ),
         ],
         under_the_hood_math: concat!(
@@ -1265,10 +1265,10 @@ fn build_phase_5() -> PhaseLesson {
         quiz: build_phase_5_quiz(),
         further_reading: build_reading_list(Some(5)),
         next_step_commands: vec![
-            "lemma cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
-            "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
-            "lemma active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 5".to_string(),
-            "lemma guide".to_string(),
+            "lemmata cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+            "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+            "lemmata active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 5".to_string(),
+            "lemmata guide".to_string(),
         ],
     }
 }
@@ -1392,7 +1392,7 @@ fn build_phase_3_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P3-Q3".to_string(),
             phase: 3,
-            prompt: "When a verbose multi-question JSON schema exceeds a checkpoint's head token budget (e.g., 192 tokens), how does `lemma schema optimize` compress the option criteria?".to_string(),
+            prompt: "When a verbose multi-question JSON schema exceeds a checkpoint's head token budget (e.g., 192 tokens), how does `lemmata schema optimize` compress the option criteria?".to_string(),
             options: vec![
                 "It deletes half of the candidate class labels at random.".to_string(),
                 "It scores candidate clauses by information density / Mutual Information I(w; Y) and solves a 0/1 Knapsack dynamic programming problem to retain high-MI discriminative keywords within the token budget.".to_string(),
@@ -1423,7 +1423,7 @@ fn build_phase_4_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P4-Q2".to_string(),
             phase: 4,
-            prompt: "Why does `lemma ood` use Helmholtz Free Energy E(x) = -T * ln(sum exp(z_i / T)) instead of just checking softmax entropy?".to_string(),
+            prompt: "Why does `lemmata ood` use Helmholtz Free Energy E(x) = -T * ln(sum exp(z_i / T)) instead of just checking softmax entropy?".to_string(),
             options: vec![
                 "Because softmax is translation-invariant (logits [-10, -10] and [+10, +10] yield identical [0.5, 0.5] probabilities), whereas Free Energy preserves raw logit magnitude to distinguish an alien OOD input (all logits negative) from an in-distribution tie (two logits strongly positive).".to_string(),
                 "Because Free Energy does not require model logits.".to_string(),
@@ -1436,7 +1436,7 @@ fn build_phase_4_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P4-Q3".to_string(),
             phase: 4,
-            prompt: "In Split Conformal Prediction (`lemma conformal --alpha 0.05`), what does it signify when the prediction set C(x) expands from a singleton |C(x)| = 1 on item A to |C(x)| = 3 on item B?".to_string(),
+            prompt: "In Split Conformal Prediction (`lemmata conformal --alpha 0.05`), what does it signify when the prediction set C(x) expands from a singleton |C(x)| = 1 on item A to |C(x)| = 3 on item B?".to_string(),
             options: vec![
                 "Item A is unambiguous enough to auto-execute under the >=95% coverage guarantee, whereas item B requires 3 candidate labels to reach the calibrated quantile q_hat—signaling boundary ambiguity that should escalate to System 2.".to_string(),
                 "It means the model crashed on item B.".to_string(),
@@ -1454,7 +1454,7 @@ fn build_phase_5_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P5-Q1".to_string(),
             phase: 5,
-            prompt: "In `lemma consensus`, three diverse models each output a low-entropy (90% confident) prediction, but Model A predicts 'billing', Model B predicts 'security', and Model C predicts 'account'. Which uncertainty metric will spike?".to_string(),
+            prompt: "In `lemmata consensus`, three diverse models each output a low-entropy (90% confident) prediction, but Model A predicts 'billing', Model B predicts 'security', and Model C predicts 'account'. Which uncertainty metric will spike?".to_string(),
             options: vec![
                 "Aleatoric uncertainty (within-model entropy) will be maximal, while Epistemic uncertainty (JSD) will be zero.".to_string(),
                 "Epistemic uncertainty (Jensen-Shannon Divergence across models) will spike because confident models disagree with each other, triggering a DISPUTED escalation.".to_string(),
@@ -1467,7 +1467,7 @@ fn build_phase_5_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P5-Q2".to_string(),
             phase: 5,
-            prompt: "You run `lemma test` and see 82% overall accuracy, which looks acceptable. Why should you always run `--slice-by auto` or `--slice-by script` before deploying?".to_string(),
+            prompt: "You run `lemmata test` and see 82% overall accuracy, which looks acceptable. Why should you always run `--slice-by auto` or `--slice-by script` before deploying?".to_string(),
             options: vec![
                 "Because `--slice-by` automatically rewrites the model weights.".to_string(),
                 "Because aggregate accuracy masks Simpson's Paradox / slice failures—a model might score 96% on standard English items but 25% on negated (`neg_*`) or long-context (`long_*`) slices.".to_string(),
@@ -1480,7 +1480,7 @@ fn build_phase_5_quiz() -> Vec<QuizQuestion> {
         QuizQuestion {
             id: "P5-Q3".to_string(),
             phase: 5,
-            prompt: "Suppose pure System 2 LLM triage costs $5,000 per 1M requests ($0.005/call). If a `lemma cascade` policy at optimal threshold tau* resolves 80% of traffic in System 1 ($0.00002/call) and escalates 20% to System 2, what is the total cost per 1M requests?".to_string(),
+            prompt: "Suppose pure System 2 LLM triage costs $5,000 per 1M requests ($0.005/call). If a `lemmata cascade` policy at optimal threshold tau* resolves 80% of traffic in System 1 ($0.00002/call) and escalates 20% to System 2, what is the total cost per 1M requests?".to_string(),
             options: vec![
                 "$5,000 per 1M requests (no savings).".to_string(),
                 "~$1,016 per 1M requests ($16 for System 1 + $1,000 for 20% System 2 escalations)—a 79.7% (~5x) cost reduction while matching System 2 SLA accuracy.".to_string(),
@@ -1511,13 +1511,13 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
             term: "System 1 vs. System 2".to_string(),
             category: "Phase 1: Foundations".to_string(),
             definition: "System 1 models are fast (<40ms), non-autoregressive bidirectional encoders for structured decisions; System 2 models are slow (500-3000ms) autoregressive LLMs for open-ended generation.".to_string(),
-            cli_flag_or_cmd: "lemma classify / lemma cascade".to_string(),
+            cli_flag_or_cmd: "lemmata classify / lemmata cascade".to_string(),
         },
         GlossaryEntry {
             term: "Bidirectional Self-Attention".to_string(),
             category: "Phase 1: Foundations".to_string(),
             definition: "Attention mechanism with no causal left-to-right mask, allowing every token to attend to both preceding and succeeding context simultaneously.".to_string(),
-            cli_flag_or_cmd: "lemma info --inventory".to_string(),
+            cli_flag_or_cmd: "lemmata info --inventory".to_string(),
         },
         GlossaryEntry {
             term: "RoPE (Rotary Position Embeddings)".to_string(),
@@ -1577,37 +1577,37 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
             term: "Normalized Negentropy Confidence".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Information-theoretic confidence 1 - H(p)/ln(K) blended with top-2 margin, measuring distribution certainty across all K classes.".to_string(),
-            cli_flag_or_cmd: "lemma test / lemma stats".to_string(),
+            cli_flag_or_cmd: "lemmata test / lemmata stats".to_string(),
         },
         GlossaryEntry {
             term: "ECE (Expected Calibration Error)".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Weighted average gap between predicted confidence and empirical accuracy across M probability bins (0.0 = perfectly calibrated).".to_string(),
-            cli_flag_or_cmd: "lemma calibrate --persist-to-model".to_string(),
+            cli_flag_or_cmd: "lemmata calibrate --persist-to-model".to_string(),
         },
         GlossaryEntry {
             term: "Q-ATS (Quantile-Adaptive Temperature Scaling)".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "2026 calibration method that dynamically inflates temperature T(x) when an input's energy/distance exceeds in-distribution quantiles.".to_string(),
-            cli_flag_or_cmd: "lemma calibrate --all-checkpoints --persist-to-model --adaptive".to_string(),
+            cli_flag_or_cmd: "lemmata calibrate --all-checkpoints --persist-to-model --adaptive".to_string(),
         },
         GlossaryEntry {
             term: "Split Conformal Prediction".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Distribution-free uncertainty wrapper that outputs a prediction set C(x) guaranteed to contain the true label with probability >= 1 - alpha.".to_string(),
-            cli_flag_or_cmd: "lemma conformal --alpha 0.05".to_string(),
+            cli_flag_or_cmd: "lemmata conformal --alpha 0.05".to_string(),
         },
         GlossaryEntry {
             term: "Helmholtz Free-Energy OOD".to_string(),
             category: "Phase 4: Calibration".to_string(),
             definition: "Out-of-distribution score E(x) = -T ln sum exp(z_i/T) that catches alien inputs where all raw class logits are simultaneously low.".to_string(),
-            cli_flag_or_cmd: "lemma ood fit / eval".to_string(),
+            cli_flag_or_cmd: "lemmata ood fit / eval".to_string(),
         },
         GlossaryEntry {
             term: "Epistemic vs. Aleatoric Uncertainty".to_string(),
             category: "Phase 5: Production".to_string(),
             definition: "Aleatoric = inherent data ambiguity (high entropy within each model); Epistemic = inter-model disagreement measured via Jensen-Shannon Divergence.".to_string(),
-            cli_flag_or_cmd: "lemma consensus".to_string(),
+            cli_flag_or_cmd: "lemmata consensus".to_string(),
         },
         GlossaryEntry {
             term: "Diagnostic Slicing".to_string(),
@@ -1618,7 +1618,7 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
     ]
 }
 
-/// Build practical step-by-step workflow recipes for `lemma guide`.
+/// Build practical step-by-step workflow recipes for `lemmata guide`.
 pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
     vec![
         WorkflowRecipe {
@@ -1628,15 +1628,15 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Classify & explain inline text (auto-detects top-1 vs top-2 labels)".to_string(),
-                    "lemma explain \"We did not have an outage, our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
+                    "lemmata explain \"We did not have an outage, our invoice was double charged\" --labels \"billing,technical,security\"".to_string(),
                 ),
                 (
                     "Run a multi-question schema (Choice + Score + Noul) on a file".to_string(),
-                    "lemma classify --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata classify --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Auto-route heterogeneous multilingual & long-context items".to_string(),
-                    "lemma classify --model auto-best --chunk-strategy head-tail --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata classify --model auto-best --chunk-strategy head-tail --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
             pro_tip: "Add --hypothesis-template \"The user needs help with {label}: {description}\" when using NLI models (deberta-v3, modernbert-zeroshot) to boost zero-shot accuracy.".to_string(),
@@ -1648,15 +1648,15 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Check local checkpoint inventory and head paradigms".to_string(),
-                    "lemma info --inventory".to_string(),
+                    "lemmata info --inventory".to_string(),
                 ),
                 (
                     "Run the full System 1 Arena with disaggregated slice matrix".to_string(),
-                    "lemma compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+                    "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
                 ),
                 (
                     "Evaluate a single model disaggregated by token length or script".to_string(),
-                    "lemma test --model deberta-v3 --chunk-strategy head-tail --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by length".to_string(),
+                    "lemmata test --model deberta-v3 --chunk-strategy head-tail --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by length".to_string(),
                 ),
             ],
             pro_tip: "Never rely on aggregate accuracy alone! Always pass --slice-by auto to see the Checkpoint x Slice matrix before choosing a production model.".to_string(),
@@ -1668,18 +1668,18 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Tune & persist temperatures + Q-ATS for all checkpoints".to_string(),
-                    "lemma calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
+                    "lemmata calibrate --all-checkpoints --persist-to-model --adaptive --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json".to_string(),
                 ),
                 (
                     "Generate Split Conformal prediction sets at 95% coverage (alpha=0.05)".to_string(),
-                    "lemma conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
+                    "lemmata conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
                 ),
                 (
                     "Fit Out-of-Distribution (OOD) detector via Helmholtz Free Energy".to_string(),
-                    "lemma ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata ood fit --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
-            pro_tip: "Once `lemma calibrate --persist-to-model` writes `lemma_calibration.json` to the model folder, every subsequent `classify`, `test`, and `compare` run automatically uses the calibrated temperatures!".to_string(),
+            pro_tip: "Once `lemmata calibrate --persist-to-model` writes `lemmata_calibration.json` to the model folder, every subsequent `classify`, `test`, and `compare` run automatically uses the calibrated temperatures!".to_string(),
         },
         WorkflowRecipe {
             slug: "scaling".to_string(),
@@ -1688,15 +1688,15 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Lint & compress a large schema to fit a 128-token head budget".to_string(),
-                    "lemma schema optimize --schema schema/questions.json --budget 128".to_string(),
+                    "lemmata schema optimize --schema schema/questions.json --budget 128".to_string(),
                 ),
                 (
                     "Enable O(1) Bi-Encoder candidate shortlisting for K > 10 labels".to_string(),
-                    "lemma classify --model deberta-v3 --shortlist-k 4 --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata classify --model deberta-v3 --shortlist-k 4 --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Use coarse-to-fine hierarchical routing trees".to_string(),
-                    "lemma route bench --file data/customer_support.jsonl --tree schema/support_hierarchy.json".to_string(),
+                    "lemmata route bench --file data/customer_support.jsonl --tree schema/support_hierarchy.json".to_string(),
                 ),
             ],
             pro_tip: "Combining `--shortlist-k 5` with `--chunk-strategy head-tail` lets 512-token NLI cross-encoders handle 2,000-token documents and 30-label schemas at 5x higher speed.".to_string(),
@@ -1708,22 +1708,22 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Sweep the System 1 / System 2 Pareto cost-accuracy frontier".to_string(),
-                    "lemma cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata cascade sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Run 3-model Mixture-of-Decisions consensus with JSD dispute detection".to_string(),
-                    "lemma consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata consensus --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
                 ),
                 (
                     "Curate an active learning review queue & RLCD distillation dataset".to_string(),
-                    "lemma active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 10".to_string(),
+                    "lemmata active sample --file data/customer_support.jsonl --schema schema/questions.json --strategy composite --budget 10".to_string(),
                 ),
                 (
                     "Monitor PSI / Jensen-Shannon distribution drift".to_string(),
-                    "lemma drift --baseline data/customer_support.jsonl --current data/system1_golden_benchmark.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata drift --baseline data/customer_support.jsonl --current data/system1_golden_benchmark.jsonl --schema schema/questions.json".to_string(),
                 ),
             ],
-            pro_tip: "Use `lemma consensus` on high-stakes decisions: when `epistemic_JSD` is high, models from different paradigms disagree—escalate those items to `lemma active sample` for teacher labeling!".to_string(),
+            pro_tip: "Use `lemmata consensus` on high-stakes decisions: when `epistemic_JSD` is high, models from different paradigms disagree—escalate those items to `lemmata active sample` for teacher labeling!".to_string(),
         },
     ]
 }
@@ -1827,7 +1827,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "Compression Paper".to_string(),
             title: "LLMLingua: Compressing Prompts for Accelerated Inference via Mutual Information Budgets".to_string(),
             author_venue: "Jiang et al., Microsoft Research (EMNLP 2023, arXiv:2310.05736)".to_string(),
-            takeaway: "Motivates `lemma schema optimize`: pruning low-MI filler words under a 0/1 Knapsack token budget while preserving discriminative triggers.".to_string(),
+            takeaway: "Motivates `lemmata schema optimize`: pruning low-MI filler words under a 0/1 Knapsack token budget while preserving discriminative triggers.".to_string(),
             url: "https://arxiv.org/abs/2310.05736".to_string(),
         },
         // Phase 4: Trustworthy Uncertainty, Temperature Calibration & Conformal Guarantees
@@ -1844,7 +1844,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "Conformal Tutorial".to_string(),
             title: "A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification".to_string(),
             author_venue: "Angelopoulos & Bates, UC Berkeley (Foundations & Trends in ML 2023, arXiv:2107.07511)".to_string(),
-            takeaway: "Derives Split Conformal Prediction and Adaptive Prediction Sets C(x), guaranteeing finite-sample >= 1 - alpha coverage (`lemma conformal`).".to_string(),
+            takeaway: "Derives Split Conformal Prediction and Adaptive Prediction Sets C(x), guaranteeing finite-sample >= 1 - alpha coverage (`lemmata conformal`).".to_string(),
             url: "https://arxiv.org/abs/2107.07511".to_string(),
         },
         ReadingResource {
@@ -1860,7 +1860,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "Adaptive Calibration".to_string(),
             title: "Sample-Dependent Adaptive Temperature Scaling for Improved Calibration (Q-ATS)".to_string(),
             author_venue: "Joy et al., Oxford (AAAI 2023, arXiv:2207.06211)".to_string(),
-            takeaway: "Dynamically inflates temperature T(x) when an input's energy or distance exceeds in-distribution quantiles (`lemma calibrate --adaptive`).".to_string(),
+            takeaway: "Dynamically inflates temperature T(x) when an input's energy or distance exceeds in-distribution quantiles (`lemmata calibrate --adaptive`).".to_string(),
             url: "https://arxiv.org/abs/2207.06211".to_string(),
         },
         // Phase 5: Production Architecture — Cascading, Consensus, Slicing & Active Loops
@@ -1869,7 +1869,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "Systems Paper".to_string(),
             title: "FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance".to_string(),
             author_venue: "Chen, Zaharia & Zou, Stanford (TMLR 2024, arXiv:2305.05176)".to_string(),
-            takeaway: "Formalizes System 1 -> System 2 cascades that resolve 80%+ of traffic locally and cut LLM inference spend by 5x–10x (`lemma cascade`).".to_string(),
+            takeaway: "Formalizes System 1 -> System 2 cascades that resolve 80%+ of traffic locally and cut LLM inference spend by 5x–10x (`lemmata cascade`).".to_string(),
             url: "https://arxiv.org/abs/2305.05176".to_string(),
         },
         ReadingResource {
@@ -1885,7 +1885,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "MLOps Guide".to_string(),
             title: "Designing Machine Learning Systems: Distribution Shift, Monitoring & Continual Learning".to_string(),
             author_venue: "Chip Huyen (O'Reilly / huyenchip.com)".to_string(),
-            takeaway: "Covers PSI/Wasserstein drift monitoring (`lemma drift`), uncertainty sampling, and closing the active teacher-student distillation loop (`lemma active`).".to_string(),
+            takeaway: "Covers PSI/Wasserstein drift monitoring (`lemmata drift`), uncertainty sampling, and closing the active teacher-student distillation loop (`lemmata active`).".to_string(),
             url: "https://huyenchip.com/mlops/".to_string(),
         },
         ReadingResource {
@@ -1909,7 +1909,7 @@ pub fn print_reading_list(phase_filter: Option<u8>) {
     println!(
         "{}",
         c_bold(c_cyan(format!(
-            "📚 LEMMA CURATED READING TRAIL — Papers, Visual Blogs & Practitioner Guides ({} resources)",
+            "📚 LEMMATA CURATED READING TRAIL — Papers, Visual Blogs & Practitioner Guides ({} resources)",
             list.len()
         )))
     );
@@ -1942,7 +1942,7 @@ pub fn print_curriculum_overview() {
     println!(
         "{}",
         c_bold(c_cyan(
-            "🎓 LEMMA ACADEMY — Interactive System 1 Decision Models & Encoder Mastery"
+            "🎓 LEMMATA ACADEMY — Interactive System 1 Decision Models & Encoder Mastery"
         ))
     );
     println!("══════════════════════════════════════════════════════════════════════════");
@@ -1968,7 +1968,7 @@ pub fn print_curriculum_overview() {
             Cell::new(format!("Phase {}", p.number())).fg(Color::Cyan),
             Cell::new(p.slug()).fg(Color::Yellow),
             Cell::new(p.title()),
-            Cell::new(format!("lemma learn --phase {}", p.number())).fg(Color::Green),
+            Cell::new(format!("lemmata learn --phase {}", p.number())).fg(Color::Green),
         ]);
     }
 
@@ -1982,45 +1982,47 @@ pub fn print_curriculum_overview() {
     ]);
     cmd_table.add_row(vec![
         Cell::new("Interactive Tutor"),
-        Cell::new("lemma learn --interactive").fg(Color::Green),
+        Cell::new("lemmata learn --interactive").fg(Color::Green),
         Cell::new("Step-by-step guided walkthrough with live labs & graded active-recall quizzes"),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Deep-Dive a Phase"),
-        Cell::new("lemma learn --phase 1..5").fg(Color::Green),
-        Cell::new("Render a specific phase (e.g. `lemma learn --phase paradigms` or `--phase 4`)"),
+        Cell::new("lemmata learn --phase 1..5").fg(Color::Green),
+        Cell::new(
+            "Render a specific phase (e.g. `lemmata learn --phase paradigms` or `--phase 4`)",
+        ),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Complete Textbook"),
-        Cell::new("lemma learn --all").fg(Color::Green),
+        Cell::new("lemmata learn --all").fg(Color::Green),
         Cell::new("Print all 5 phases with live lab benchmarks in one comprehensive reference"),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Diagnostic Quiz"),
-        Cell::new("lemma learn --quiz").fg(Color::Green),
+        Cell::new("lemmata learn --quiz").fg(Color::Green),
         Cell::new("Test your intuition across all 15 Socratic diagnostic checkpoints"),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Concept Glossary"),
-        Cell::new("lemma learn --glossary [term]").fg(Color::Green),
+        Cell::new("lemmata learn --glossary [term]").fg(Color::Green),
         Cell::new("Searchable dictionary linking ML theory (RoPE, ECE, JSD, Q-ATS) to CLI flags"),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Reading Trail"),
-        Cell::new("lemma learn --reading").fg(Color::Green),
+        Cell::new("lemmata learn --reading").fg(Color::Green),
         Cell::new("Curated reading list of 20 foundational papers, visual essays & MLOps blogs"),
     ]);
     cmd_table.add_row(vec![
         Cell::new("Practical Recipes"),
-        Cell::new("lemma guide [topic]").fg(Color::Green),
+        Cell::new("lemmata guide [topic]").fg(Color::Green),
         Cell::new("Copy-pasteable how-to workflows (quickstart, arena, calibration, scaling, ops)"),
     ]);
 
-    println!("🚀 How to Use Lemma Academy:\n{cmd_table}\n");
+    println!("🚀 How to Use Lemmata Academy:\n{cmd_table}\n");
     println!(
         "💡 Recommended Start: Run {} or {} to begin!",
-        c_bold(c_green("`lemma learn --phase 1`")),
-        c_bold(c_green("`lemma learn --interactive`"))
+        c_bold(c_green("`lemmata learn --phase 1`")),
+        c_bold(c_green("`lemmata learn --interactive`"))
     );
 }
 
@@ -2079,7 +2081,7 @@ fn render_phase_lesson(lesson: &PhaseLesson, include_quiz_preview: bool) {
     let mut c_table = styled_table();
     c_table.set_header(vec![
         Cell::new("Concept").fg(Color::Cyan),
-        Cell::new("How It Works in Lemma").fg(Color::White),
+        Cell::new("How It Works in Lemmata").fg(Color::White),
     ]);
     for (name, desc) in &lesson.core_concepts {
         c_table.add_row(vec![Cell::new(name).fg(Color::Yellow), Cell::new(desc)]);
@@ -2143,7 +2145,7 @@ fn render_phase_lesson(lesson: &PhaseLesson, include_quiz_preview: bool) {
 
     if include_quiz_preview && !lesson.quiz.is_empty() {
         println!(
-            "🎯 6. ACTIVE RECALL CHECKPOINT ({} diagnostic questions — run `lemma learn --interactive --phase {}` to take interactively)",
+            "🎯 6. ACTIVE RECALL CHECKPOINT ({} diagnostic questions — run `lemmata learn --interactive --phase {}` to take interactively)",
             lesson.quiz.len(),
             lesson.phase
         );
@@ -2155,7 +2157,7 @@ fn render_phase_lesson(lesson: &PhaseLesson, include_quiz_preview: bool) {
 
     if !lesson.further_reading.is_empty() {
         println!(
-            "📚 7. CURATED READING TRAIL (Phase {} Papers & Blogs — `lemma learn --reading --phase {}`)",
+            "📚 7. CURATED READING TRAIL (Phase {} Papers & Blogs — `lemmata learn --reading --phase {}`)",
             lesson.phase, lesson.phase
         );
         for r in &lesson.further_reading {
@@ -2200,14 +2202,14 @@ pub fn print_glossary(filter: Option<&str>) {
         .collect();
 
     println!(
-        "📖 LEMMA CONCEPT & CLI GLOSSARY ({} entries matched)",
+        "📖 LEMMATA CONCEPT & CLI GLOSSARY ({} entries matched)",
         filtered.len()
     );
     println!("══════════════════════════════════════════════════════════════════════════");
 
     if filtered.is_empty() {
         println!(
-            "No glossary entries matched '{}'. Try `lemma learn --glossary` to view all terms.",
+            "No glossary entries matched '{}'. Try `lemmata learn --glossary` to view all terms.",
             filter.unwrap_or_default()
         );
         return;
@@ -2232,7 +2234,7 @@ pub fn print_glossary(filter: Option<&str>) {
     println!("{table}");
 }
 
-/// Print practical workflow recipes (`lemma guide`), optionally filtered by topic slug or keyword.
+/// Print practical workflow recipes (`lemmata guide`), optionally filtered by topic slug or keyword.
 pub fn print_workflow_guide(topic: Option<&str>) {
     let recipes = build_workflow_recipes();
     let q = topic.map(|s| s.trim().to_ascii_lowercase());
@@ -2256,11 +2258,11 @@ pub fn print_workflow_guide(topic: Option<&str>) {
     println!(
         "{}",
         c_bold(c_cyan(
-            "🛠️  LEMMA PRACTICAL WORKFLOW GUIDE — Copy-Pasteable Recipes"
+            "🛠️  LEMMATA PRACTICAL WORKFLOW GUIDE — Copy-Pasteable Recipes"
         ))
     );
     println!("══════════════════════════════════════════════════════════════════════════");
-    println!("Tip: Want to learn the deep ML theory behind these commands? Run `lemma learn`!\n");
+    println!("Tip: Want to learn the deep ML theory behind these commands? Run `lemmata learn`!\n");
 
     if matched.is_empty() {
         println!(
@@ -2307,7 +2309,7 @@ pub fn run_quiz_non_interactive(phase_filter: Option<u8>) {
         .collect();
 
     println!(
-        "🧠 LEMMA SOCRATIC DIAGNOSTIC QUIZ ({} questions)",
+        "🧠 LEMMATA SOCRATIC DIAGNOSTIC QUIZ ({} questions)",
         questions.len()
     );
     println!("══════════════════════════════════════════════════════════════════════════\n");
@@ -2353,7 +2355,7 @@ pub fn run_interactive_session_with_reader<R: BufRead>(
         None => CurriculumPhase::all().to_vec(),
     };
 
-    println!("🎓 Welcome to Lemma Interactive Academy!");
+    println!("🎓 Welcome to Lemmata Interactive Academy!");
     println!(
         "   Controls: [Enter] continue | [1-4] answer quiz | [s] skip phase | [q] quit session\n"
     );
@@ -2448,7 +2450,7 @@ pub fn run_interactive_session_with_reader<R: BufRead>(
 
             let trimmed = line.trim().to_ascii_lowercase();
             if trimmed == "q" || trimmed == "quit" {
-                println!("\n👋 Exiting Lemma Interactive Academy. Keep building!");
+                println!("\n👋 Exiting Lemmata Interactive Academy. Keep building!");
                 return Ok((correct, attempted));
             }
 
@@ -2501,7 +2503,7 @@ fn prompt_continue<R: BufRead>(reader: &mut R, prompt: &str) -> Result<PromptAct
     }
     let cmd = buf.trim().to_ascii_lowercase();
     if cmd == "q" || cmd == "quit" {
-        println!("\n👋 Exiting Lemma Interactive Academy.");
+        println!("\n👋 Exiting Lemmata Interactive Academy.");
         return Ok(PromptAction::Quit);
     }
     if cmd == "s" || cmd == "skip" {

@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use lemma::engine::{ClassifierConfig, LayaClassifier, Probe, fit_probe};
-use lemma::model::native::{Backend, native_available, set_backend};
-use lemma::model::{Checkpoint, ChunkStrategy};
+use lemmata::engine::{ClassifierConfig, LayaClassifier, Probe, fit_probe};
+use lemmata::model::native::{Backend, native_available, set_backend};
+use lemmata::model::{Checkpoint, ChunkStrategy};
 
 #[test]
 fn probe_fits_and_replaces_zero_shot_scoring() {
@@ -17,9 +17,9 @@ fn probe_fits_and_replaces_zero_shot_scoring() {
     }
     set_backend(Backend::Native);
     let questions =
-        lemma::load_questions_from_file("schema/system1_benchmark_questions.json".as_ref())
+        lemmata::load_questions_from_file("schema/system1_benchmark_questions.json".as_ref())
             .unwrap();
-    let items = lemma::resolve_data_source(
+    let items = lemmata::resolve_data_source(
         "data".as_ref(),
         Some("data/system1_golden_benchmark.jsonl".as_ref()),
         false,
@@ -38,8 +38,8 @@ fn probe_fits_and_replaces_zero_shot_scoring() {
     assert_eq!(probe.train_samples, items.len());
     assert_eq!(probe.weights.len(), probe.labels.len() * probe.mean.len());
 
-    // Round-trip through JSON, as `lemma probe fit` and `--probe` do.
-    let path = std::env::temp_dir().join(format!("lemma_probe_{}.json", std::process::id()));
+    // Round-trip through JSON, as `lemmata probe fit` and `--probe` do.
+    let path = std::env::temp_dir().join(format!("lemmata_probe_{}.json", std::process::id()));
     std::fs::write(&path, serde_json::to_string(&probe).unwrap()).unwrap();
     let loaded = Probe::load(&path).unwrap();
 

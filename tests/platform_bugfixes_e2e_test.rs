@@ -1,7 +1,7 @@
-use lemma::datasource::{DataItem, FileSource};
-use lemma::engine::slicing::{SliceBy, compute_arena_slice_matrix_with_options};
-use lemma::engine::{ClassifierConfig, ExperimentRunner, LayaClassifier};
-use lemma::model::{Checkpoint, ChunkStrategy, Downloader, Question, QuestionType};
+use lemmata::datasource::{DataItem, FileSource};
+use lemmata::engine::slicing::{SliceBy, compute_arena_slice_matrix_with_options};
+use lemmata::engine::{ClassifierConfig, ExperimentRunner, LayaClassifier};
+use lemmata::model::{Checkpoint, ChunkStrategy, Downloader, Question, QuestionType};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -162,7 +162,7 @@ fn test_downloader_verify_checkpoint_no_false_positive_on_missing_dir() {
 
     // Even if a sibling root directory has config.json + model.safetensors,
     // verifying EuroBert when the target subdir does not exist must not report valid.
-    let tmp_root = std::env::temp_dir().join("lemma_verify_ckpt_bugfix_test");
+    let tmp_root = std::env::temp_dir().join("lemmata_verify_ckpt_bugfix_test");
     let _ = std::fs::remove_dir_all(&tmp_root);
     std::fs::create_dir_all(&tmp_root).unwrap();
     std::fs::write(tmp_root.join("config.json"), "{}").unwrap();

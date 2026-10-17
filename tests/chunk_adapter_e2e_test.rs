@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use lemma::datasource::FileSource;
-use lemma::engine::LayaClassifier;
-use lemma::model::{
+use lemmata::datasource::FileSource;
+use lemmata::engine::LayaClassifier;
+use lemmata::model::{
     Checkpoint, ChunkStrategy, Question, chunk_text_for_window, estimate_tokens, pool_window_logits,
 };
 

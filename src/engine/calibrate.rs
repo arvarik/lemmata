@@ -11,9 +11,9 @@ use crate::engine::metrics::calculate_ece;
 use crate::engine::ood::euclidean_distance;
 use crate::model::{Checkpoint, Question, QuestionType};
 
-/// Lowest temperature lemma fits or applies to a bucket.
+/// Lowest temperature lemmata fits or applies to a bucket.
 pub const MIN_TEMPERATURE: f64 = 0.5;
-/// Highest temperature lemma fits or applies to a bucket.
+/// Highest temperature lemmata fits or applies to a bucket.
 pub const MAX_TEMPERATURE: f64 = 5.0;
 /// Fewer labeled samples than this cannot support a fitted bucket temperature.
 pub const DEFAULT_MIN_BUCKET_SAMPLES: usize = 30;
@@ -685,7 +685,7 @@ impl CalibrationTuner {
     /// Format calibration report as a readable ASCII table.
     pub fn format_table(report: &CalibrationReport, export_path: Option<&Path>) -> String {
         let mut out = format!(
-            "\n🌡️  Lemma Temperature Calibration Tuner\nDataset:       {} ({} samples)\nLoss Function: {:?} Loss ({:.1}ms)\n\n",
+            "\n🌡️  Lemmata Temperature Calibration Tuner\nDataset:       {} ({} samples)\nLoss Function: {:?} Loss ({:.1}ms)\n\n",
             report.dataset_name,
             report.total_samples,
             report.loss_function,
@@ -746,7 +746,7 @@ impl CalibrationTuner {
 
         if let Some(path) = export_path {
             out.push_str(&format!(
-                "\n✅ Saved calibrated configuration to {}\nUse with: lemma classify --config {}\n",
+                "\n✅ Saved calibrated configuration to {}\nUse with: lemmata classify --config {}\n",
                 path.display(),
                 path.display()
             ));

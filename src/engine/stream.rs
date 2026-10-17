@@ -33,7 +33,7 @@ pub struct StreamPipelineConfig {
     /// Signing key for attestation HMAC proofs.
     pub attest_secret: String,
 
-    /// File for the full signed receipts, so `lemma attest verify` can check them later.
+    /// File for the full signed receipts, so `lemmata attest verify` can check them later.
     /// Without it, records keep only each receipt's digest.
     pub receipt_log: Option<std::path::PathBuf>,
 
@@ -517,7 +517,7 @@ impl StreamPipeline {
             Cell::new(format!("{:.3} ms", metrics.avg_item_latency_ms)),
         ]);
 
-        format!("\n⚡ Lemma Streaming Pipeline Results:\n{}", table)
+        format!("\n⚡ Lemmata Streaming Pipeline Results:\n{}", table)
     }
 
     /// Formats streaming performance metrics as JSON.

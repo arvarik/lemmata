@@ -122,7 +122,7 @@ pub fn resolve_data_source_filtered(
 }
 
 /// Resolve a StreamingDataSource based on a source URI or file path.
-/// Supported schemes (all read local files, lemma has no network clients for them):
+/// Supported schemes (all read local files, lemmata has no network clients for them):
 /// - `kafka://broker/topic?group_id=...&file=...` replays `file` with Kafka-style offsets
 /// - `s3://`, `gcs://`, `blob://` return an error that asks for a local copy
 /// - `lakehouse://path?columns=...` projects columns from a local file
@@ -142,7 +142,7 @@ pub fn resolve_streaming_source(
         } => {
             let Some(p) = payload_path else {
                 bail!(
-                    "lemma has no Kafka client. A kafka:// source replays the local JSONL file named by ?file=, for example kafka://{broker}/{topic}?file=data/tickets.jsonl"
+                    "lemmata has no Kafka client. A kafka:// source replays the local JSONL file named by ?file=, for example kafka://{broker}/{topic}?file=data/tickets.jsonl"
                 );
             };
             let mut kafka = datasource::KafkaSource::new(broker, topic, group_id);
@@ -158,7 +158,7 @@ pub fn resolve_streaming_source(
             bucket,
             key,
         } => bail!(
-            "lemma has no {provider} client. Download {provider}://{bucket}/{key} first, then pass the local path."
+            "lemmata has no {provider} client. Download {provider}://{bucket}/{key} first, then pass the local path."
         ),
         datasource::StreamSourceKind::LineStream { path } => {
             if let Some(p) = path {

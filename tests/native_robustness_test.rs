@@ -1,13 +1,13 @@
 //! Every installed native model returns well-formed answers on hostile inputs.
 //!
 //! The test needs weights in `models/`, so it skips checkpoints that are not installed (all of
-//! them on CI). Set `LEMMA_DEVICE=metal` to run it on the GPU.
+//! them on CI). Set `LEMMATA_DEVICE=metal` to run it on the GPU.
 
 use std::collections::BTreeMap;
 
-use lemma::engine::LayaClassifier;
-use lemma::model::native::{Backend, native_available, set_backend};
-use lemma::model::{Checkpoint, ChunkStrategy, Question, QuestionType};
+use lemmata::engine::LayaClassifier;
+use lemmata::model::native::{Backend, native_available, set_backend};
+use lemmata::model::{Checkpoint, ChunkStrategy, Question, QuestionType};
 
 fn questions(with_many_labels: bool) -> BTreeMap<String, Question> {
     let mut q: BTreeMap<String, Question> = serde_json::from_value(serde_json::json!({
@@ -54,7 +54,7 @@ fn inputs() -> Vec<(&'static str, serde_json::Value)> {
     ]
 }
 
-fn check(name: &str, res: &lemma::model::DecisionResult, questions: &BTreeMap<String, Question>) {
+fn check(name: &str, res: &lemmata::model::DecisionResult, questions: &BTreeMap<String, Question>) {
     assert!(
         !res.model.starts_with("mock:"),
         "{name}: simulated result {}",
@@ -150,7 +150,7 @@ fn native_models_return_well_formed_answers_on_hostile_inputs() {
                 check(&name, &res, &questions);
             }
         }
-        lemma::model::native::release_models();
+        lemmata::model::native::release_models();
         eprintln!("{}: ok", ckpt.short_name());
     }
 }

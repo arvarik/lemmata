@@ -2,7 +2,7 @@
 
 The model comes from transformers' AutoModelForMaskedLM with the remote code in
 models/eurobert (modeling_eurobert.py). The Rust parity test
-(tests/eurobert_parity_test.rs) compares lemma's EuroBertMlm with these token IDs
+(tests/eurobert_parity_test.rs) compares lemmata's EuroBertMlm with these token IDs
 and raw logits.
 
 Usage (needs torch, transformers 4.48, safetensors, numpy; the remote code does

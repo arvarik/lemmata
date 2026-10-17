@@ -143,7 +143,7 @@ impl EuroBertMlm {
         }
 
         let device = crate::model::native::device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[dir.join("model.safetensors")],

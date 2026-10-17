@@ -261,7 +261,7 @@ impl HuggingFaceSource {
         })
     }
 
-    /// Auto-generate aligned Lemma questions schema from dataset class labels
+    /// Auto-generate aligned Lemmata questions schema from dataset class labels
     /// `observed` holds the string labels seen in the fetched rows, used when the dataset declares
     /// no class names (for example a `label_text` column).
     pub fn generate_questions_schema(
@@ -295,7 +295,7 @@ impl HuggingFaceSource {
 
     fn fetch_page(&self, dataset_id: &str, offset: usize, length: usize) -> Result<HfRowsResponse> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE")
+        if std::env::var("LEMMATA_OFFLINE")
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -506,7 +506,7 @@ impl DataSource for HackerNewsSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE")
+        if std::env::var("LEMMATA_OFFLINE")
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -620,7 +620,7 @@ impl DataSource for WikipediaSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Offline test fixture check
-        if std::env::var("LEMMA_OFFLINE")
+        if std::env::var("LEMMATA_OFFLINE")
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -635,7 +635,7 @@ impl DataSource for WikipediaSource {
 
         let headers = [(
             "User-Agent",
-            "LemmaBot/0.1 (https://github.com/arvarik/lemma; pair@lemma.ai)",
+            "LemmataBot/0.1 (https://github.com/arvarik/lemmata)",
         )];
 
         if let Some(title) = &self.article_or_random {
@@ -684,7 +684,7 @@ impl DataSource for RedditSource {
 
     fn read_items(&self) -> Result<Vec<DataItem>> {
         // Desktop user agent to avoid Reddit CDN blocking
-        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (LemmaCLI/0.1)";
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (LemmataCLI/0.1)";
         let url = format!(
             "https://www.reddit.com/r/{}/hot.json?limit={}",
             self.subreddit, self.limit

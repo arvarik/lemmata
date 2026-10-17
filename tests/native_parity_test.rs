@@ -3,9 +3,9 @@
 //! `tests/fixtures/native_golden.json` comes from `tests/fixtures/native_golden.py`.
 //! The tests need the weights in `models/`, so they skip on CI.
 
-use lemma::model::ChunkStrategy;
-use lemma::model::native::{LayaModel, NativeModel, NliModel, ScoreRequest};
-use lemma::model::{Checkpoint, Question};
+use lemmata::model::ChunkStrategy;
+use lemmata::model::native::{LayaModel, NativeModel, NliModel, ScoreRequest};
+use lemmata::model::{Checkpoint, Question};
 
 #[test]
 fn native_inference_matches_python_reference() {
@@ -82,7 +82,7 @@ fn native_inference_matches_python_reference() {
             .score_batch(&reqs)
             .unwrap();
         for (scored, case) in batched.iter().zip(cases) {
-            // 40 long options overflow the head budget, so lemma runs its tournament there instead
+            // 40 long options overflow the head budget, so lemmata runs its tournament there instead
             // of upstream's even shrink. `option_logits` above still checks the upstream behavior.
             if case["name"] == "many_options" {
                 continue;
@@ -163,7 +163,7 @@ fn native_nli_matches_transformers() {
 
 #[test]
 fn route_sends_many_labels_to_an_installed_nli_model() {
-    use lemma::model::native::{Backend, native_available, set_backend};
+    use lemmata::model::native::{Backend, native_available, set_backend};
     let nli = [
         Checkpoint::ModernBertNli,
         Checkpoint::DebertaV3ZeroShot,
@@ -180,7 +180,7 @@ fn route_sends_many_labels_to_an_installed_nli_model() {
         "intent".to_string(),
         Question::new_choice("Which intent?", labels),
     );
-    let clf = lemma::engine::LayaClassifier::with_checkpoint(Checkpoint::AutoRoute);
+    let clf = lemmata::engine::LayaClassifier::with_checkpoint(Checkpoint::AutoRoute);
     let (picked, reason) = clf.resolve_checkpoint_for_questions("How do I top up?", &questions);
     assert_eq!((picked, reason), (expected, "high_cardinality_nli"));
 }

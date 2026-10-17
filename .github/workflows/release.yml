@@ -63,7 +63,7 @@ jobs:
         id: upload
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: lemma
+          bin: lemmata
           target: ${{ matrix.target }}
           archive: $bin-$target
           checksum: sha256
@@ -105,8 +105,8 @@ jobs:
           TAG="${{ github.ref_name }}"
           cat << 'EOF' > Dockerfile.release
           FROM gcr.io/distroless/static-debian12:nonroot
-          COPY target/x86_64-unknown-linux-musl/release/lemma /usr/local/bin/lemma
-          ENTRYPOINT ["/usr/local/bin/lemma"]
+          COPY target/x86_64-unknown-linux-musl/release/lemmata /usr/local/bin/lemmata
+          ENTRYPOINT ["/usr/local/bin/lemmata"]
           EOF
           docker build -f Dockerfile.release -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
           docker push "${IMAGE}:${TAG}"
@@ -115,4 +115,4 @@ jobs:
       - name: Attest Container Provenance
         uses: actions/attest@v4
         with:
-          subject-path: target/x86_64-unknown-linux-musl/release/lemma
+          subject-path: target/x86_64-unknown-linux-musl/release/lemmata

@@ -1,9 +1,9 @@
-use lemma::engine::LayaClassifier;
-use lemma::model::head_dispatch::{
+use lemmata::engine::LayaClassifier;
+use lemmata::model::head_dispatch::{
     HeadParadigm, head_paradigm_for, render_mlm_verbalizer_prompt, render_nli_hypothesis,
     score_head_paradigm_adjustment,
 };
-use lemma::model::{Checkpoint, Question, QuestionType, email_questions};
+use lemmata::model::{Checkpoint, Question, QuestionType, email_questions};
 
 #[test]
 fn test_head_paradigm_mapping_all_checkpoints() {

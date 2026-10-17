@@ -68,5 +68,5 @@ jobs:
       # The tests already built this binary. release.yml builds the release profile.
       - name: CLI smoke check
         run: |
-          target/debug/lemma --version
-          target/debug/lemma completions bash > /dev/null
+          target/debug/lemmata --version
+          target/debug/lemmata completions bash > /dev/null

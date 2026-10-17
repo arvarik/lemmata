@@ -1,8 +1,8 @@
-use lemma::benchmark::BenchmarkRunner;
-use lemma::datasource::{
+use lemmata::benchmark::BenchmarkRunner;
+use lemmata::datasource::{
     DataItem, DataSource, KafkaSource, MemorySource, StreamSink, StreamingDataSource,
 };
-use lemma::engine::{
+use lemmata::engine::{
     ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibratedAgentConfig,
     CalibrationLoss, CalibrationTuner, CascadeConfig, CascadeRouter, ClassifierConfig,
     ConformalEngine, ConsensusEngine, ConsensusStatus, DecisionCache, DriftEngine, Evaluator,
@@ -11,8 +11,8 @@ use lemma::engine::{
     SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
     SystemStatsReport, SystemTier, UncertaintyStrategy,
 };
-use lemma::model::{Checkpoint, HierarchicalSchema, Question, QuestionType, inspect_safetensors};
-use lemma::{resolve_data_source_filtered, resolve_streaming_source};
+use lemmata::model::{Checkpoint, HierarchicalSchema, Question, QuestionType, inspect_safetensors};
+use lemmata::{resolve_data_source_filtered, resolve_streaming_source};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -356,7 +356,7 @@ fn test_guardrail_policy_engine() {
     // Verify parenthesized clause in schema/policy.json (RULE_VIP_CHURN_ESCALATION)
     let schema_policy = GuardrailPolicy::from_file(Path::new("schema/policy.json")).unwrap();
     let schema_questions =
-        lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+        lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let schema_engine = GuardrailEngine::new(schema_policy);
     let mut churn_dec = classifier.classify(&item.state, &schema_questions).unwrap();
     for ans in churn_dec.answers.values_mut() {
@@ -507,7 +507,7 @@ fn test_semantic_decision_cache_integration() {
     let initial_res = cache.lookup(original_text, schema_hash);
     assert!(matches!(
         initial_res,
-        lemma::engine::CacheLookupResult::Miss
+        lemmata::engine::CacheLookupResult::Miss
     ));
 
     // 2. Classify and insert into cache
@@ -517,7 +517,7 @@ fn test_semantic_decision_cache_integration() {
 
     // 3. Exact cache lookup hits in sub-millisecond time
     match cache.lookup(original_text, schema_hash) {
-        lemma::engine::CacheLookupResult::ExactHit(res) => {
+        lemmata::engine::CacheLookupResult::ExactHit(res) => {
             assert_eq!(res.answers["dept"].choice.as_deref(), Some("billing"));
             assert!(res.latency_ms < 1.0);
         }
@@ -527,7 +527,7 @@ fn test_semantic_decision_cache_integration() {
     // 4. Paraphrased semantic lookup hits with high cosine similarity
     let paraphrased_text = "Can I get a refund for a duplicate invoice charge?";
     match cache.lookup(paraphrased_text, schema_hash) {
-        lemma::engine::CacheLookupResult::SemanticHit {
+        lemmata::engine::CacheLookupResult::SemanticHit {
             result, similarity, ..
         } => {
             assert_eq!(result.answers["dept"].choice.as_deref(), Some("billing"));
@@ -930,7 +930,7 @@ fn test_calibration_tuner_fit_and_metrics() {
     .unwrap();
 
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
     // The 18-row fixture is below the default 30-sample minimum, so opt in to fitting it.
     let tuner = CalibrationTuner::new(Checkpoint::English)
@@ -956,7 +956,7 @@ fn test_calibration_tuner_fit_and_metrics() {
 
     // Check rendered outputs
     let table = CalibrationTuner::format_table(&report, None);
-    assert!(table.contains("Lemma Temperature Calibration Tuner"));
+    assert!(table.contains("Lemmata Temperature Calibration Tuner"));
     assert!(table.contains("choice:3-5"));
     assert!(table.contains("noul:2"));
     assert!(table.contains("score:3-5"));
@@ -986,7 +986,7 @@ fn test_qats_profile_and_adaptive_classification() {
     .unwrap();
 
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
     let tuner = CalibrationTuner::new(Checkpoint::English)
         .with_loss(CalibrationLoss::Nll)
@@ -1039,7 +1039,7 @@ fn test_calibrated_config_roundtrip_and_losses() {
     .unwrap();
 
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
     // Test Brier Loss
     let tuner_brier = CalibrationTuner::new(Checkpoint::English)
@@ -1076,13 +1076,13 @@ fn test_calibrated_config_roundtrip_and_losses() {
 #[test]
 fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
     let source_file = Path::new("data/banking_tickets.jsonl");
-    let items = lemma::datasource::FileSource::parse_file(source_file).unwrap();
+    let items = lemmata::datasource::FileSource::parse_file(source_file).unwrap();
     assert_eq!(items.len(), 8);
 
     let mut kafka =
         KafkaSource::new("127.0.0.1:9092", "inbound_banking", "group_analytics").with_items(items);
 
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let primary_path = Path::new("target/integration_stream_primary.jsonl");
@@ -1166,7 +1166,7 @@ fn test_lakehouse_columnar_projection_and_streaming() {
     assert_eq!(source.committed_offset(), 2);
 
     // Run pipeline with limit
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let sink = StreamSink::from_target("target/integration_lakehouse_sink.jsonl").unwrap();
 
@@ -1183,7 +1183,7 @@ fn test_lakehouse_columnar_projection_and_streaming() {
 
 #[test]
 fn test_object_store_uri_rejected_and_stream_attestation_audit() {
-    // lemma has no object-store client, so it must not read a local file in place of s3://.
+    // lemmata has no object-store client, so it must not read a local file in place of s3://.
     let err = resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None)
         .err()
         .expect("s3:// must be rejected");
@@ -1191,7 +1191,7 @@ fn test_object_store_uri_rejected_and_stream_attestation_audit() {
 
     let mut source = resolve_streaming_source("data/customer_support.jsonl", None).unwrap();
 
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let sink_path = Path::new("target/integration_s3_sink.jsonl");
     if sink_path.exists() {
@@ -1214,14 +1214,16 @@ fn test_object_store_uri_rejected_and_stream_attestation_audit() {
     assert_eq!(metrics.total_attested, 4);
 
     // The full receipts verify with the signing key.
-    let receipts: Vec<lemma::engine::DecisionReceipt> =
+    let receipts: Vec<lemmata::engine::DecisionReceipt> =
         std::fs::read_to_string("target/integration_stream_receipts.jsonl")
             .unwrap()
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-    let report =
-        lemma::engine::AttestationEngine::verify_ledger(&receipts, "s3_compliance_audit_key_2026");
+    let report = lemmata::engine::AttestationEngine::verify_ledger(
+        &receipts,
+        "s3_compliance_audit_key_2026",
+    );
     assert_eq!(report.valid_receipts, 4);
     assert!(report.chain_intact);
 
@@ -1238,7 +1240,7 @@ fn test_object_store_uri_rejected_and_stream_attestation_audit() {
 
 #[test]
 fn test_active_learning_sampling_all_strategies() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1246,7 +1248,7 @@ fn test_active_learning_sampling_all_strategies() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let active_engine = ActiveLearningEngine::new();
@@ -1297,7 +1299,7 @@ fn test_active_learning_sampling_all_strategies() {
 
 #[test]
 fn test_active_learning_review_queue_export() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1305,7 +1307,7 @@ fn test_active_learning_review_queue_export() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let active_engine = ActiveLearningEngine::new();
@@ -1346,7 +1348,7 @@ fn test_active_learning_review_queue_export() {
 
 #[test]
 fn test_active_distill_rlcd_dataset_generation() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1354,7 +1356,7 @@ fn test_active_distill_rlcd_dataset_generation() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let active_engine = ActiveLearningEngine::new();
@@ -1410,7 +1412,7 @@ fn test_active_distill_rlcd_dataset_generation() {
 
 #[test]
 fn test_stats_engine_speed_performance_accuracy() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1418,7 +1420,7 @@ fn test_stats_engine_speed_performance_accuracy() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let stats_engine = StatsEngine::new(classifier)
@@ -1500,7 +1502,7 @@ fn test_stats_engine_speed_performance_accuracy() {
 
 #[test]
 fn test_stats_engine_with_semantic_cache() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1508,7 +1510,7 @@ fn test_stats_engine_with_semantic_cache() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let stats_engine = StatsEngine::new(classifier)
@@ -1530,7 +1532,7 @@ fn test_stats_engine_with_semantic_cache() {
 
 #[test]
 fn test_stats_engine_export_file() {
-    let source = lemma::resolve_data_source(
+    let source = lemmata::resolve_data_source(
         Path::new("data"),
         Some(Path::new("data/customer_support.jsonl")),
         false,
@@ -1538,7 +1540,7 @@ fn test_stats_engine_export_file() {
     )
     .unwrap();
     let items = source.read_items().unwrap();
-    let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
+    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
 
     let stats_engine = StatsEngine::new(classifier)
@@ -1570,10 +1572,10 @@ fn test_stats_engine_export_file() {
 #[test]
 fn test_huggingface_ingest_and_auto_schema() {
     unsafe {
-        std::env::set_var("LEMMA_OFFLINE", "1");
+        std::env::set_var("LEMMATA_OFFLINE", "1");
     }
 
-    let source = lemma::datasource::HuggingFaceSource::new("fancyzhx/ag_news").with_limit(4);
+    let source = lemmata::datasource::HuggingFaceSource::new("fancyzhx/ag_news").with_limit(4);
     let (items, schema) = source.read_items_with_schema().unwrap();
 
     assert_eq!(items.len(), 4);
@@ -1612,10 +1614,11 @@ fn test_huggingface_ingest_and_auto_schema() {
 #[test]
 fn test_web_scraper_html_extraction_and_classification() {
     unsafe {
-        std::env::set_var("LEMMA_OFFLINE", "1");
+        std::env::set_var("LEMMATA_OFFLINE", "1");
     }
 
-    let scraper = lemma::datasource::WebScraper::new(lemma::datasource::ScrapeOptions::default());
+    let scraper =
+        lemmata::datasource::WebScraper::new(lemmata::datasource::ScrapeOptions::default());
     let doc = scraper.scrape("https://example.com/ai-article").unwrap();
 
     assert_eq!(doc.title, "Fast Non-Autoregressive Decision Encoders");
@@ -1658,17 +1661,17 @@ fn test_web_scraper_html_extraction_and_classification() {
 #[test]
 fn test_hacker_news_and_wikipedia_ingestion() {
     unsafe {
-        std::env::set_var("LEMMA_OFFLINE", "1");
+        std::env::set_var("LEMMATA_OFFLINE", "1");
     }
 
-    let hn_source = lemma::datasource::HackerNewsSource::new("top", 1);
+    let hn_source = lemmata::datasource::HackerNewsSource::new("top", 1);
     let hn_items = hn_source.read_items().unwrap();
     assert_eq!(hn_items.len(), 1);
     assert_eq!(hn_items[0].id, "hn:39000000");
     assert!(hn_items[0].preview_text(200).contains("AWS terms"));
 
     let wiki_source =
-        lemma::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
+        lemmata::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
     let wiki_items = wiki_source.read_items().unwrap();
     assert_eq!(wiki_items.len(), 1);
     assert_eq!(wiki_items[0].id, "wiki:29414838");
@@ -1678,7 +1681,7 @@ fn test_hacker_news_and_wikipedia_ingestion() {
 #[test]
 fn test_web_source_parallel_read_items() {
     unsafe {
-        std::env::set_var("LEMMA_OFFLINE", "1");
+        std::env::set_var("LEMMATA_OFFLINE", "1");
     }
 
     let urls = vec![
@@ -1686,7 +1689,7 @@ fn test_web_source_parallel_read_items() {
         "https://example.com/page2".to_string(),
     ];
     let web_source =
-        lemma::datasource::WebSource::new(urls, lemma::datasource::ScrapeOptions::default());
+        lemmata::datasource::WebSource::new(urls, lemmata::datasource::ScrapeOptions::default());
     let items = web_source.read_items().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id, "https://example.com/page1");
@@ -1695,8 +1698,8 @@ fn test_web_source_parallel_read_items() {
 
 #[test]
 fn test_schema_hash_isolation_and_exact_keys() {
-    use lemma::create_inline_question;
-    use lemma::engine::{DecisionCache, compute_schema_hash};
+    use lemmata::create_inline_question;
+    use lemmata::engine::{DecisionCache, compute_schema_hash};
 
     let schema_support =
         create_inline_question("choice", "Department triage", "billing,sales,technical").unwrap();
@@ -1720,7 +1723,7 @@ fn test_schema_hash_isolation_and_exact_keys() {
 
 #[test]
 fn test_html_extractor_edge_cases_and_consecutive_lines() {
-    use lemma::datasource::HtmlExtractor;
+    use lemmata::datasource::HtmlExtractor;
 
     // Consecutive lines should have newline between them
     let html = "<p>First paragraph.</p><p>Second paragraph.</p>";
@@ -1739,7 +1742,7 @@ fn test_html_extractor_edge_cases_and_consecutive_lines() {
 
 #[test]
 fn test_two_sample_ks_identical_distributions_ties() {
-    use lemma::engine::drift::calculate_ks_statistic;
+    use lemmata::engine::drift::calculate_ks_statistic;
 
     let dist_a = vec![1.0, 1.0, 1.0];
     let dist_b = vec![1.0, 1.0];
@@ -1755,12 +1758,12 @@ fn test_shell_completions_generation() {
     use clap::CommandFactory;
     use clap_complete::Shell;
 
-    let mut cmd = lemma::cli::Cli::command();
+    let mut cmd = lemmata::cli::Cli::command();
     for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell] {
         let mut buf = Vec::new();
-        clap_complete::generate(shell, &mut cmd, "lemma", &mut buf);
+        clap_complete::generate(shell, &mut cmd, "lemmata", &mut buf);
         assert!(!buf.is_empty());
         let content = String::from_utf8_lossy(&buf);
-        assert!(content.contains("lemma"));
+        assert!(content.contains("lemmata"));
     }
 }
