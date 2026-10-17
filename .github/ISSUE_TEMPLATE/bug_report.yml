@@ -24,7 +24,6 @@ body:
         - Linux (Fedora/RHEL/Arch/Other)
         - macOS (Apple Silicon / ARM64)
         - macOS (Intel / x86_64)
-        - Windows (x86_64)
         - Other
     validations:
       required: true

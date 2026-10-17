@@ -41,7 +41,6 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --all-features
 
-  # Windows is built by release.yml on each tag, not on every PR, to keep CI under 10 minutes.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
