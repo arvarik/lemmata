@@ -748,17 +748,17 @@ impl LayaClassifier {
         }
         let embedding = crate::model::native::shared(ckpt, dir)?
             .embed(state_text, self.config.chunk_strategy)?;
-        if embedding.len() != probe.mean.len() {
+        if embedding.len() != probe.embedding_dim() {
             bail!(
                 "The probe expects {}-dimensional embeddings, and {ckpt} produced {}. Refit the probe.",
-                probe.mean.len(),
+                probe.embedding_dim(),
                 embedding.len()
             );
         }
         let mut input_tokens = estimate_tokens(state_text);
-        // A residual probe corrects the zero-shot logits, which it was fitted on rounded to 4
-        // decimals, as answers report them.
-        let zero_shot = if probe.residual {
+        // Residual and stacked probes read the zero-shot logits, which they were fitted on
+        // rounded to 4 decimals, as answers report them.
+        let zero_shot = if probe.uses_zero_shot() {
             let scored = self.score_options(state_text, q, &q.render_options(), ckpt, true)?;
             input_tokens += scored.input_tokens;
             Some(

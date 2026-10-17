@@ -2503,8 +2503,9 @@ fn handle_probe_fit(args: lemmata::cli::ProbeFitArgs) -> Result<()> {
     let probe = lemmata::engine::fit_probe(checkpoint, &items, &qid, q, strategy)?;
     write_json_file(&args.output, &probe)?;
     println!(
-        "🧭 Probe for '{qid}' on {}: {} labels, {} training items, L2 {}. Held-out accuracy: probe {:.1}%, zero-shot {:.1}%. Saved to {}",
+        "🧭 Probe for '{qid}' on {}: {} kind, {} labels, {} training items, L2 {}. Held-out accuracy: probe {:.1}%, zero-shot {:.1}%. Saved to {}",
         checkpoint.repo_id(),
+        probe.mode(),
         probe.labels.len(),
         probe.train_samples,
         probe.l2,

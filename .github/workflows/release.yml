@@ -12,8 +12,26 @@ permissions:
   attestations: write
 
 jobs:
+  verify-version:
+    name: Check Tag Matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Compare the tag with the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match the Cargo.toml version $version."
+            exit 1
+          fi
+
   create-release:
     name: Create GitHub Release
+    needs: [verify-version]
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -116,3 +134,30 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: target/x86_64-unknown-linux-musl/release/lemmata
+
+  # crates.io versions cannot be deleted, so publish only after every other job succeeds.
+  # cargo binstall also needs the release archives to exist.
+  publish-crate:
+    name: Publish to crates.io
+    needs: [upload-assets, publish-ghcr-package]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Trusted Publishing: GitHub's OIDC token buys a short-lived crates.io token, so no secret is stored.
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked

@@ -190,7 +190,7 @@ pub fn runnable_checkpoints() -> Vec<Checkpoint> {
 pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     if !has_native_impl(ckpt) {
         bail!(
-            "lemmata has no native inference for {ckpt}. Native inference supports english, multilingual, typed-decisions, modernbert-zeroshot and deberta-v3. Run with --backend auto or mock to simulate it."
+            "lemmata has no native inference for {ckpt}. Run with --backend auto or mock to simulate it."
         );
     }
     // ponytail: one lock covers loading, so a second checkpoint waits while the first loads.
@@ -213,7 +213,7 @@ pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     }
     .with_context(|| {
         format!(
-            "Failed to load {ckpt} from {}. Run `lemmata download` first.",
+            "Failed to load {ckpt} from {}. Run `lemmata download --checkpoint {ckpt}` first, or pass `--backend mock` to simulate it.",
             dir.display()
         )
     })?;
