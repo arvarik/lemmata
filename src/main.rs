@@ -33,15 +33,7 @@ use lemma::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let native = match cli.backend {
-        Backend::Native => true,
-        Backend::Mock => false,
-        Backend::Auto => Checkpoint::laya_checkpoints()
-            .iter()
-            .any(|&c| lemma::model::native::weights_present(c)),
-    };
-    lemma::model::native::set_native(native);
-    lemma::model::native::set_mock_notice(cli.backend == Backend::Auto && !native);
+    lemma::model::native::set_backend(cli.backend);
     if let Err(e) = run(cli) {
         if let Some(io_err) = e.downcast_ref::<std::io::Error>()
             && io_err.kind() == std::io::ErrorKind::BrokenPipe
@@ -365,7 +357,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     let ood_detector = match &args.ood_profile {
         Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
             std::fs::File::open(ood_path)?,
-        )?)),
+        )?)?),
         None => None,
     };
 
@@ -633,7 +625,7 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
                 let arena = ExperimentRunner::run_arena(
                     &items,
                     &questions,
-                    lemma::model::native::runnable_checkpoints(),
+                    &lemma::model::native::runnable_checkpoints(),
                     5,
                 )?;
                 serde_json::json!({
@@ -705,7 +697,7 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
     }
 
     let checkpoints: Vec<Checkpoint> = if args.checkpoints.eq_ignore_ascii_case("all") {
-        lemma::model::native::runnable_checkpoints().to_vec()
+        lemma::model::native::runnable_checkpoints()
     } else {
         let list: Vec<Checkpoint> = args
             .checkpoints
@@ -1897,12 +1889,14 @@ fn handle_ood(args: OodArgs) -> Result<()> {
                 questions.keys().next().unwrap()
             };
 
-            let mut profile =
-                OodDetector::fit("laya_profile", &items, &classifier, &questions, target_qid)?;
-            if (fit_args.fpr_rate - 0.05).abs() > 1e-6 {
-                let z = (-2.0 * fit_args.fpr_rate.clamp(1e-6, 0.99).ln()).sqrt();
-                profile.energy_threshold = profile.mean_energy + z * profile.std_energy;
-            }
+            let profile = OodDetector::fit(
+                "laya_profile",
+                &items,
+                &classifier,
+                &questions,
+                target_qid,
+                fit_args.fpr_rate,
+            )?;
 
             write_json_file(&fit_args.output, &profile)?;
 
@@ -1927,7 +1921,7 @@ fn handle_ood(args: OodArgs) -> Result<()> {
             let questions = load_questions_from_file(&eval_args.schema)?;
             let profile: OodProfile =
                 serde_json::from_reader(std::fs::File::open(&eval_args.profile)?)?;
-            let detector = OodDetector::new(profile);
+            let detector = OodDetector::new(profile)?;
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
             let id_items = lemma::datasource::FileSource::new(&eval_args.id_data).read_items()?;
@@ -2301,7 +2295,7 @@ fn run_hierarchical_classification(
     }
     if let Some(ood_path) = ood_profile {
         let profile: OodProfile = serde_json::from_reader(std::fs::File::open(ood_path)?)?;
-        router = router.with_ood_detector(std::sync::Arc::new(OodDetector::new(profile)));
+        router = router.with_ood_detector(std::sync::Arc::new(OodDetector::new(profile)?));
     }
 
     let mut results = router.classify_items(&items)?;
@@ -2661,7 +2655,7 @@ fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
     let ood_detector = match &args.ood_profile {
         Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
             std::fs::File::open(ood_path)?,
-        )?)),
+        )?)?),
         None => None,
     };
 
@@ -3058,6 +3052,14 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             lemma::engine::learn::print_reading_list(phase_num_filter);
         }
         return Ok(());
+    }
+
+    // The lesson demos call classify with `.expect`, so a checkpoint that cannot run natively
+    // would panic. Phase 3 always compares EuroBERT, which lemma can only simulate.
+    if lemma::model::native::backend() == Backend::Native {
+        bail!(
+            "lemma learn compares EuroBERT, which has no native inference in lemma. Run it with --backend auto (real weights where installed, labelled simulation elsewhere) or --backend mock."
+        );
     }
 
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {

@@ -240,7 +240,7 @@ impl ExperimentRunner {
         let report = Self::run_arena(
             items,
             questions,
-            crate::model::native::runnable_checkpoints(),
+            &crate::model::native::runnable_checkpoints(),
             5,
         )?;
         Self::print_arena_report(&report);

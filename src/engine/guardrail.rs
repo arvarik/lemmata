@@ -473,6 +473,7 @@ mod tests {
                 probabilities: BTreeMap::new(),
                 confidence: 0.9,
                 act_probability: Some(0.1),
+                logits: None,
             };
         let mut answers = BTreeMap::new();
         answers.insert("department".into(), make_ans(Some("sales"), None, None));

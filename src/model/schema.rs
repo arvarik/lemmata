@@ -192,6 +192,10 @@ pub struct DecisionAnswer {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub act_probability: Option<f64>,
+    /// Raw (pre-temperature) option logits in option order. Energy-based OOD scoring needs them,
+    /// because probabilities lose the logsumexp term.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logits: Option<Vec<f64>>,
 }
 
 /// The overall response for a single state input across all questions.

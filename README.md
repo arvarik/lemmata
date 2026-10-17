@@ -31,15 +31,27 @@ Latency and accuracy figures above are Convai's own measurements on a Tesla T4, 
 
 ### Inference backends
 
-lemma runs the Laya weights natively on CPU (a Rust port of the reference code, built on [candle](https://github.com/huggingface/candle)). `tests/laya_parity_test.rs` checks the port against the upstream Python code.
+lemma runs model weights natively on CPU with [candle](https://github.com/huggingface/candle). `tests/native_parity_test.rs` checks the Laya port against the upstream Python code, and the NLI models against `transformers`.
 
 | `--backend` (or `LEMMA_BACKEND`) | Behavior |
 |---|---|
-| `auto` (default) | Native inference when weights are in `models/laya`. Otherwise the mock, with a warning on stderr |
-| `native` | Native inference. Fails when the weights are missing |
-| `mock` | Keyword-rule simulator for tests and demos. It runs no model, and every result has a `mock:` model id |
+| `auto` (default) | Each checkpoint runs natively when lemma supports it and its weights are in `models/`. Every other checkpoint uses the mock, with one warning on stderr per checkpoint |
+| `native` | Native inference only. Fails for a checkpoint without weights or native support |
+| `mock` | Keyword-rule simulator for tests and demos. It runs no model |
 
-Native inference supports `english`, `multilingual`, `typed-decisions`, and `route`. The NLI baselines (`deberta-v3`, `modernbert-zeroshot`, `eurobert`, `neobert`, `jev`, `modernbert-nli`) exist only in the mock.
+Every mock result has a `mock:` model id, so simulated decisions cannot pass for model output.
+
+| Native support | Checkpoints |
+|---|---|
+| Laya decision head | `english`, `multilingual`, `typed-decisions` |
+| NLI zero-shot cross-encoder | `modernbert-zeroshot`, `deberta-v3` |
+| Mock only | `eurobert`, `neobert` (no candle implementation), `jev` (hosted model), `modernbert-nli` (no weights of its own) |
+
+NLI checkpoints score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
+
+`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not send long text to `modernbert-zeroshot`, because that fine-tune was trained at 512 tokens.
+
+`--chunk-strategy` works on real tokenizer tokens with native inference. `head-tail` keeps the first quarter of the token budget and the last three quarters (about 128 + 382 tokens of 510, as in Sun et al. 2019). `sliding-window` uses windows that overlap by a third and pools their logits. `input_tokens` reports the tokens the model read, and `latency_ms` excludes the one-time model load, which lemma prints to stderr.
 
 ---
 
@@ -300,8 +312,8 @@ lemma cache bench --file data/customer_support.jsonl --schema schema/questions.j
 lemma cache clear
 ```
 
-### 17. Free-Energy & Mahalanobis++ OOD Detection (`lemma ood`)
-Detects out-of-distribution inputs and domain drift by fitting Helmholtz Free-Energy profiles $E(x; T) = -T \ln \sum \exp(z_k / T)$ and $\ell_2$-normalized class centroid Mahalanobis distances:
+### 17. Energy-Based OOD Detection (`lemma ood`)
+Detects out-of-distribution inputs with the energy score of Liu et al. 2020, $E(x) = -\ln \sum_k \exp(z_k)$, on the raw option logits ($T = 1$). It also measures the distance to class centroids of hashed word features (not model embeddings). A profile covers one question. Its energy threshold is the in-distribution quantile that flags `--fpr-rate` of the in-distribution items, so `0.05` keeps 95% TPR. Profiles fitted before energy moved to raw logits are rejected, so refit them:
 
 ```bash
 # Fit an OOD baseline profile from golden in-distribution data
