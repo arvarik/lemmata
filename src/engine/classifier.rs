@@ -12,6 +12,9 @@ use crate::model::{
 
 static WARNED_HEAD_BUDGET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// Option count above which native routing prefers an NLI cross-encoder over Laya.
+const HIGH_CARDINALITY: usize = 20;
+
 /// Laya decision engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassifierConfig {
@@ -207,9 +210,27 @@ impl LayaClassifier {
         if backend() == Backend::Mock {
             return (dec.selected, dec.reason);
         }
-        // The meta-router sends long text to ModernBERT-zeroshot for its 8k window, but that
-        // fine-tune was trained at 512 tokens, so lemma does not follow that rule natively.
-        if dec.selected != Checkpoint::ModernBertZeroShot && native_available(dec.selected) {
+        // The meta-router sends long text to ModernBERT-zeroshot and EuroBERT for their 8k windows.
+        // Natively, the ModernBERT fine-tune was trained at 512 tokens, lemma caps EuroBERT at 2048,
+        // and EuroBERT is a base model without a classifier, so lemma does not follow those rules.
+        let long_context_pick = matches!(
+            dec.selected,
+            Checkpoint::ModernBertZeroShot | Checkpoint::EuroBert
+        );
+        // Above 20 options, each Laya option gets fewer than 10 of the head's 192 tokens. On
+        // Banking77 (77 labels) Laya scored 32-37% and the NLI models 68-73%, best first below.
+        if dec.max_label_cardinality > HIGH_CARDINALITY
+            && let Some(&nli) = [
+                Checkpoint::ModernBertNli,
+                Checkpoint::DebertaV3ZeroShot,
+                Checkpoint::ModernBertZeroShot,
+            ]
+            .iter()
+            .find(|&&c| native_available(c))
+        {
+            return (nli, "high_cardinality_nli");
+        }
+        if !long_context_pick && native_available(dec.selected) {
             return (dec.selected, dec.reason);
         }
         let (laya, reason) = Self::laya_route(state_text);
@@ -275,26 +296,62 @@ impl LayaClassifier {
         let mut total_tokens = 0;
         let mut answers = BTreeMap::new();
 
-        for (qid, q) in questions {
-            let options = q.render_options();
-            let k = options.len().max(2);
-            let shortlist = if self.config.shortlist_k > 0
-                && q.qtype == QuestionType::Choice
-                && options.len() > self.config.shortlist_k
-            {
-                Some(crate::engine::shortlist_options(
-                    &state_text,
-                    q,
-                    &options,
-                    self.config.shortlist_k,
-                ))
-            } else {
-                None
-            };
-            let eval_options: &[String] = shortlist
+        // Each question's options, after the optional lexical shortlist.
+        let plans: Vec<(Vec<String>, Option<crate::engine::ShortlistResult>)> = questions
+            .values()
+            .map(|q| {
+                let options = q.render_options();
+                let shortlist = (self.config.shortlist_k > 0
+                    && q.qtype == QuestionType::Choice
+                    && options.len() > self.config.shortlist_k)
+                    .then(|| {
+                        crate::engine::shortlist_options(
+                            &state_text,
+                            q,
+                            &options,
+                            self.config.shortlist_k,
+                        )
+                    });
+                (options, shortlist)
+            })
+            .collect();
+        let eval_options = |(options, shortlist): &(
+            Vec<String>,
+            Option<crate::engine::ShortlistResult>,
+        )|
+         -> Vec<String> {
+            shortlist
                 .as_ref()
-                .map(|s| s.kept_options.as_slice())
-                .unwrap_or(&options);
+                .map_or_else(|| options.clone(), |s| s.kept_options.clone())
+        };
+        let plan_options: Vec<Vec<String>> = plans.iter().map(eval_options).collect();
+        // Native models score every question in one call (Laya batches them in one forward pass).
+        let mut batched: Vec<Option<crate::model::native::Scored>> = if native {
+            let reqs: Vec<crate::model::native::ScoreRequest> = questions
+                .values()
+                .zip(&plan_options)
+                .map(|(q, options)| crate::model::native::ScoreRequest {
+                    state: &state_text,
+                    question: q,
+                    options,
+                    strategy: self.config.chunk_strategy,
+                    hypothesis_template: self.config.hypothesis_template.as_deref(),
+                    multi_label: self.config.multi_label,
+                })
+                .collect();
+            crate::model::native::shared(active_ckpt, &dir)?
+                .score_batch(&reqs)?
+                .into_iter()
+                .map(Some)
+                .collect()
+        } else {
+            (0..questions.len()).map(|_| None).collect()
+        };
+
+        for (i, (qid, q)) in questions.iter().enumerate() {
+            let (options, shortlist) = &plans[i];
+            let k = options.len().max(2);
+            let eval_options: &[String] = &plan_options[i];
 
             let head_budget = active_ckpt.head_budget();
             let est_option_tokens = eval_options
@@ -320,7 +377,10 @@ impl LayaClassifier {
             }
 
             // Raw logits for the options, pooled across windows for the sliding-window strategy
-            let scored = self.score_options(&state_text, q, eval_options, active_ckpt, true)?;
+            let scored = match batched[i].take() {
+                Some(scored) => scored,
+                None => self.score_options(&state_text, q, eval_options, active_ckpt, true)?,
+            };
             total_tokens += scored.input_tokens;
             let eval_logits = scored.logits;
             let raw_logits = if let Some(s) = &shortlist {

@@ -3,7 +3,8 @@
 //! `tests/fixtures/native_golden.json` comes from `tests/fixtures/native_golden.py`.
 //! The tests need the weights in `models/`, so they skip on CI.
 
-use lemma::model::native::{LayaModel, NliModel};
+use lemma::model::ChunkStrategy;
+use lemma::model::native::{LayaModel, NativeModel, NliModel, ScoreRequest};
 use lemma::model::{Checkpoint, Question};
 
 #[test]
@@ -55,6 +56,36 @@ fn native_inference_matches_python_reference() {
                     (got - want).abs() < 1e-3,
                     "{name}/{case_name}: logits {logits:?} != {expected:?}"
                 );
+            }
+        }
+        // Every case as one padded batch (mixed question types and lengths) must match too.
+        let cases = golden[name].as_array().unwrap();
+        let questions: Vec<Question> = cases
+            .iter()
+            .map(|c| serde_json::from_value(c["question"].clone()).unwrap())
+            .collect();
+        let options: Vec<Vec<String>> = questions.iter().map(|q| q.render_options()).collect();
+        let reqs: Vec<ScoreRequest> = cases
+            .iter()
+            .zip(&questions)
+            .zip(&options)
+            .map(|((c, q), o)| ScoreRequest {
+                state: c["state"].as_str().unwrap(),
+                question: q,
+                options: o,
+                strategy: ChunkStrategy::TruncatePrefix,
+                hypothesis_template: None,
+                multi_label: false,
+            })
+            .collect();
+        let batched = NativeModel::Laya(Box::new(model))
+            .score_batch(&reqs)
+            .unwrap();
+        for (scored, case) in batched.iter().zip(cases) {
+            let expected: Vec<f64> = serde_json::from_value(case["logits"].clone()).unwrap();
+            for (got, want) in scored.logits.iter().zip(&expected) {
+                max_diff = max_diff.max((got - want).abs());
+                assert!((got - want).abs() < 1e-3, "{name}: batched {got} != {want}");
             }
         }
         eprintln!("{name}: max logit difference {max_diff:.2e}");
@@ -123,4 +154,28 @@ fn native_nli_matches_transformers() {
         }
         eprintln!("{name}: max logit difference {max_diff:.2e}");
     }
+}
+
+#[test]
+fn route_sends_many_labels_to_an_installed_nli_model() {
+    use lemma::model::native::{Backend, native_available, set_backend};
+    let nli = [
+        Checkpoint::ModernBertNli,
+        Checkpoint::DebertaV3ZeroShot,
+        Checkpoint::ModernBertZeroShot,
+    ];
+    let Some(&expected) = nli.iter().find(|&&c| native_available(c)) else {
+        eprintln!("skipping: no NLI weights installed");
+        return;
+    };
+    set_backend(Backend::Auto);
+    let labels: Vec<String> = (0..30).map(|i| format!("intent_{i}")).collect();
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert(
+        "intent".to_string(),
+        Question::new_choice("Which intent?", labels),
+    );
+    let clf = lemma::engine::LayaClassifier::with_checkpoint(Checkpoint::AutoRoute);
+    let (picked, reason) = clf.resolve_checkpoint_for_questions("How do I top up?", &questions);
+    assert_eq!((picked, reason), (expected, "high_cardinality_nli"));
 }

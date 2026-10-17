@@ -63,25 +63,30 @@ On the GPU, batch commands classify items in order, because calls from many thre
 
 **NLI checkpoints** score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. All of a question's hypotheses run as one padded batch. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
 
-**Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions} Options: {labels}.\nAnswer:` with one mask per label token. An option's score is the mean log-probability of its label tokens, minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
+**Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions}\nAnswer:` with one mask per label token. An option's score is the log-probability of its label tokens (their sum), minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. The prompt does not list the options, because the model then copies whichever option has the right number of tokens. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
 
-Measured on `data/system1_golden_benchmark.jsonl` (24 items, 3 questions each, so 72 questions) with `lemma compare --device cpu`, on an Apple Silicon laptop CPU with Accelerate. Latency is per item, all 3 questions, with items running in parallel. Metal gives the same accuracy:
+Zero-shot accuracy, measured with `lemma test`. AG News, SST-2, and Banking77 are 200 public items each (`lemma fetch`, with a seeded random sample for Banking77). Golden is `data/system1_golden_benchmark.jsonl` (72 questions), and support is `data/customer_support.jsonl` (18 questions):
 
-| Checkpoint | Accuracy | Latency per item |
-|---|---|---|
-| `typed-decisions` | 79.2% | 325 ms |
-| `route` | 76.4% | 269 ms |
-| `deberta-v3` | 73.6% | 1204 ms |
-| `english` | 66.7% | 271 ms |
-| `multilingual` | 65.3% | 139 ms |
-| `modernbert-nli` | 59.7% | 615 ms |
-| `neobert` | 56.9% | 230 ms |
-| `modernbert-zeroshot` | 54.2% | 571 ms |
-| `eurobert` | 41.7% | 185 ms |
+| Checkpoint | AG News (4 topics) | SST-2 (sentiment) | Banking77 (77 intents) | Golden | Support |
+|---|---|---|---|---|---|
+| `english` | 95.0% | 86.5% | 36.0% | 66.7% | 77.8% |
+| `multilingual` | 93.5% | 79.0% | 32.0% | 65.3% | 72.2% |
+| `typed-decisions` | 95.5% | 86.0% | 37.0% | 79.2% | 88.9% |
+| `route` | 88.0% | 93.0% | 73.0% | 76.4% | 88.9% |
+| `modernbert-zeroshot` | 83.5% | 95.5% | 70.5% | 54.2% | 83.3% |
+| `modernbert-nli` | 88.0% | 96.5% | 73.0% | 59.7% | 77.8% |
+| `deberta-v3` | 88.0% | 93.0% | 68.5% | 73.6% | 88.9% |
+| `eurobert` | 69.5% | 78.5% | 34.5% | 52.8% | 50.0% |
+| `neobert` | 62.5% | 77.5% | 44.5% | 66.7% | 50.0% |
 
-These are zero-shot results on a small set. Calibrate on your own labelled data with `lemma calibrate`.
+What the table shows:
+- Laya leads on topic classification and on the typed-decision benchmarks. Convai lists topic classification as an in-task family for Laya.
+- The NLI models lead on sentiment and on many labels. Laya drops to 32-37% at 77 labels, which matches Convai's own Banking77 result (0.425).
+- EuroBERT and NeoBERT are pretrained encoders without a classifier, so label-word scoring is their ceiling.
 
-`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not send long text to `modernbert-zeroshot`, because that fine-tune was trained at 512 tokens.
+For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
+
+`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy table below).
 
 `--chunk-strategy` works on real tokenizer tokens with native inference. `head-tail` keeps the first quarter of the token budget and the last three quarters (about 128 + 382 tokens of 510, as in Sun et al. 2019). `sliding-window` uses windows that overlap by a third and pools their logits. `input_tokens` reports the tokens the model read, and `latency_ms` excludes the one-time model load, which lemma prints to stderr.
 
