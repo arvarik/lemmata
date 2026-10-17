@@ -71,12 +71,14 @@ pub fn calibrate_and_persist_checkpoints(
     items: &[DataItem],
     questions: &BTreeMap<String, Question>,
     enable_qats: bool,
+    min_bucket_samples: usize,
     base_dir: Option<&Path>,
 ) -> Result<BTreeMap<String, CalibrationReport>> {
     let mut reports = BTreeMap::new();
     for &ckpt in checkpoints {
         let (report, cfg) = CalibrationTuner::new(ckpt)
             .with_qats(enable_qats, 0.30)
+            .with_min_bucket_samples(min_bucket_samples)
             .fit(items, questions, "golden_benchmark")?;
         let target_dir = match base_dir {
             Some(base) => base.join(ckpt.short_name()),

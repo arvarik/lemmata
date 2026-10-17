@@ -899,18 +899,9 @@ fn build_phase_4() -> PhaseLesson {
     };
     let (id_top_p, id_helmholtz) = raw_helmholtz(&logits_id, 1.0);
     let (ood_top_p, ood_helmholtz) = raw_helmholtz(&logits_ood, 1.0);
-    let mut id_prob_map = BTreeMap::new();
-    id_prob_map.insert("billing".to_string(), 0.94);
-    id_prob_map.insert("technical".to_string(), 0.03);
-    id_prob_map.insert("security".to_string(), 0.02);
-    id_prob_map.insert("account".to_string(), 0.01);
-    let mut ood_prob_map = BTreeMap::new();
-    ood_prob_map.insert("billing".to_string(), 0.26);
-    ood_prob_map.insert("technical".to_string(), 0.25);
-    ood_prob_map.insert("security".to_string(), 0.25);
-    ood_prob_map.insert("account".to_string(), 0.24);
-    let fe_id_dist = crate::engine::ood::compute_free_energy(&id_prob_map, 1.0);
-    let fe_ood_dist = crate::engine::ood::compute_free_energy(&ood_prob_map, 1.0);
+    // The production energy function on the same logits: it matches the inline computation.
+    let fe_id = crate::engine::ood::compute_free_energy(&logits_id);
+    let fe_ood = crate::engine::ood::compute_free_energy(&logits_ood);
 
     // 3. Live Split Conformal Prediction on a 6-item calibration set
     let clf = LayaClassifier::with_checkpoint(Checkpoint::English);
@@ -1003,13 +994,13 @@ fn build_phase_4() -> PhaseLesson {
             (
                 "Free-Energy Translation Proof (ID vs OOD)".to_string(),
                 format!(
-                    "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (dist_E={:.2}->{:.2})",
+                    "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (lemma ood: {:+.2} vs {:+.2})",
                     id_top_p * 100.0,
                     ood_top_p * 100.0,
                     id_helmholtz,
                     ood_helmholtz,
-                    fe_id_dist,
-                    fe_ood_dist
+                    fe_id,
+                    fe_ood
                 ),
             ),
             (
@@ -1217,7 +1208,7 @@ fn build_phase_5() -> PhaseLesson {
             "2. Multi-Paradigm Consensus (lemma consensus): Combining models with different inductive biases (e.g. Laya JointSinglePass + DeBERTa-v3 NLI + ModernBERT-ZS) ",
             "lets us separate Aleatoric Uncertainty (the text itself is vague, so all models have flat probabilities) from Epistemic Uncertainty (models strongly disagree with each other, measured via Jensen-Shannon Divergence).\n\n",
             "3. Closed-Loop Flywheel (lemma slice-by -> drift -> active -> attest): Disaggregated slice matrices reveal where models fail; ",
-            "PSI/JS drift alerts catch distribution shift; active learning distills hard System 2 teacher labels back into System 1 (RLCD); and SHA-256 Merkle receipts provide tamper-evident compliance."
+            "PSI/JS drift alerts catch distribution shift; active learning distills hard System 2 teacher labels back into System 1 (RLCD); and SHA-256 hash-chained, HMAC-signed receipts provide tamper-evident compliance."
         )
         .to_string(),
         ascii_diagram: concat!(

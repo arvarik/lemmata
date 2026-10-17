@@ -9,9 +9,15 @@ use crate::engine::guardrail::GuardAction;
 use crate::engine::metrics::resolve_ground_truth_for_question;
 use crate::model::{DecisionResult, Question};
 
+/// How this build computes energy. A profile fitted another way cannot be compared with it.
+pub const ENERGY_KIND: &str = "neg-logsumexp-raw-logits";
+
 /// Out-of-distribution (OOD) detection profile fitted on in-distribution data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OodProfile {
+    /// Energy definition used to fit this profile (see [`ENERGY_KIND`]).
+    #[serde(default)]
+    pub energy_kind: String,
     pub name: String,
     pub question_id: String,
     pub target_classes: Vec<String>,
@@ -36,14 +42,21 @@ pub struct OodEvaluation {
     pub action: GuardAction,
 }
 
-/// Anomaly and OOD detector combining Helmholtz Free Energy and Mahalanobis++ distance.
+/// OOD detector combining energy on raw logits with a distance to class centroids of hashed
+/// word features (not model embeddings).
 pub struct OodDetector {
     profile: OodProfile,
 }
 
 impl OodDetector {
-    pub fn new(profile: OodProfile) -> Self {
-        Self { profile }
+    pub fn new(profile: OodProfile) -> Result<Self> {
+        if profile.energy_kind != ENERGY_KIND {
+            bail!(
+                "OOD profile '{}' was fitted by an older lemma that computed energy from probabilities. Refit it with `lemma ood fit`.",
+                profile.name
+            );
+        }
+        Ok(Self { profile })
     }
 
     pub fn profile(&self) -> &OodProfile {
@@ -51,12 +64,15 @@ impl OodDetector {
     }
 
     /// Fit an OOD profile on a golden in-distribution baseline dataset.
+    ///
+    /// The energy threshold flags `fpr_rate` of the in-distribution items (0.05 keeps 95% TPR).
     pub fn fit(
         name: impl Into<String>,
         items: &[DataItem],
         classifier: &LayaClassifier,
         questions: &BTreeMap<String, Question>,
         target_qid: &str,
+        fpr_rate: f64,
     ) -> Result<OodProfile> {
         let q = questions.get(target_qid).ok_or_else(|| {
             anyhow::anyhow!("Question '{}' not found in questions schema", target_qid)
@@ -98,8 +114,7 @@ impl OodDetector {
             .or_else(|| ans.choice.clone())
             .unwrap_or_else(|| "unknown".into());
 
-            let energy = compute_free_energy(&ans.probabilities, classifier.config().temperature);
-            energy_scores.push(energy);
+            energy_scores.push(compute_free_energy(answer_logits(ans, target_qid)?));
 
             class_features.entry(assigned_class).or_default().push(feat);
         }
@@ -148,10 +163,15 @@ impl OodDetector {
             class_variances.insert(cls, avg_dist.max(1e-3));
         }
 
-        let energy_threshold = mean_energy + 2.33 * std_energy;
+        // Empirical (1 - fpr_rate) quantile of the in-distribution energies.
+        let mut sorted = energy_scores.clone();
+        sorted.sort_by(f64::total_cmp);
+        let rank = ((1.0 - fpr_rate.clamp(0.0, 1.0)) * n).ceil() as usize;
+        let energy_threshold = sorted[rank.clamp(1, sorted.len()) - 1];
         let distance_threshold = 1.65;
 
         Ok(OodProfile {
+            energy_kind: ENERGY_KIND.to_string(),
             name: name.into(),
             question_id: target_qid.to_string(),
             target_classes,
@@ -176,7 +196,7 @@ impl OodDetector {
         })?;
 
         let feat = vectorize_text(text);
-        let energy = compute_free_energy(&ans.probabilities, 1.0);
+        let energy = compute_free_energy(answer_logits(ans, &self.profile.question_id)?);
         let energy_z = (energy - self.profile.mean_energy) / self.profile.std_energy;
 
         let mut min_dist = f64::INFINITY;
@@ -263,27 +283,21 @@ impl OodDetector {
     }
 }
 
-/// Compute Helmholtz Free Energy over the full probability distribution.
-/// Combines Shannon entropy, Rényi collision energy, and max-probability concentration
-/// so diffuse/uncertain OOD distributions yield significantly higher energy than confident ID inputs.
-pub fn compute_free_energy(probs: &BTreeMap<String, f64>, temperature: f64) -> f64 {
-    if probs.is_empty() {
-        return 10.0;
+/// Energy score of Liu et al. 2020, `E(x) = -logsumexp(z)` over raw logits with T = 1.
+/// Lower energy means more in-distribution. Probabilities cannot replace the logits, because
+/// softmax drops the logsumexp term that this score measures.
+pub fn compute_free_energy(logits: &[f64]) -> f64 {
+    let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        return f64::INFINITY;
     }
-    let temp = temperature.max(0.01);
-    let p_max = probs.values().copied().fold(0.0, f64::max).clamp(1e-9, 1.0);
-    let shannon: f64 = -probs
-        .values()
-        .filter(|&&p| p > 1e-9)
-        .map(|&p| p * p.ln())
-        .sum::<f64>();
-    let renyi: f64 = -probs
-        .values()
-        .map(|&p| p * p)
-        .sum::<f64>()
-        .clamp(1e-9, 1.0)
-        .ln();
-    temp * (0.5 * shannon + 0.3 * renyi - 0.2 * p_max.ln()).max(1e-6)
+    -(max + logits.iter().map(|z| (z - max).exp()).sum::<f64>().ln())
+}
+
+fn answer_logits<'a>(ans: &'a crate::model::DecisionAnswer, qid: &str) -> Result<&'a [f64]> {
+    ans.logits.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("The answer for '{qid}' has no raw logits, which energy scoring needs")
+    })
 }
 
 pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
@@ -337,6 +351,7 @@ mod tests {
             &classifier,
             &questions,
             "dept",
+            0.05,
         )
         .unwrap();
 
@@ -346,7 +361,7 @@ mod tests {
                 || profile.centroids.contains_key("technical")
         );
 
-        let detector = OodDetector::new(profile);
+        let detector = OodDetector::new(profile).unwrap();
 
         // In-distribution test
         let id_eval = detector
@@ -369,5 +384,26 @@ mod tests {
             )
             .unwrap();
         assert!(ood_eval.mahalanobis_distance > 0.5);
+    }
+
+    #[test]
+    fn energy_uses_logits_not_probabilities() {
+        // Shifting every logit leaves the softmax unchanged but moves the energy by the shift.
+        let z = [4.0, 1.0, 0.5];
+        let shifted = [6.0, 3.0, 2.5];
+        assert!((compute_free_energy(&z) - compute_free_energy(&shifted) - 2.0).abs() < 1e-12);
+        // Uniform logits: E = -(c + ln K).
+        assert!((compute_free_energy(&[1.0, 1.0]) + 1.0 + 2f64.ln()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stale_profiles_are_rejected() {
+        let profile: OodProfile = serde_json::from_value(serde_json::json!({
+            "name": "old", "question_id": "dept", "target_classes": [], "centroids": {},
+            "class_variances": {}, "mean_energy": 0.0, "std_energy": 1.0,
+            "energy_threshold": 0.1, "distance_threshold": 1.65
+        }))
+        .unwrap();
+        assert!(OodDetector::new(profile).is_err());
     }
 }

@@ -494,7 +494,10 @@ fn test_semantic_decision_cache_integration() {
     );
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let mut cache = DecisionCache::new(SemanticCacheConfig::default());
+    let mut cache = DecisionCache::new(SemanticCacheConfig {
+        semantic: true,
+        ..Default::default()
+    });
 
     let original_text = "Please refund duplicate charge on invoice";
     let state = serde_json::Value::String(original_text.into());
@@ -576,11 +579,12 @@ fn test_ood_detection_profile_and_quarantine() {
         &classifier,
         &questions,
         "dept",
+        0.05,
     )
     .unwrap();
 
     assert_eq!(profile.target_classes.len(), 2);
-    let detector = OodDetector::new(profile);
+    let detector = OodDetector::new(profile).unwrap();
 
     // In-distribution test sample
     let id_item = DataItem::new(
@@ -928,9 +932,11 @@ fn test_calibration_tuner_fit_and_metrics() {
     let items = source.read_items().unwrap();
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
+    // The 18-row fixture is below the default 30-sample minimum, so opt in to fitting it.
     let tuner = CalibrationTuner::new(Checkpoint::English)
         .with_loss(CalibrationLoss::Nll)
-        .with_bins(10);
+        .with_bins(10)
+        .with_min_bucket_samples(2);
 
     let (report, config) = tuner.fit(&items, &questions, "customer_support").unwrap();
 
@@ -985,6 +991,7 @@ fn test_qats_profile_and_adaptive_classification() {
     let tuner = CalibrationTuner::new(Checkpoint::English)
         .with_loss(CalibrationLoss::Nll)
         .with_bins(10)
+        .with_min_bucket_samples(2)
         .with_qats(true, 0.35);
 
     let (report, config) = tuner.fit(&items, &questions, "customer_support").unwrap();
@@ -1035,7 +1042,9 @@ fn test_calibrated_config_roundtrip_and_losses() {
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
 
     // Test Brier Loss
-    let tuner_brier = CalibrationTuner::new(Checkpoint::English).with_loss(CalibrationLoss::Brier);
+    let tuner_brier = CalibrationTuner::new(Checkpoint::English)
+        .with_loss(CalibrationLoss::Brier)
+        .with_min_bucket_samples(2);
     let (report_brier, _) = tuner_brier
         .fit(&items, &questions, "customer_support")
         .unwrap();
@@ -1043,7 +1052,9 @@ fn test_calibrated_config_roundtrip_and_losses() {
     assert!(report_brier.average_calibrated_ece < report_brier.average_raw_ece);
 
     // Test ECE Loss
-    let tuner_ece = CalibrationTuner::new(Checkpoint::English).with_loss(CalibrationLoss::Ece);
+    let tuner_ece = CalibrationTuner::new(Checkpoint::English)
+        .with_loss(CalibrationLoss::Ece)
+        .with_min_bucket_samples(2);
     let (report_ece, config_ece) = tuner_ece
         .fit(&items, &questions, "customer_support")
         .unwrap();
@@ -1170,10 +1181,14 @@ fn test_lakehouse_columnar_projection_and_streaming() {
 }
 
 #[test]
-fn test_object_store_streaming_and_attestation_audit() {
-    let mut source =
-        resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None).unwrap();
-    assert_eq!(source.name(), "ObjectStoreSource");
+fn test_object_store_uri_rejected_and_stream_attestation_audit() {
+    // lemma has no object-store client, so it must not read a local file in place of s3://.
+    let err = resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None)
+        .err()
+        .expect("s3:// must be rejected");
+    assert!(err.to_string().contains("no s3 client"));
+
+    let mut source = resolve_streaming_source("data/customer_support.jsonl", None).unwrap();
 
     let questions = lemma::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);

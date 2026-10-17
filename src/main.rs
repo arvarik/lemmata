@@ -9,7 +9,7 @@ use std::str::FromStr;
 use lemma::benchmark::BenchmarkRunner;
 use lemma::cli::{
     ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
-    AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
+    AttestCommands, Backend, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
     CascadeCommands, Cli, Commands, CompareArgs, CompletionsArgs, ConformalArgs, ConsensusArgs,
     DownloadArgs, DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
     GuideArgs, HierarchicalCommands, InfoArgs, InspectArgs, LearnArgs, OodArgs, OodCommands,
@@ -33,6 +33,7 @@ use lemma::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    lemma::model::native::set_backend(cli.backend);
     if let Err(e) = run(cli) {
         if let Some(io_err) = e.downcast_ref::<std::io::Error>()
             && io_err.kind() == std::io::ErrorKind::BrokenPipe
@@ -356,12 +357,13 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     let ood_detector = match &args.ood_profile {
         Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
             std::fs::File::open(ood_path)?,
-        )?)),
+        )?)?),
         None => None,
     };
 
     let mut cache = args.cache.then(|| {
         DecisionCache::new(SemanticCacheConfig {
+            semantic: args.cache_semantic,
             similarity_threshold: args.cache_threshold,
             ttl_seconds: args.cache_ttl,
             ..Default::default()
@@ -620,7 +622,12 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
                 serde_json::json!({ "mode": "temp", "sweep": rows })
             }
             ExperimentMode::Checkpoints => {
-                let arena = ExperimentRunner::run_arena(&items, &questions, Checkpoint::all(), 5)?;
+                let arena = ExperimentRunner::run_arena(
+                    &items,
+                    &questions,
+                    &lemma::model::native::runnable_checkpoints(),
+                    5,
+                )?;
                 serde_json::json!({
                     "mode": "checkpoints",
                     "reference_model": arena.reference_model,
@@ -690,7 +697,7 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
     }
 
     let checkpoints: Vec<Checkpoint> = if args.checkpoints.eq_ignore_ascii_case("all") {
-        Checkpoint::all().to_vec()
+        lemma::model::native::runnable_checkpoints()
     } else {
         let list: Vec<Checkpoint> = args
             .checkpoints
@@ -1598,7 +1605,7 @@ fn handle_guard(args: GuardArgs) -> Result<()> {
         ensure_parent_dir(receipt_path)?;
         let mut attest_engine = AttestationEngine::new(key);
         let mut file = std::fs::File::create(receipt_path)?;
-        let schema_digest = compute_schema_hash(&questions);
+        let schema_digest = lemma::engine::schema_digest(&questions)?;
 
         for (item, (_, dec)) in items.iter().zip(decisions.iter()) {
             let matched_rec = audit_records.iter().find(|r| r.item_id == item.id);
@@ -1776,7 +1783,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
     match args.action {
         CacheCommands::Stats => {
             println!(
-                "\n📊 Semantic Decision Cache Status:\n   Cache Architecture : In-Memory Two-Tier (Exact KV + Dense Cosine/HNSW)\n   Capacity Limit     : 10,000 entries\n   Default TTL        : 86,400s (24 hours)\n   Similarity Metric  : Normalized 128-d Hypersphere Cosine (threshold: 0.92)\n   Admission Filter   : confidence >= 0.70, act_probability <= 0.50"
+                "\n📊 Decision Cache Defaults:\n   Scope              : In memory, for one lemma run (nothing is persisted)\n   Exact tier         : Always on with --cache\n   Semantic tier      : Off unless --cache-semantic (cosine over hashed 128-d word features, threshold 0.92)\n   Capacity Limit     : 10,000 entries\n   Default TTL        : 86,400s (24 hours)\n   Admission Filter   : confidence >= 0.70, act_probability <= 0.50"
             );
         }
         CacheCommands::Bench(bench_args) => {
@@ -1789,6 +1796,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 
             let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
             let mut cache = DecisionCache::new(SemanticCacheConfig {
+                semantic: true,
                 similarity_threshold: bench_args.threshold,
                 ..Default::default()
             });
@@ -1852,7 +1860,9 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             ]);
             println!("{table}");
         }
-        CacheCommands::Clear => println!("🧹 In-memory and persistent decision cache cleared."),
+        CacheCommands::Clear => println!(
+            "🧹 Nothing to clear: the decision cache lives in memory and ends with each lemma run."
+        ),
     }
     Ok(())
 }
@@ -1879,12 +1889,14 @@ fn handle_ood(args: OodArgs) -> Result<()> {
                 questions.keys().next().unwrap()
             };
 
-            let mut profile =
-                OodDetector::fit("laya_profile", &items, &classifier, &questions, target_qid)?;
-            if (fit_args.fpr_rate - 0.05).abs() > 1e-6 {
-                let z = (-2.0 * fit_args.fpr_rate.clamp(1e-6, 0.99).ln()).sqrt();
-                profile.energy_threshold = profile.mean_energy + z * profile.std_energy;
-            }
+            let profile = OodDetector::fit(
+                "laya_profile",
+                &items,
+                &classifier,
+                &questions,
+                target_qid,
+                fit_args.fpr_rate,
+            )?;
 
             write_json_file(&fit_args.output, &profile)?;
 
@@ -1909,7 +1921,7 @@ fn handle_ood(args: OodArgs) -> Result<()> {
             let questions = load_questions_from_file(&eval_args.schema)?;
             let profile: OodProfile =
                 serde_json::from_reader(std::fs::File::open(&eval_args.profile)?)?;
-            let detector = OodDetector::new(profile);
+            let detector = OodDetector::new(profile)?;
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
             let id_items = lemma::datasource::FileSource::new(&eval_args.id_data).read_items()?;
@@ -2213,7 +2225,7 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "\n🛡️  Attestation Verification Report:\n   Total Receipts Evaluated : {}\n   Valid Cryptographic Sigs : {}\n   Invalid / Tampered Sigs  : {}\n   Merkle Chain Intact      : {}",
+                    "\n🛡️  Attestation Verification Report:\n   Total Receipts Evaluated : {}\n   Valid Cryptographic Sigs : {}\n   Invalid / Tampered Sigs  : {}\n   Hash Chain Intact        : {}",
                     report.total_receipts,
                     report.valid_receipts,
                     report.invalid_receipts,
@@ -2235,7 +2247,9 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
                 bail!("Attestation verification failed: Audit trail is tampered or invalid!");
             }
             if !verify_args.json {
-                println!("\n✅ Non-repudiable audit trail verified successfully under RFC 8785.");
+                println!(
+                    "\n✅ All receipt digests, HMAC-SHA256 signatures, and hash chain links verified."
+                );
             }
         }
     }
@@ -2281,7 +2295,7 @@ fn run_hierarchical_classification(
     }
     if let Some(ood_path) = ood_profile {
         let profile: OodProfile = serde_json::from_reader(std::fs::File::open(ood_path)?)?;
-        router = router.with_ood_detector(std::sync::Arc::new(OodDetector::new(profile)));
+        router = router.with_ood_detector(std::sync::Arc::new(OodDetector::new(profile)?));
     }
 
     let mut results = router.classify_items(&items)?;
@@ -2464,6 +2478,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
     let mut tuner = CalibrationTuner::new(checkpoint)
         .with_loss(loss)
         .with_bins(args.bins)
+        .with_min_bucket_samples(args.min_bucket_samples)
         .with_qats(args.adaptive, args.adaptive_gamma);
 
     if let Some(cw_spec) = &args.cost_weights {
@@ -2552,7 +2567,12 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
         escalate_threshold: args.escalate_threshold,
         enable_cache: args.cache,
         enable_attest: args.attest,
-        attest_secret: args.attest_secret,
+        attest_secret: match (args.attest, args.attest_secret) {
+            (true, None) => {
+                bail!("--attest needs a signing key. Set LEMMA_ATTEST_KEY or pass --attest-secret.")
+            }
+            (_, secret) => secret.unwrap_or_default(),
+        },
         limit: args.limit,
     };
 
@@ -2635,7 +2655,7 @@ fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
     let ood_detector = match &args.ood_profile {
         Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
             std::fs::File::open(ood_path)?,
-        )?)),
+        )?)?),
         None => None,
     };
 
@@ -3032,6 +3052,14 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             lemma::engine::learn::print_reading_list(phase_num_filter);
         }
         return Ok(());
+    }
+
+    // The lesson demos call classify with `.expect`, so a checkpoint that cannot run natively
+    // would panic. Phase 3 always compares EuroBERT, which lemma can only simulate.
+    if lemma::model::native::backend() == Backend::Native {
+        bail!(
+            "lemma learn compares EuroBERT, which has no native inference in lemma. Run it with --backend auto (real weights where installed, labelled simulation elsewhere) or --backend mock."
+        );
     }
 
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {

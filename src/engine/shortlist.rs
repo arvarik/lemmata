@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::cache::{cosine_similarity, vectorize_text};
 use crate::model::Question;
 
-/// Output of Stage-1 Bi-Encoder candidate option shortlisting prior to Cross-Encoder NLI scoring.
+/// Output of the lexical option shortlist that runs before model scoring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortlistResult {
     pub kept_indices: Vec<usize>,
@@ -143,8 +143,8 @@ const DOMAIN_SYNONYMS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Stage-1 Bi-Encoder Top-k Shortlisting: filters a high-cardinality option set (`K >> top_k`)
-/// down to `top_k` candidates in `O(1)` vector + lexical pass before Cross-Encoder NLI scoring.
+/// Lexical top-k shortlist: filters a high-cardinality option set (`K >> top_k`) down to `top_k`
+/// candidates with hashed word features and a fixed synonym table (no neural encoder), before model scoring.
 ///
 /// Preserves original ascending option indices in `kept_indices` and `kept_options`.
 pub fn shortlist_options(

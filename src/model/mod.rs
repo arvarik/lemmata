@@ -3,6 +3,7 @@ pub mod chunking;
 pub mod downloader;
 pub mod head_dispatch;
 pub mod meta_router;
+pub mod native;
 pub mod registry;
 pub mod safetensors;
 pub mod schema;
