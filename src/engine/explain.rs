@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use comfy_table::{Cell, Color, Table};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
@@ -63,17 +62,17 @@ impl<'a> AttributionEngine<'a> {
 
         let baseline_margin = (p_target + 1e-9).ln() - (p_contrast + 1e-9).ln();
 
-        // Parallel leave-one-out token ablation using Rayon
-        let mut attributions: Vec<TokenAttribution> = words
-            .par_iter()
-            .enumerate()
-            .map(|(idx, &word)| {
+        // Leave-one-out token ablation, in parallel on the CPU
+        let positions: Vec<usize> = (0..words.len()).collect();
+        let mut attributions: Vec<TokenAttribution> =
+            crate::model::native::map_items(&positions, |&idx| -> Result<TokenAttribution> {
+                let word = words[idx];
                 let mut perturbed_words = words.clone();
                 perturbed_words.remove(idx);
                 let perturbed_text = perturbed_words.join(" ");
 
                 let pert_state = serde_json::Value::String(perturbed_text);
-                let pert_res = self.classifier.classify(&pert_state, &q_map).unwrap();
+                let pert_res = self.classifier.classify(&pert_state, &q_map)?;
                 let pert_ans = &pert_res.answers[qid];
 
                 let pert_p_target = get_prob_ci(&pert_ans.probabilities, target_choice);
@@ -82,13 +81,14 @@ impl<'a> AttributionEngine<'a> {
                 let pert_margin = (pert_p_target + 1e-9).ln() - (pert_p_contrast + 1e-9).ln();
                 let delta = baseline_margin - pert_margin;
 
-                TokenAttribution {
+                Ok(TokenAttribution {
                     token: word.to_string(),
                     delta_margin: (delta * 1000.0).round() / 1000.0,
                     relative_influence_pct: 0.0,
-                }
+                })
             })
-            .collect();
+            .into_iter()
+            .collect::<Result<_>>()?;
 
         // Calculate relative contribution percentage
         let positive_sum: f64 = attributions

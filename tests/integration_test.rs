@@ -1107,6 +1107,7 @@ fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
             enable_cache: true,
             enable_attest: true,
             attest_secret: "integration_stream_secret_2026".into(),
+            receipt_log: None,
             limit: None,
         });
 
@@ -1203,6 +1204,7 @@ fn test_object_store_uri_rejected_and_stream_attestation_audit() {
             batch_size: 4,
             enable_attest: true,
             attest_secret: "s3_compliance_audit_key_2026".into(),
+            receipt_log: Some("target/integration_stream_receipts.jsonl".into()),
             limit: Some(4),
             ..Default::default()
         });
@@ -1210,6 +1212,18 @@ fn test_object_store_uri_rejected_and_stream_attestation_audit() {
     let metrics = pipeline.run(source.as_mut()).unwrap();
     assert_eq!(metrics.total_classified, 4);
     assert_eq!(metrics.total_attested, 4);
+
+    // The full receipts verify with the signing key.
+    let receipts: Vec<lemma::engine::DecisionReceipt> =
+        std::fs::read_to_string("target/integration_stream_receipts.jsonl")
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let report =
+        lemma::engine::AttestationEngine::verify_ledger(&receipts, "s3_compliance_audit_key_2026");
+    assert_eq!(report.valid_receipts, 4);
+    assert!(report.chain_intact);
 
     // Read sink and verify records have valid receipt_digest
     let content = std::fs::read_to_string(sink_path).unwrap();
