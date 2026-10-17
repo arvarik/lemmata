@@ -1,16 +1,19 @@
-"""Write tests/fixtures/laya_golden.json from the upstream Laya reference code.
+"""Write tests/fixtures/native_golden.json from reference Python code.
 
-The Rust parity test (tests/laya_parity_test.rs) compares lemma's native
-inference with these token IDs and raw option logits.
+Laya cases come from the upstream code that ships with the checkpoint. NLI cases
+come from transformers' AutoModelForSequenceClassification. The Rust parity test
+(tests/native_parity_test.rs) compares lemma's native inference with these token
+IDs and raw logits.
 
 Usage (needs torch, transformers, safetensors, numpy):
-    python tests/fixtures/laya_golden.py models/laya tests/fixtures/laya_golden.json
+    python tests/fixtures/native_golden.py models tests/fixtures/native_golden.json
 """
 import json
 import os
 import sys
 
-model_root, out_path = sys.argv[1], sys.argv[2]
+models_dir, out_path = sys.argv[1], sys.argv[2]
+model_root = os.path.join(models_dir, "laya")
 sys.path.insert(0, model_root)
 
 import torch  # noqa: E402
@@ -54,6 +57,29 @@ for sub in ["", "multilingual", "typed-decisions"]:
                      "input_ids": ids, "markers": markers, "logits": logits[0, :len(markers)].tolist()})
     golden[sub or "english"] = rows
     del agent
+
+from transformers import AutoModelForSequenceClassification, AutoTokenizer  # noqa: E402
+
+LONG = " ".join(["The invoice total was wrong and support never answered my emails."] * 80)
+PAIRS = [
+    ("short", TICKET, "This text is about billing."),
+    ("described", TICKET, "This text is about technical (bugs, outages, errors)."),
+    ("statement", "Production database crashed with OOM after the deploy.", "The customer asks for money back."),
+    ("long_premise", LONG, "This text is about billing."),
+]
+for name in ["modernbert-zeroshot", "deberta-v3"]:
+    path = os.path.join(models_dir, name)
+    tok = AutoTokenizer.from_pretrained(path)
+    model = AutoModelForSequenceClassification.from_pretrained(path, dtype=torch.float32).eval()
+    rows = []
+    for case, premise, hypothesis in PAIRS:
+        enc = tok(premise, hypothesis, truncation="only_first", max_length=512, return_tensors="pt")
+        with torch.no_grad():
+            logits = model(**enc).logits[0].tolist()
+        rows.append({"name": case, "premise": premise, "hypothesis": hypothesis,
+                     "input_ids": enc["input_ids"][0].tolist(), "logits": logits})
+    golden[name] = rows
+    del model
 
 with open(out_path, "w") as f:
     json.dump(golden, f)

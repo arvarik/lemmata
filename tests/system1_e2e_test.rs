@@ -40,6 +40,7 @@ impl DecisionModel for CustomMockSystem1Model {
                         ("other".into(), 0.08),
                     ]),
                     act_probability: Some(0.08),
+                    logits: None,
                 },
             );
         }

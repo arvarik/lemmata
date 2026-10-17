@@ -9,7 +9,7 @@ use std::path::PathBuf;
     author
 )]
 pub struct Cli {
-    /// Inference backend. `auto` runs the Laya weights in models/laya when they exist
+    /// Inference backend. `auto` runs real weights for each checkpoint that has them in models/
     #[arg(
         long,
         global = true,
@@ -23,16 +23,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-/// Where option logits come from.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    /// Native inference when Laya weights are on disk, otherwise the mock with a warning
-    Auto,
-    /// Native Laya inference. Fails when the weights are missing
-    Native,
-    /// Keyword-rule simulator for tests and demos. It runs no model
-    Mock,
-}
+pub use crate::model::native::Backend;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {

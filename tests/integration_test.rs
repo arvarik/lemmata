@@ -579,11 +579,12 @@ fn test_ood_detection_profile_and_quarantine() {
         &classifier,
         &questions,
         "dept",
+        0.05,
     )
     .unwrap();
 
     assert_eq!(profile.target_classes.len(), 2);
-    let detector = OodDetector::new(profile);
+    let detector = OodDetector::new(profile).unwrap();
 
     // In-distribution test sample
     let id_item = DataItem::new(

@@ -311,6 +311,7 @@ mod tests {
                 confidence: 0.96,
                 probabilities: BTreeMap::new(),
                 act_probability: Some(0.04),
+                logits: None,
             },
         );
 

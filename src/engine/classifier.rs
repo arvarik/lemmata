@@ -191,14 +191,49 @@ impl LayaClassifier {
         questions: &BTreeMap<String, Question>,
     ) -> (Checkpoint, &'static str) {
         if self.config.checkpoint == Checkpoint::AutoRoute {
-            // The meta-router can pick NLI baselines that have no native implementation.
-            if crate::model::native::native_enabled() {
-                return Self::laya_route(state_text);
-            }
-            let dec = crate::model::route_auto_best(state_text, questions);
-            (dec.selected, dec.reason)
+            Self::route_auto(state_text, questions)
         } else {
             (self.config.checkpoint, "configured")
+        }
+    }
+
+    /// The meta-router's pick, moved to an installed checkpoint when real weights are in use.
+    fn route_auto(
+        state_text: &str,
+        questions: &BTreeMap<String, Question>,
+    ) -> (Checkpoint, &'static str) {
+        use crate::model::native::{Backend, backend, native_available};
+        let dec = crate::model::route_auto_best(state_text, questions);
+        if backend() == Backend::Mock {
+            return (dec.selected, dec.reason);
+        }
+        // The meta-router sends long text to ModernBERT-zeroshot for its 8k window, but that
+        // fine-tune was trained at 512 tokens, so lemma does not follow that rule natively.
+        if dec.selected != Checkpoint::ModernBertZeroShot && native_available(dec.selected) {
+            return (dec.selected, dec.reason);
+        }
+        let (laya, reason) = Self::laya_route(state_text);
+        if native_available(laya) {
+            return (laya, reason);
+        }
+        match Checkpoint::laya_checkpoints()
+            .iter()
+            .find(|&&c| native_available(c))
+        {
+            Some(&installed) => (installed, "installed_fallback"),
+            // Nothing is installed: `auto` simulates the pick, `native` reports the missing weights.
+            None => (laya, reason),
+        }
+    }
+
+    /// Directory with the weights for `ckpt`: `local_weights_path` for the configured checkpoint.
+    fn weights_dir(&self, ckpt: Checkpoint) -> std::path::PathBuf {
+        match &self.config.local_weights_path {
+            Some(path) if ckpt == self.config.checkpoint => path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| ckpt.local_dir()),
+            _ => ckpt.local_dir(),
         }
     }
 
@@ -219,8 +254,6 @@ impl LayaClassifier {
         state: &serde_json::Value,
         questions: &BTreeMap<String, Question>,
     ) -> Result<DecisionResult> {
-        let start = Instant::now();
-
         if questions.is_empty() {
             bail!("No questions provided for classification");
         }
@@ -231,15 +264,14 @@ impl LayaClassifier {
         };
 
         let (active_ckpt, _) = self.resolve_checkpoint_for_questions(&state_text, questions);
+        // Load the weights before the clock starts, so latency_ms measures inference only.
+        let dir = self.weights_dir(active_ckpt);
+        let native = crate::model::native::uses_native(active_ckpt, &dir);
+        if native {
+            crate::model::native::shared(active_ckpt, &dir)?;
+        }
+        let start = Instant::now();
 
-        // Estimate token counts and enforce checkpoint context window limits
-        let state_tokens = estimate_tokens(&state_text);
-        let ctx_window = active_ckpt.context_window();
-        let chunks = crate::model::chunk_text_for_window(
-            &state_text,
-            ctx_window,
-            self.config.chunk_strategy,
-        );
         let mut total_tokens = 0;
         let mut answers = BTreeMap::new();
 
@@ -287,26 +319,10 @@ impl LayaClassifier {
                 }
             }
 
-            let q_tokens = est_option_tokens + state_tokens.min(ctx_window) + 10;
-            total_tokens += q_tokens;
-
-            // Compute raw logits for the options (pooling across chunks if SlidingWindow)
-            let eval_logits = if chunks.len() <= 1 {
-                self.compute_option_logits_for_checkpoint(
-                    chunks.first().map(|c| c.as_ref()).unwrap_or(&state_text),
-                    q,
-                    eval_options,
-                    active_ckpt,
-                )?
-            } else {
-                let win_logits: Vec<Vec<f64>> = chunks
-                    .iter()
-                    .map(|c| {
-                        self.compute_option_logits_for_checkpoint(c, q, eval_options, active_ckpt)
-                    })
-                    .collect::<Result<_>>()?;
-                crate::model::pool_window_logits(&win_logits)
-            };
+            // Raw logits for the options, pooled across windows for the sliding-window strategy
+            let scored = self.score_options(&state_text, q, eval_options, active_ckpt, true)?;
+            total_tokens += scored.input_tokens;
+            let eval_logits = scored.logits;
             let raw_logits = if let Some(s) = &shortlist {
                 crate::engine::expand_shortlisted_logits(
                     &eval_logits,
@@ -316,6 +332,12 @@ impl LayaClassifier {
             } else {
                 eval_logits
             };
+            let logits_out = Some(
+                raw_logits
+                    .iter()
+                    .map(|z| (z * 10000.0).round() / 10000.0)
+                    .collect(),
+            );
 
             // Temperature scaling per Laya RLCD calibration
             let temp_key = self.get_temperature_bucket(q.qtype, k);
@@ -460,6 +482,7 @@ impl LayaClassifier {
                                 noul: None,
                                 confidence,
                                 probabilities: prob_map,
+                                logits: logits_out.clone(),
                                 act_probability: Some(
                                     (act_probability * 10000.0).round() / 10000.0,
                                 ),
@@ -497,6 +520,7 @@ impl LayaClassifier {
                                 noul: None,
                                 confidence,
                                 probabilities: prob_map,
+                                logits: logits_out.clone(),
                                 act_probability: Some(
                                     (act_probability * 10000.0).round() / 10000.0,
                                 ),
@@ -520,6 +544,7 @@ impl LayaClassifier {
                             noul: None,
                             confidence,
                             probabilities: prob_map,
+                            logits: logits_out.clone(),
                             act_probability: Some((act_probability * 10000.0).round() / 10000.0),
                         },
                     );
@@ -554,6 +579,7 @@ impl LayaClassifier {
                             noul: Some((p_true * 10000.0).round() / 10000.0),
                             confidence,
                             probabilities: prob_map,
+                            logits: logits_out.clone(),
                             act_probability: Some((act_probability * 10000.0).round() / 10000.0),
                         },
                     );
@@ -565,7 +591,7 @@ impl LayaClassifier {
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
 
         // Label simulated results so they cannot pass for model output in logs or audit receipts.
-        let model = if crate::model::native::native_enabled() {
+        let model = if native {
             active_ckpt.repo_id().to_string()
         } else {
             format!("mock:{}", active_ckpt.repo_id())
@@ -616,33 +642,70 @@ impl LayaClassifier {
         options: &[String],
         active_ckpt: Checkpoint,
     ) -> Result<Vec<f64>> {
-        let native = crate::model::native::native_enabled();
-        let active_ckpt = match active_ckpt {
-            Checkpoint::AutoRoute if native => Self::laya_route(state_text).0,
-            Checkpoint::AutoRoute => {
-                let mut qmap = BTreeMap::new();
-                qmap.insert("q".to_string(), q.clone());
-                crate::model::route_auto_best(state_text, &qmap).selected
-            }
-            other => other,
+        Ok(self
+            .score_options(state_text, q, options, active_ckpt, false)?
+            .logits)
+    }
+
+    /// Score `options` for `ckpt`. `chunked` applies the configured chunk strategy to long text.
+    ///
+    /// The real model splits its own input on tokenizer tokens. The mock splits text on the
+    /// word-count estimate, and its token count is that estimate.
+    fn score_options(
+        &self,
+        state_text: &str,
+        q: &Question,
+        options: &[String],
+        ckpt: Checkpoint,
+        chunked: bool,
+    ) -> Result<crate::model::native::Scored> {
+        use crate::model::native;
+        let ckpt = if ckpt == Checkpoint::AutoRoute {
+            let mut qmap = BTreeMap::new();
+            qmap.insert("q".to_string(), q.clone());
+            Self::route_auto(state_text, &qmap).0
+        } else {
+            ckpt
         };
-        if native {
-            return crate::model::native::shared(active_ckpt)?.option_logits(
-                state_text,
-                q.qtype,
-                &q.instructions,
+        let strategy = if chunked {
+            self.config.chunk_strategy
+        } else {
+            crate::model::ChunkStrategy::TruncatePrefix
+        };
+        let dir = self.weights_dir(ckpt);
+        if native::uses_native(ckpt, &dir) {
+            return native::shared(ckpt, &dir)?.score(&native::ScoreRequest {
+                state: state_text,
+                question: q,
                 options,
-            );
-        }
-        if crate::model::native::mock_notice_enabled() {
-            static MOCK_WARNED: std::sync::Once = std::sync::Once::new();
-            MOCK_WARNED.call_once(|| {
-                eprintln!(
-                    "⚠️  No Laya weights found. lemma is using the keyword mock: these decisions are simulated, not model output. Run `lemma download` to use the real model."
-                )
+                strategy,
+                hypothesis_template: self.config.hypothesis_template.as_deref(),
+                multi_label: self.config.multi_label,
             });
         }
-        Ok(self.mock_option_logits(state_text, q, options, active_ckpt))
+        native::warn_simulated(ckpt, &dir);
+
+        let ctx_window = ckpt.context_window();
+        let logits = if chunked {
+            let chunks = crate::model::chunk_text_for_window(state_text, ctx_window, strategy);
+            if chunks.len() <= 1 {
+                let text = chunks.first().map(|c| c.as_ref()).unwrap_or(state_text);
+                self.mock_option_logits(text, q, options, ckpt)
+            } else {
+                let windows: Vec<Vec<f64>> = chunks
+                    .iter()
+                    .map(|c| self.mock_option_logits(c, q, options, ckpt))
+                    .collect();
+                crate::model::pool_window_logits(&windows)
+            }
+        } else {
+            self.mock_option_logits(state_text, q, options, ckpt)
+        };
+        let option_tokens: usize = options.iter().map(|o| estimate_tokens(o)).sum();
+        Ok(crate::model::native::Scored {
+            logits,
+            input_tokens: option_tokens + estimate_tokens(state_text).min(ctx_window) + 10,
+        })
     }
 
     /// Keyword-rule simulation of a System 1 encoder. It runs no neural network.

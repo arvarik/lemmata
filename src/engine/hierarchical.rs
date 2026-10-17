@@ -404,6 +404,7 @@ impl HierarchicalRouter {
                     confidence: result.compound_confidence,
                     probabilities: BTreeMap::new(),
                     act_probability: Some(0.1),
+                    logits: None,
                 },
             );
             let dec_res = DecisionResult {
