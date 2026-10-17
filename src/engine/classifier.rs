@@ -284,6 +284,23 @@ impl LayaClassifier {
             other => serde_json::to_string(other)?,
         };
 
+        let blank = |v: &serde_json::Value| match v {
+            serde_json::Value::String(s) => s.trim().is_empty(),
+            serde_json::Value::Null => true,
+            _ => false,
+        };
+        let empty = match state {
+            serde_json::Value::Object(map) => map.values().all(blank),
+            other => blank(other),
+        };
+        if empty {
+            static WARNED_EMPTY: std::sync::Once = std::sync::Once::new();
+            WARNED_EMPTY.call_once(|| {
+                eprintln!(
+                    "⚠️  An input text is empty. Its decisions reflect the model's prior, not the input."
+                )
+            });
+        }
         let (active_ckpt, _) = self.resolve_checkpoint_for_questions(&state_text, questions);
         // Load the weights before the clock starts, so latency_ms measures inference only.
         let dir = self.weights_dir(active_ckpt);
