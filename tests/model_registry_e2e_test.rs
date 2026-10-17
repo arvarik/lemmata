@@ -1,5 +1,5 @@
-use lemma::model::HeadParadigm;
-use lemma::model::registry::{
+use lemmata::model::HeadParadigm;
+use lemmata::model::registry::{
     compute_dir_size_bytes, inspect_model_directory, print_models_inventory, scan_registered_models,
 };
 use std::path::Path;
@@ -128,7 +128,7 @@ fn test_scan_all_seven_local_models_and_verify_paradigms() {
 #[test]
 fn test_synthetic_custom_gliclass_mmbert_directory() {
     let temp_dir = std::env::temp_dir().join(format!(
-        "lemma_custom_gliclass_mmbert_{}",
+        "lemmata_custom_gliclass_mmbert_{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&temp_dir);

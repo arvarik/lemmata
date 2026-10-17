@@ -28,7 +28,7 @@ pub struct ScrapeOptions {
 impl Default for ScrapeOptions {
     fn default() -> Self {
         Self {
-            user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; LemmaBot/0.1; +https://github.com/arvarik/lemma)".to_string(),
+            user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; LemmataBot/0.1; +https://github.com/arvarik/lemmata)".to_string(),
             timeout_secs: 15,
             max_chars: 4000,
             use_jina: false,
@@ -493,7 +493,7 @@ impl WebScraper {
 
     pub fn scrape(&self, url: &str) -> Result<ExtractedDocument> {
         // If offline mode is enabled via environment, check fixture
-        if std::env::var("LEMMA_OFFLINE")
+        if std::env::var("LEMMATA_OFFLINE")
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -547,7 +547,7 @@ impl WebScraper {
     }
 }
 
-/// Data source implementation allowing web URLs to feed directly into Lemma classifiers.
+/// Data source implementation allowing web URLs to feed directly into Lemmata classifiers.
 pub struct WebSource {
     pub urls: Vec<String>,
     pub scraper: WebScraper,

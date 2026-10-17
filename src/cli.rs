@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "lemma",
+    name = "lemmata",
     about = "High-performance System 1 decision platform for bidirectional encoders (Laya, ModernBERT, DeBERTa-v3, EuroBERT, NeoBERT)",
     version,
     author
@@ -14,7 +14,7 @@ pub struct Cli {
         long,
         global = true,
         value_enum,
-        env = "LEMMA_BACKEND",
+        env = "LEMMATA_BACKEND",
         default_value_t = Backend::Auto
     )]
     pub backend: Backend,
@@ -24,7 +24,7 @@ pub struct Cli {
         long,
         global = true,
         value_enum,
-        env = "LEMMA_DEVICE",
+        env = "LEMMATA_DEVICE",
         default_value_t = DeviceChoice::Auto
     )]
     pub device: DeviceChoice,
@@ -327,7 +327,7 @@ pub struct ClassifyArgs {
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
 
-    /// Supervised probe from `lemma probe fit`. It replaces zero-shot scoring for its question
+    /// Supervised probe from `lemmata probe fit`. It replaces zero-shot scoring for its question
     #[arg(long)]
     pub probe: Option<PathBuf>,
 }
@@ -497,7 +497,7 @@ pub struct TestArgs {
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
 
-    /// Supervised probe from `lemma probe fit`. It replaces zero-shot scoring for its question
+    /// Supervised probe from `lemmata probe fit`. It replaces zero-shot scoring for its question
     #[arg(long)]
     pub probe: Option<PathBuf>,
 }
@@ -817,8 +817,8 @@ pub struct GuardArgs {
     #[arg(long)]
     pub audit_output: Option<PathBuf>,
 
-    /// HMAC-SHA256 key that signs decision receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
-    #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
+    /// HMAC-SHA256 key that signs decision receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    #[arg(long, env = "LEMMATA_ATTEST_KEY", hide_env_values = true)]
     pub attest_key: Option<String>,
 
     /// Path to output cryptographically signed receipts JSONL
@@ -1153,12 +1153,12 @@ pub struct AttestVerifyArgs {
     )]
     pub receipt_log: PathBuf,
 
-    /// HMAC-SHA256 key that signed the receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    /// HMAC-SHA256 key that signed the receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
     #[arg(
         short,
         long,
         visible_alias = "attest-key",
-        env = "LEMMA_ATTEST_KEY",
+        env = "LEMMATA_ATTEST_KEY",
         hide_env_values = true
     )]
     pub secret_key: String,
@@ -1351,7 +1351,7 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = 10)]
     pub bins: usize,
 
-    /// Minimum labeled samples per bucket before lemma fits its temperature
+    /// Minimum labeled samples per bucket before lemmata fits its temperature
     #[arg(long, default_value_t = crate::engine::calibrate::DEFAULT_MIN_BUCKET_SAMPLES)]
     pub min_bucket_samples: usize,
 
@@ -1374,7 +1374,7 @@ pub struct CalibrateArgs {
     #[arg(short = 'e', long, alias = "output", visible_alias = "export")]
     pub export_config: Option<PathBuf>,
 
-    /// Persist calibrated profile directly into `<checkpoint_local_dir>/lemma_calibration.json` for auto-loading
+    /// Persist calibrated profile directly into `<checkpoint_local_dir>/lemmata_calibration.json` for auto-loading
     #[arg(long)]
     pub persist_to_model: bool,
 
@@ -1455,11 +1455,11 @@ pub struct StreamArgs {
     #[arg(long)]
     pub attest: bool,
 
-    /// HMAC-SHA256 key that signs receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
-    #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
+    /// HMAC-SHA256 key that signs receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    #[arg(long, env = "LEMMATA_ATTEST_KEY", hide_env_values = true)]
     pub attest_secret: Option<String>,
 
-    /// Write the full signed receipts to this JSONL file, for `lemma attest verify`
+    /// Write the full signed receipts to this JSONL file, for `lemmata attest verify`
     #[arg(long, requires = "attest")]
     pub receipt_log: Option<PathBuf>,
 

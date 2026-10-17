@@ -1,5 +1,5 @@
 name: Feature Request
-description: Propose a new feature, architecture idea, or CLI improvement for lemma.
+description: Propose a new feature, architecture idea, or CLI improvement for lemmata.
 title: "[FEATURE]: "
 labels: ["enhancement"]
 body:
@@ -16,7 +16,7 @@ body:
     attributes:
       label: Proposed Solution / CLI Interface
       description: Describe your proposed CLI subcommand, flag, engine module, or behavior.
-      placeholder: "lemma stream --lakehouse delta://path --compaction-interval 10m"
+      placeholder: "lemmata stream --lakehouse delta://path --compaction-interval 10m"
     validations:
       required: true
   - type: textarea

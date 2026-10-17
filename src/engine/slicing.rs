@@ -9,7 +9,7 @@ use super::evaluator::Evaluator;
 use crate::datasource::DataItem;
 use crate::model::{Checkpoint, Question, estimate_tokens};
 
-/// Diagnostic slicing dimension for disaggregated evaluation in `lemma test` and `lemma compare`.
+/// Diagnostic slicing dimension for disaggregated evaluation in `lemmata test` and `lemmata compare`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SliceBy {
     /// Group items by the alphabetic prefix of `item.id` before `'_'` or `'-'` (e.g. `en`, `neg`, `multi`, `long`, `struct`).

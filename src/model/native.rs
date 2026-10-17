@@ -65,9 +65,9 @@ pub fn device() -> Result<Device> {
         return Ok(d.clone());
     }
     let metal = || Device::new_metal(0).map_err(|e| anyhow!("no Metal GPU: {e}"));
-    // The CLI sets the choice. Library callers can set LEMMA_DEVICE, and otherwise get the CPU.
+    // The CLI sets the choice. Library callers can set LEMMATA_DEVICE, and otherwise get the CPU.
     let from_env = || {
-        let value = std::env::var("LEMMA_DEVICE").ok()?;
+        let value = std::env::var("LEMMATA_DEVICE").ok()?;
         <DeviceChoice as clap::ValueEnum>::from_str(&value, true).ok()
     };
     let choice = DEVICE_CHOICE.get().copied().or_else(from_env);
@@ -92,7 +92,7 @@ pub fn backend() -> Backend {
     }
 }
 
-/// Checkpoints lemma can run natively.
+/// Checkpoints lemmata can run natively.
 pub fn has_native_impl(ckpt: Checkpoint) -> bool {
     matches!(
         ckpt,
@@ -140,7 +140,7 @@ pub(crate) fn warn_simulated(ckpt: Checkpoint, dir: &Path) {
         let why = if has_native_impl(ckpt) {
             format!("no weights in {}", dir.display())
         } else {
-            "lemma has no native implementation for it".to_string()
+            "lemmata has no native implementation for it".to_string()
         };
         eprintln!(
             "⚠️  {ckpt}: {why}. Its decisions are simulated by the keyword mock (model id mock:{ckpt})."
@@ -190,7 +190,7 @@ pub fn runnable_checkpoints() -> Vec<Checkpoint> {
 pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     if !has_native_impl(ckpt) {
         bail!(
-            "lemma has no native inference for {ckpt}. Native inference supports english, multilingual, typed-decisions, modernbert-zeroshot and deberta-v3. Run with --backend auto or mock to simulate it."
+            "lemmata has no native inference for {ckpt}. Native inference supports english, multilingual, typed-decisions, modernbert-zeroshot and deberta-v3. Run with --backend auto or mock to simulate it."
         );
     }
     // ponytail: one lock covers loading, so a second checkpoint waits while the first loads.
@@ -213,7 +213,7 @@ pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     }
     .with_context(|| {
         format!(
-            "Failed to load {ckpt} from {}. Run `lemma download` first.",
+            "Failed to load {ckpt} from {}. Run `lemmata download` first.",
             dir.display()
         )
     })?;
@@ -446,7 +446,7 @@ pub struct LayaModel {
     device: Device,
 }
 
-/// Load a tokenizer with its padding and truncation turned off. lemma builds and cuts every
+/// Load a tokenizer with its padding and truncation turned off. lemmata builds and cuts every
 /// sequence itself, and some tokenizer.json files pad each encoding to a fixed length.
 pub fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
     let mut tokenizer = Tokenizer::from_file(path).map_err(|e| anyhow!(e))?;
@@ -512,7 +512,7 @@ impl LayaModel {
         let (_, pad_id) = special("pad_token")?;
 
         let device = device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[dir.join("model.safetensors")],
@@ -937,7 +937,7 @@ impl NliModel {
             .ok_or_else(|| anyhow!("id2label needs a second label"))?;
 
         let device = device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[dir.join("model.safetensors")],

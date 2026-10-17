@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-# Lemma CLI Standalone Installer
-# Repository: https://github.com/arvarik/lemma
+# Lemmata CLI Standalone Installer
+# Repository: https://github.com/arvarik/lemmata
 
-REPO="arvarik/lemma"
-BINARY_NAME="lemma"
+REPO="arvarik/lemmata"
+BINARY_NAME="lemmata"
 
 # Color support check
 if [ -t 1 ]; then
@@ -99,7 +99,7 @@ CHECKSUM_FILE="${TARBALL}.sha256"
 DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
 # 5. Create Secure Temporary Directory
-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'lemma-install')"
+TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'lemmata-install')"
 cleanup() {
   rm -rf "$TMP_DIR"
 }

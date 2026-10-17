@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use lemma::datasource::DataItem;
-use lemma::model::meta_router::{MetaRouteDecision, route_auto_best, summarize_route_distribution};
-use lemma::model::{Checkpoint, Question, email_questions};
+use lemmata::datasource::DataItem;
+use lemmata::model::meta_router::{
+    MetaRouteDecision, route_auto_best, summarize_route_distribution,
+};
+use lemmata::model::{Checkpoint, Question, email_questions};
 
 fn pure_choice_schema(k: usize) -> BTreeMap<String, Question> {
     let labels: Vec<String> = (0..k).map(|i| format!("class_{i}")).collect();

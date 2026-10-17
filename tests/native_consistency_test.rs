@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use lemma::datasource::DataItem;
-use lemma::engine::LayaClassifier;
-use lemma::model::native::{Backend, native_available, set_backend};
-use lemma::model::{Checkpoint, ChunkStrategy, DecisionResult, Question};
+use lemmata::datasource::DataItem;
+use lemmata::engine::LayaClassifier;
+use lemmata::model::native::{Backend, native_available, set_backend};
+use lemmata::model::{Checkpoint, ChunkStrategy, DecisionResult, Question};
 
 const TOL: f64 = 2e-3;
 
@@ -151,7 +151,7 @@ fn native_answers_do_not_depend_on_how_they_are_computed() {
                 );
             }
         }
-        lemma::model::native::release_models();
+        lemmata::model::native::release_models();
         eprintln!("{name}: consistent");
     }
 }

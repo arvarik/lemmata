@@ -54,7 +54,7 @@ impl DataItem {
     }
 }
 
-/// Extensible trait for ingesting data into Lemma from any backend.
+/// Extensible trait for ingesting data into Lemmata from any backend.
 /// Custom sources (e.g. S3, Kafka, PostgreSQL, Snowflake) can implement this trait.
 pub trait DataSource: Send + Sync {
     /// Human-readable identifier for the data source.

@@ -52,7 +52,7 @@ impl Block {
         })
     }
 
-    /// `x` is (1, seq, d). There is no attention mask, because lemma runs one unpadded sequence.
+    /// `x` is (1, seq, d). There is no attention mask, because lemmata runs one unpadded sequence.
     fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Result<Tensor> {
         let (b, t, d) = x.dims3()?;
         let hd = d / self.n_heads;
@@ -99,7 +99,7 @@ impl NeoBertMlm {
             .with_context(|| format!("Malformed NeoBERT config in {}", path.display()))?;
 
         let device = crate::model::native::device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[dir.join("model.safetensors")],

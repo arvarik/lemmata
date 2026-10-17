@@ -6,8 +6,8 @@ use comfy_table::{Cell, Color, Table};
 use std::io::Write;
 use std::str::FromStr;
 
-use lemma::benchmark::BenchmarkRunner;
-use lemma::cli::{
+use lemmata::benchmark::BenchmarkRunner;
+use lemmata::cli::{
     ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
     AttestCommands, Backend, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
     CascadeCommands, Cli, Commands, CompareArgs, CompletionsArgs, ConformalArgs, ConsensusArgs,
@@ -16,8 +16,8 @@ use lemma::cli::{
     OutputFormat, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
     SchemaValidateArgs, ScrapeArgs, StatsArgs, StreamArgs, TestArgs,
 };
-use lemma::datasource::{DataItem, DataSource, StreamSink};
-use lemma::engine::{
+use lemmata::datasource::{DataItem, DataSource, StreamSink};
+use lemmata::engine::{
     ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner,
     CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
     DecisionCache, DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine,
@@ -25,16 +25,16 @@ use lemma::engine::{
     SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline,
     StreamPipelineConfig, UncertaintyStrategy, compute_schema_hash, parse_cost_weights,
 };
-use lemma::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
-use lemma::{
+use lemmata::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
+use lemmata::{
     create_inline_question, load_questions_from_file, resolve_data_source,
     resolve_data_source_filtered, resolve_streaming_source,
 };
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    lemma::model::native::set_backend(cli.backend);
-    lemma::model::native::set_device(cli.device);
+    lemmata::model::native::set_backend(cli.backend);
+    lemmata::model::native::set_device(cli.device);
     if let Err(e) = run(cli) {
         if let Some(io_err) = e.downcast_ref::<std::io::Error>()
             && io_err.kind() == std::io::ErrorKind::BrokenPipe
@@ -69,7 +69,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Hierarchical(args) => handle_hierarchical(args),
         Commands::Calibrate(args) => handle_calibrate(args),
         Commands::Probe(args) => match args.action {
-            lemma::cli::ProbeCommands::Fit(fit) => handle_probe_fit(fit),
+            lemmata::cli::ProbeCommands::Fit(fit) => handle_probe_fit(fit),
         },
         Commands::Stream(args) => handle_stream(args),
         Commands::Active(args) => handle_active(args),
@@ -88,7 +88,7 @@ fn handle_completions(args: CompletionsArgs) -> Result<()> {
 
     let mut cmd = Cli::command();
     let mut buf = Vec::new();
-    generate(args.shell, &mut cmd, "lemma", &mut buf);
+    generate(args.shell, &mut cmd, "lemmata", &mut buf);
     let mut stdout = std::io::stdout();
     if let Err(e) = stdout.write_all(&buf) {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -147,7 +147,7 @@ fn open_output_writer(output: Option<&std::path::Path>) -> Result<Box<dyn Write>
 
 fn load_schema_or_default(
     schema: Option<&std::path::Path>,
-) -> Result<std::collections::BTreeMap<String, lemma::model::Question>> {
+) -> Result<std::collections::BTreeMap<String, lemmata::model::Question>> {
     if let Some(path) = schema {
         load_questions_from_file(path)
     } else if std::path::Path::new("schema/questions.json").exists() {
@@ -160,7 +160,7 @@ fn load_schema_or_default(
 fn load_questions_or_inline(
     schema: Option<&std::path::Path>,
     instruction: &str,
-) -> Result<std::collections::BTreeMap<String, lemma::model::Question>> {
+) -> Result<std::collections::BTreeMap<String, lemmata::model::Question>> {
     match schema {
         Some(path) => load_questions_from_file(path),
         None => create_inline_question("choice", instruction, "billing,technical,sales,other"),
@@ -202,7 +202,8 @@ fn apply_calibrated_config(
         }
     }
     if let Some(qats_val) = val.get("qats").or_else(|| val.get("qats_profile"))
-        && let Ok(profile) = serde_json::from_value::<lemma::engine::QatsProfile>(qats_val.clone())
+        && let Ok(profile) =
+            serde_json::from_value::<lemmata::engine::QatsProfile>(qats_val.clone())
     {
         config.qats_profile = Some(profile);
     }
@@ -281,14 +282,14 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
+fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let inline_text = args.text.as_deref().or(args.positional_text.as_deref());
 
     let source: Box<dyn DataSource> = if let Some(url_str) = &args.url {
-        Box::new(lemma::datasource::WebSource::new(
+        Box::new(lemmata::datasource::WebSource::new(
             vec![url_str.clone()],
-            lemma::datasource::ScrapeOptions::default(),
+            lemmata::datasource::ScrapeOptions::default(),
         ))
     } else {
         resolve_data_source_filtered(
@@ -333,7 +334,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
 
     let chunk_strategy = args
         .chunk_strategy
-        .parse::<lemma::model::ChunkStrategy>()
+        .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut config = ClassifierConfig::with_checkpoint(checkpoint);
     config.multi_label = args.multi_label;
@@ -343,7 +344,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     config.chunk_strategy = chunk_strategy;
     config.shortlist_k = args.shortlist_k;
     if let Some(path) = &args.probe {
-        config.probe = Some(std::sync::Arc::new(lemma::engine::Probe::load(path)?));
+        config.probe = Some(std::sync::Arc::new(lemmata::engine::Probe::load(path)?));
     }
     if (args.temperature - 1.0).abs() > 1e-6 {
         config.temperature = args.temperature;
@@ -384,12 +385,12 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
         let text = item_text(item)?;
         if let Some(c) = &mut cache {
             match c.lookup(&text, &schema_hash) {
-                lemma::engine::CacheLookupResult::ExactHit(res)
-                | lemma::engine::CacheLookupResult::SemanticHit { result: res, .. } => {
+                lemmata::engine::CacheLookupResult::ExactHit(res)
+                | lemmata::engine::CacheLookupResult::SemanticHit { result: res, .. } => {
                     raw_results.push((item.id.clone(), res));
                     continue;
                 }
-                lemma::engine::CacheLookupResult::Miss => {}
+                lemmata::engine::CacheLookupResult::Miss => {}
             }
         }
 
@@ -566,7 +567,7 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     Ok(())
 }
 
-fn format_answer_value(ans: &lemma::model::DecisionAnswer, sep: &str) -> String {
+fn format_answer_value(ans: &lemmata::model::DecisionAnswer, sep: &str) -> String {
     if let Some(labels) = &ans.selected_labels {
         labels.join(sep)
     } else if let Some(c) = &ans.choice {
@@ -604,7 +605,7 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
             ExperimentMode::Order => {
                 let (qid, _) = questions
                     .iter()
-                    .find(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+                    .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
                     .unwrap_or_else(|| questions.iter().next().unwrap());
                 serde_json::json!({
                     "mode": "order",
@@ -632,7 +633,7 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
                 let arena = ExperimentRunner::run_arena(
                     &items,
                     &questions,
-                    &lemma::model::native::runnable_checkpoints(),
+                    &lemmata::model::native::runnable_checkpoints(),
                     5,
                 )?;
                 serde_json::json!({
@@ -656,7 +657,7 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
         ExperimentMode::Order => {
             let (qid, question) = questions
                 .iter()
-                .find(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+                .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
                 .unwrap_or_else(|| questions.iter().next().unwrap());
             ExperimentRunner::test_option_order_invariance(
                 &classifier,
@@ -686,7 +687,7 @@ fn handle_experiment(args: ExperimentArgs) -> Result<()> {
 fn handle_compare(args: CompareArgs) -> Result<()> {
     let chunk_strategy = args
         .chunk_strategy
-        .parse::<lemma::model::ChunkStrategy>()
+        .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut questions =
         load_questions_or_inline(args.schema.as_deref(), "Classify the topic or sentiment")?;
@@ -704,7 +705,7 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
     }
 
     let checkpoints: Vec<Checkpoint> = if args.checkpoints.eq_ignore_ascii_case("all") {
-        lemma::model::native::runnable_checkpoints()
+        lemmata::model::native::runnable_checkpoints()
     } else {
         let list: Vec<Checkpoint> = args
             .checkpoints
@@ -730,10 +731,10 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
     )?;
     let slice_matrix = if let Some(slice_str) = &args.slice_by {
         let mode = slice_str
-            .parse::<lemma::engine::SliceBy>()
+            .parse::<lemmata::engine::SliceBy>()
             .map_err(|e| anyhow::anyhow!(e))?;
         Some(
-            lemma::engine::slicing::compute_arena_slice_matrix_with_options(
+            lemmata::engine::slicing::compute_arena_slice_matrix_with_options(
                 &items,
                 &questions,
                 &checkpoints,
@@ -763,7 +764,7 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
     } else {
         ExperimentRunner::print_arena_report(&report);
         if let Some((slices, rows)) = &slice_matrix {
-            lemma::engine::print_arena_slice_matrix(slices, rows);
+            lemmata::engine::print_arena_slice_matrix(slices, rows);
         }
     }
     Ok(())
@@ -789,14 +790,14 @@ fn handle_test(args: TestArgs) -> Result<()> {
 
     let chunk_strategy = args
         .chunk_strategy
-        .parse::<lemma::model::ChunkStrategy>()
+        .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
     cfg.hypothesis_template = args.hypothesis_template.clone();
     cfg.chunk_strategy = chunk_strategy;
     cfg.shortlist_k = args.shortlist_k;
     if let Some(path) = &args.probe {
-        cfg.probe = Some(std::sync::Arc::new(lemma::engine::Probe::load(path)?));
+        cfg.probe = Some(std::sync::Arc::new(lemmata::engine::Probe::load(path)?));
     }
     if let Some(config_path) = &args.config {
         apply_calibrated_config(&mut cfg, config_path, args.temperature.is_none())?;
@@ -809,9 +810,9 @@ fn handle_test(args: TestArgs) -> Result<()> {
     }
     let slice_entries = if let Some(slice_str) = &args.slice_by {
         let mode = slice_str
-            .parse::<lemma::engine::SliceBy>()
+            .parse::<lemmata::engine::SliceBy>()
             .map_err(|e| anyhow::anyhow!(e))?;
-        Some(lemma::engine::evaluate_slices(
+        Some(lemmata::engine::evaluate_slices(
             &LayaClassifier::new(cfg.clone()),
             &items,
             &questions,
@@ -841,7 +842,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
     }
 
     let baseline_diff = if let Some(base_path) = &args.baseline {
-        let base_metrics: lemma::engine::EvaluationMetrics =
+        let base_metrics: lemmata::engine::EvaluationMetrics =
             serde_json::from_reader(std::fs::File::open(base_path)?)?;
         Some(Evaluator::compare_baseline(
             &metrics,
@@ -871,7 +872,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
     } else {
         Evaluator::print_report(&metrics);
         if let Some(slices) = &slice_entries {
-            lemma::engine::print_slice_report(slices);
+            lemmata::engine::print_slice_report(slices);
         }
         if let Some(diff) = &baseline_diff {
             Evaluator::print_baseline_diff(diff);
@@ -985,20 +986,20 @@ fn checkpoint_domain_summary(ckpt: Checkpoint) -> &'static str {
 
 fn handle_info(args: InfoArgs) -> Result<()> {
     if let Some(dir) = &args.inspect_dir {
-        let spec = lemma::model::inspect_model_directory(dir)?;
+        let spec = lemmata::model::inspect_model_directory(dir)?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&spec)?);
         } else {
-            lemma::model::print_models_inventory(&[spec]);
+            lemmata::model::print_models_inventory(&[spec]);
         }
         return Ok(());
     }
     if args.inventory {
-        let specs = lemma::model::scan_registered_models();
+        let specs = lemmata::model::scan_registered_models();
         if args.json {
             println!("{}", serde_json::to_string_pretty(&specs)?);
         } else {
-            lemma::model::print_models_inventory(&specs);
+            lemmata::model::print_models_inventory(&specs);
         }
         return Ok(());
     }
@@ -1025,7 +1026,7 @@ fn handle_info(args: InfoArgs) -> Result<()> {
                     .verify_checkpoint(c, &args.local_dir)
                     .map(|r| r.is_valid)
                     .unwrap_or(false);
-                let paradigm = lemma::model::head_paradigm_for(c);
+                let paradigm = lemmata::model::head_paradigm_for(c);
                 serde_json::json!({
                     "repo_id": c.repo_id(), "backbone": c.backbone(), "parameters": c.param_count(),
                     "context_window": c.context_window(), "head_budget": c.head_budget(),
@@ -1097,7 +1098,9 @@ fn handle_info(args: InfoArgs) -> Result<()> {
             }
         }
     } else {
-        println!("   Status: Directory does not exist yet. Run `lemma download` to fetch weights.");
+        println!(
+            "   Status: Directory does not exist yet. Run `lemmata download` to fetch weights."
+        );
     }
     println!();
     Ok(())
@@ -1201,7 +1204,7 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
         .or(args.input_text.as_deref())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Input text is required for `lemma explain`. Pass `<TEXT>` positionally or via `--text <TEXT>`."
+                "Input text is required for `lemmata explain`. Pass `<TEXT>` positionally or via `--text <TEXT>`."
             )
         })?;
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
@@ -1224,7 +1227,7 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
         .or_else(|| {
             questions
                 .iter()
-                .find(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+                .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
                 .map(|(k, _)| k.as_str())
         })
         .or_else(|| questions.keys().next().map(|s| s.as_str()))
@@ -1345,7 +1348,7 @@ fn handle_conformal(args: ConformalArgs) -> Result<()> {
     } else {
         questions
             .iter()
-            .find(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+            .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
             .unwrap_or_else(|| questions.iter().next().unwrap())
     };
 
@@ -1458,18 +1461,18 @@ fn handle_schema_infer(args: SchemaInferArgs) -> Result<()> {
             .copied()
             .unwrap_or((0, checkpoint.head_budget()));
         let criteria_snippet = match q.qtype {
-            lemma::model::QuestionType::Choice => match &q.criteria {
+            lemmata::model::QuestionType::Choice => match &q.criteria {
                 Some(serde_json::Value::Object(map)) => {
                     let keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
                     format!("{} labels: {}", keys.len(), keys.join(", "))
                 }
                 _ => "-".into(),
             },
-            lemma::model::QuestionType::Score => match &q.criteria {
+            lemmata::model::QuestionType::Score => match &q.criteria {
                 Some(serde_json::Value::Array(arr)) => format!("{} rubric levels", arr.len()),
                 _ => "-".into(),
             },
-            lemma::model::QuestionType::Noul => "boolean assertion [false, true]".into(),
+            lemmata::model::QuestionType::Noul => "boolean assertion [false, true]".into(),
         };
 
         table.add_row(vec![
@@ -1531,7 +1534,7 @@ fn handle_schema_optimize(args: SchemaOptimizeArgs) -> Result<()> {
 fn handle_drift(args: DriftArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_questions_or_inline(args.schema.as_deref(), "Classify topic")?;
-    let base_items = lemma::datasource::FileSource::new(&args.baseline).read_items()?;
+    let base_items = lemmata::datasource::FileSource::new(&args.baseline).read_items()?;
     let curr_items =
         resolve_data_source(&args.data_dir, args.current.as_deref(), false, None)?.read_items()?;
 
@@ -1614,7 +1617,7 @@ fn handle_guard(args: GuardArgs) -> Result<()> {
         ensure_parent_dir(receipt_path)?;
         let mut attest_engine = AttestationEngine::new(key);
         let mut file = std::fs::File::create(receipt_path)?;
-        let schema_digest = lemma::engine::schema_digest(&questions)?;
+        let schema_digest = lemmata::engine::schema_digest(&questions)?;
 
         for (item, (_, dec)) in items.iter().zip(decisions.iter()) {
             let matched_rec = audit_records.iter().find(|r| r.item_id == item.id);
@@ -1792,13 +1795,13 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
     match args.action {
         CacheCommands::Stats => {
             println!(
-                "\n📊 Decision Cache Defaults:\n   Scope              : In memory, for one lemma run (nothing is persisted)\n   Exact tier         : Always on with --cache\n   Semantic tier      : Off unless --cache-semantic (cosine over hashed 128-d word features, threshold 0.92)\n   Capacity Limit     : 10,000 entries\n   Default TTL        : 86,400s (24 hours)\n   Admission Filter   : confidence >= 0.70, act_probability <= 0.50"
+                "\n📊 Decision Cache Defaults:\n   Scope              : In memory, for one lemmata run (nothing is persisted)\n   Exact tier         : Always on with --cache\n   Semantic tier      : Off unless --cache-semantic (cosine over hashed 128-d word features, threshold 0.92)\n   Capacity Limit     : 10,000 entries\n   Default TTL        : 86,400s (24 hours)\n   Admission Filter   : confidence >= 0.70, act_probability <= 0.50"
             );
         }
         CacheCommands::Bench(bench_args) => {
             let schema =
                 load_questions_or_inline(bench_args.schema.as_deref(), "Department triage")?;
-            let items = lemma::datasource::FileSource::new(&bench_args.file).read_items()?;
+            let items = lemmata::datasource::FileSource::new(&bench_args.file).read_items()?;
             if items.is_empty() {
                 bail!("File contains no items: {}", bench_args.file.display());
             }
@@ -1830,8 +1833,8 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
                 let text = item_text(item)?;
                 if matches!(
                     cache.lookup(&text, &schema_hash),
-                    lemma::engine::CacheLookupResult::ExactHit(_)
-                        | lemma::engine::CacheLookupResult::SemanticHit { .. }
+                    lemmata::engine::CacheLookupResult::ExactHit(_)
+                        | lemmata::engine::CacheLookupResult::SemanticHit { .. }
                 ) {
                     hits += 1;
                 }
@@ -1870,7 +1873,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             println!("{table}");
         }
         CacheCommands::Clear => println!(
-            "🧹 Nothing to clear: the decision cache lives in memory and ends with each lemma run."
+            "🧹 Nothing to clear: the decision cache lives in memory and ends with each lemmata run."
         ),
     }
     Ok(())
@@ -1881,7 +1884,7 @@ fn handle_ood(args: OodArgs) -> Result<()> {
         OodCommands::Fit(fit_args) => {
             let checkpoint = parse_checkpoint(&fit_args.checkpoint)?;
             let questions = load_questions_from_file(&fit_args.schema)?;
-            let items = lemma::datasource::FileSource::new(&fit_args.train_data).read_items()?;
+            let items = lemmata::datasource::FileSource::new(&fit_args.train_data).read_items()?;
 
             log_status(
                 fit_args.json,
@@ -1933,8 +1936,9 @@ fn handle_ood(args: OodArgs) -> Result<()> {
             let detector = OodDetector::new(profile)?;
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
-            let id_items = lemma::datasource::FileSource::new(&eval_args.id_data).read_items()?;
-            let ood_items = lemma::datasource::FileSource::new(&eval_args.ood_data).read_items()?;
+            let id_items = lemmata::datasource::FileSource::new(&eval_args.id_data).read_items()?;
+            let ood_items =
+                lemmata::datasource::FileSource::new(&eval_args.ood_data).read_items()?;
 
             log_status(
                 eval_args.json,
@@ -2008,10 +2012,10 @@ fn handle_ood(args: OodArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_cascade_tune(tune_args: lemma::cli::CascadeTuneArgs, force_sweep: bool) -> Result<()> {
+fn handle_cascade_tune(tune_args: lemmata::cli::CascadeTuneArgs, force_sweep: bool) -> Result<()> {
     let checkpoint = parse_checkpoint(&tune_args.checkpoint)?;
     let questions = load_questions_from_file(&tune_args.schema)?;
-    let items = lemma::datasource::FileSource::new(&tune_args.val_data).read_items()?;
+    let items = lemmata::datasource::FileSource::new(&tune_args.val_data).read_items()?;
     let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
     if force_sweep || tune_args.sweep {
@@ -2213,7 +2217,7 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
     match args.action {
         AttestCommands::Verify(verify_args) => {
             let reader = std::io::BufReader::new(std::fs::File::open(&verify_args.receipt_log)?);
-            let mut receipts: Vec<lemma::engine::DecisionReceipt> = Vec::new();
+            let mut receipts: Vec<lemmata::engine::DecisionReceipt> = Vec::new();
             for line in std::io::BufRead::lines(reader) {
                 let l = line?;
                 if !l.trim().is_empty() {
@@ -2333,7 +2337,7 @@ fn run_hierarchical_classification(
     Ok(())
 }
 
-fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
+fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
     match args.command {
         HierarchicalCommands::Run(run_args) => {
             let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
@@ -2464,14 +2468,14 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
     }
 }
 
-fn handle_probe_fit(args: lemma::cli::ProbeFitArgs) -> Result<()> {
+fn handle_probe_fit(args: lemmata::cli::ProbeFitArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     if checkpoint == Checkpoint::AutoRoute {
         bail!("A probe reads one model's embeddings. Choose a checkpoint other than route.");
     }
     let strategy = args
         .chunk_strategy
-        .parse::<lemma::model::ChunkStrategy>()
+        .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
     let questions = load_questions_from_file(&args.schema)?;
     let qid = match &args.question {
@@ -2479,7 +2483,7 @@ fn handle_probe_fit(args: lemma::cli::ProbeFitArgs) -> Result<()> {
         None => {
             let choices: Vec<&String> = questions
                 .iter()
-                .filter(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+                .filter(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
                 .map(|(id, _)| id)
                 .collect();
             match choices.as_slice() {
@@ -2496,7 +2500,7 @@ fn handle_probe_fit(args: lemma::cli::ProbeFitArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Question '{qid}' is not in the schema"))?;
     let items = resolve_data_source(std::path::Path::new("data"), Some(&args.data), false, None)?
         .read_items()?;
-    let probe = lemma::engine::fit_probe(checkpoint, &items, &qid, q, strategy)?;
+    let probe = lemmata::engine::fit_probe(checkpoint, &items, &qid, q, strategy)?;
     write_json_file(&args.output, &probe)?;
     println!(
         "🧭 Probe for '{qid}' on {}: {} labels, {} training items, L2 {}. Held-out accuracy: probe {:.1}%, zero-shot {:.1}%. Saved to {}",
@@ -2510,7 +2514,7 @@ fn handle_probe_fit(args: lemma::cli::ProbeFitArgs) -> Result<()> {
     );
     if probe.validation_accuracy < probe.zero_shot_validation_accuracy {
         eprintln!(
-            "⚠️  The probe is less accurate than zero-shot scoring here. Fine-tuned checkpoints (Laya, NLI) usually do better with `lemma calibrate --fit-label-bias`."
+            "⚠️  The probe is less accurate than zero-shot scoring here. Fine-tuned checkpoints (Laya, NLI) usually do better with `lemmata calibrate --fit-label-bias`."
         );
     }
     Ok(())
@@ -2558,8 +2562,8 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
         }
         // Fit on top of the calibrated temperatures, which classify applies first.
         let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
-        lemma::engine::apply_persisted_calibration(&mut cfg, &calibrated_config);
-        let fit = lemma::engine::fit_label_bias(&LayaClassifier::new(cfg), &items, &questions)?;
+        lemmata::engine::apply_persisted_calibration(&mut cfg, &calibrated_config);
+        let fit = lemmata::engine::fit_label_bias(&LayaClassifier::new(cfg), &items, &questions)?;
         for (qid, (n, before, after)) in &fit.questions {
             eprintln!(
                 "🎯 Label bias for '{qid}': accuracy on these {n} samples {:.1}% -> {:.1}%",
@@ -2573,7 +2577,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
     }
 
     if args.persist_to_model {
-        let saved = lemma::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?;
+        let saved = lemmata::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?;
         eprintln!(
             "💾 Auto-persisted checkpoint calibration profile to: {}",
             saved.display()
@@ -2654,7 +2658,9 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
         enable_attest: args.attest,
         attest_secret: match (args.attest, args.attest_secret) {
             (true, None) => {
-                bail!("--attest needs a signing key. Set LEMMA_ATTEST_KEY or pass --attest-secret.")
+                bail!(
+                    "--attest needs a signing key. Set LEMMATA_ATTEST_KEY or pass --attest-secret."
+                )
             }
             (_, secret) => secret.unwrap_or_default(),
         },
@@ -2732,7 +2738,7 @@ fn handle_active(args: ActiveArgs) -> Result<()> {
 fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemma::datasource::FileSource::parse_file(&args.data)?;
+    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
     if items.is_empty() {
         bail!("No items found in dataset: {}", args.data.display());
     }
@@ -2787,7 +2793,7 @@ fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
 fn handle_active_distill(args: ActiveDistillArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemma::datasource::FileSource::parse_file(&args.data)?;
+    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
     if items.is_empty() {
         bail!("No items found in dataset: {}", args.data.display());
     }
@@ -2822,7 +2828,7 @@ fn handle_active_distill(args: ActiveDistillArgs) -> Result<()> {
 fn handle_active_stats(args: ActiveStatsArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemma::datasource::FileSource::parse_file(&args.data)?;
+    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
     let classifier = LayaClassifier::with_checkpoint(checkpoint);
 
     let total_len = items.len() * questions.len();
@@ -2908,7 +2914,7 @@ fn handle_stats(args: StatsArgs) -> Result<()> {
 fn handle_fetch(args: FetchArgs) -> Result<()> {
     let mut schema_generated = None;
     let (items, source_desc) = if let Some(dataset) = &args.hf {
-        let source = lemma::datasource::HuggingFaceSource::new(dataset)
+        let source = lemmata::datasource::HuggingFaceSource::new(dataset)
             .with_config(args.config)
             .with_split(args.split)
             .with_limit(args.limit)
@@ -2918,16 +2924,16 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
         schema_generated = Some((dataset.clone(), schema));
         (items, format!("Hugging Face dataset '{}'", dataset))
     } else if let Some(category) = &args.hn {
-        let source = lemma::datasource::HackerNewsSource::new(category, args.limit);
+        let source = lemmata::datasource::HackerNewsSource::new(category, args.limit);
         (
             source.read_items()?,
             format!("Hacker News feed '{}'", category),
         )
     } else if let Some(sub) = &args.reddit {
-        let source = lemma::datasource::RedditSource::new(sub, args.limit);
+        let source = lemmata::datasource::RedditSource::new(sub, args.limit);
         (source.read_items()?, format!("r/{} on Reddit", sub))
     } else if let Some(article) = &args.wikipedia {
-        let source = lemma::datasource::WikipediaSource::new(Some(article.clone()), args.limit);
+        let source = lemmata::datasource::WikipediaSource::new(Some(article.clone()), args.limit);
         (
             source.read_items()?,
             format!("Wikipedia article '{}'", article),
@@ -3005,7 +3011,7 @@ fn handle_fetch(args: FetchArgs) -> Result<()> {
 }
 
 fn handle_scrape(args: ScrapeArgs) -> Result<()> {
-    let scraper = lemma::datasource::WebScraper::new(lemma::datasource::ScrapeOptions {
+    let scraper = lemmata::datasource::WebScraper::new(lemmata::datasource::ScrapeOptions {
         timeout_secs: args.timeout,
         max_chars: args.max_chars,
         use_jina: args.jina,
@@ -3019,7 +3025,7 @@ fn handle_scrape(args: ScrapeArgs) -> Result<()> {
     );
 
     let state = serde_json::json!({ "title": doc.title, "text": doc.markdown, "url": doc.url, "words": doc.word_count });
-    let item = lemma::datasource::DataItem::new(format!("web:{}", doc.url), state, &doc.url);
+    let item = lemmata::datasource::DataItem::new(format!("web:{}", doc.url), state, &doc.url);
     let mut out_writer = open_output_writer(args.output.as_deref())?;
 
     match args.format {
@@ -3071,7 +3077,7 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             None
         };
         if args.json {
-            let entries = lemma::engine::build_glossary();
+            let entries = lemmata::engine::build_glossary();
             let filtered: Vec<_> = match filter {
                 Some(q) => {
                     let ql = q.to_lowercase();
@@ -3088,7 +3094,7 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&filtered)?);
         } else {
-            lemma::engine::print_glossary(filter);
+            lemmata::engine::print_glossary(filter);
         }
         return Ok(());
     }
@@ -3121,7 +3127,7 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
                     ) =>
                 {
                     Some(
-                        t.parse::<lemma::engine::CurriculumPhase>()
+                        t.parse::<lemmata::engine::CurriculumPhase>()
                             .map_err(|e| anyhow::anyhow!(e))?
                             .number(),
                     )
@@ -3132,17 +3138,17 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             None
         };
         if args.json {
-            let list = lemma::engine::learn::build_reading_list(phase_num_filter);
+            let list = lemmata::engine::learn::build_reading_list(phase_num_filter);
             println!("{}", serde_json::to_string_pretty(&list)?);
         } else {
-            lemma::engine::learn::print_reading_list(phase_num_filter);
+            lemmata::engine::learn::print_reading_list(phase_num_filter);
         }
         return Ok(());
     }
 
     // The lesson demos call classify with `.expect`, so under `native` a missing checkpoint would
     // panic. Check every checkpoint the lessons use before any lesson runs.
-    if lemma::model::native::backend() == Backend::Native {
+    if lemmata::model::native::backend() == Backend::Native {
         let missing: Vec<String> = [
             Checkpoint::English,
             Checkpoint::Multilingual,
@@ -3152,12 +3158,12 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             Checkpoint::EuroBert,
         ]
         .into_iter()
-        .filter(|&c| !lemma::model::native::native_available(c))
+        .filter(|&c| !lemmata::model::native::native_available(c))
         .map(|c| c.repo_id().to_string())
         .collect();
         if !missing.is_empty() {
             bail!(
-                "lemma learn needs weights for {}. Download them with `lemma download`, or run with --backend auto to simulate the missing ones.",
+                "lemmata learn needs weights for {}. Download them with `lemmata download`, or run with --backend auto to simulate the missing ones.",
                 missing.join(", ")
             );
         }
@@ -3165,33 +3171,33 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
 
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {
         if args.json {
-            let lessons: Vec<_> = lemma::engine::CurriculumPhase::all()
+            let lessons: Vec<_> = lemmata::engine::CurriculumPhase::all()
                 .into_iter()
-                .map(lemma::engine::build_phase_lesson)
+                .map(lemmata::engine::build_phase_lesson)
                 .collect();
             println!("{}", serde_json::to_string_pretty(&lessons)?);
         } else {
-            lemma::engine::print_all_phases();
+            lemmata::engine::print_all_phases();
         }
         return Ok(());
     }
 
     let phase_opt = match raw_target {
         Some(t) if !t.eq_ignore_ascii_case("quiz") => Some(
-            t.parse::<lemma::engine::CurriculumPhase>()
+            t.parse::<lemmata::engine::CurriculumPhase>()
                 .map_err(|e| anyhow::anyhow!(e))?,
         ),
         _ => None,
     };
 
     if args.interactive {
-        lemma::engine::run_interactive_session(phase_opt, args.quiz)?;
+        lemmata::engine::run_interactive_session(phase_opt, args.quiz)?;
         return Ok(());
     }
 
     if args.quiz || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("quiz")) {
         if args.json {
-            let all_q = lemma::engine::build_all_quiz_questions();
+            let all_q = lemmata::engine::build_all_quiz_questions();
             let filtered: Vec<_> = match phase_opt {
                 Some(p) => all_q
                     .into_iter()
@@ -3201,23 +3207,23 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&filtered)?);
         } else {
-            lemma::engine::run_quiz_non_interactive(phase_opt.map(|p| p.number()));
+            lemmata::engine::run_quiz_non_interactive(phase_opt.map(|p| p.number()));
         }
         return Ok(());
     }
 
     if let Some(phase) = phase_opt {
         if args.json {
-            let lesson = lemma::engine::build_phase_lesson(phase);
+            let lesson = lemmata::engine::build_phase_lesson(phase);
             println!("{}", serde_json::to_string_pretty(&lesson)?);
         } else {
-            lemma::engine::print_phase_lesson(phase);
+            lemmata::engine::print_phase_lesson(phase);
         }
         return Ok(());
     }
 
     if args.json {
-        let phases: Vec<_> = lemma::engine::CurriculumPhase::all()
+        let phases: Vec<_> = lemmata::engine::CurriculumPhase::all()
             .into_iter()
             .map(|p| {
                 serde_json::json!({
@@ -3231,14 +3237,14 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&phases)?);
     } else {
-        lemma::engine::print_curriculum_overview();
+        lemmata::engine::print_curriculum_overview();
     }
     Ok(())
 }
 
 fn handle_guide(args: GuideArgs) -> Result<()> {
     if args.json {
-        let recipes = lemma::engine::build_workflow_recipes();
+        let recipes = lemmata::engine::build_workflow_recipes();
         let filtered: Vec<_> = match args.topic.as_deref() {
             Some(q) => {
                 let ql = q.to_lowercase();
@@ -3253,7 +3259,7 @@ fn handle_guide(args: GuideArgs) -> Result<()> {
         };
         println!("{}", serde_json::to_string_pretty(&filtered)?);
     } else {
-        lemma::engine::print_workflow_guide(args.topic.as_deref());
+        lemmata::engine::print_workflow_guide(args.topic.as_deref());
     }
     Ok(())
 }

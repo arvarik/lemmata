@@ -215,8 +215,8 @@ impl LayaClassifier {
             return (dec.selected, dec.reason);
         }
         // The meta-router sends long text to ModernBERT-zeroshot and EuroBERT for their 8k windows.
-        // Natively, the ModernBERT fine-tune was trained at 512 tokens, lemma caps EuroBERT at 2048,
-        // and EuroBERT is a base model without a classifier, so lemma does not follow those rules.
+        // Natively, the ModernBERT fine-tune was trained at 512 tokens, lemmata caps EuroBERT at 2048,
+        // and EuroBERT is a base model without a classifier, so lemmata does not follow those rules.
         let long_context_pick = matches!(
             dec.selected,
             Checkpoint::ModernBertZeroShot | Checkpoint::EuroBert
@@ -401,7 +401,7 @@ impl LayaClassifier {
                     ))
                 {
                     eprintln!(
-                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed the Laya head budget ({} tokens). lemma scores them in rounds, which is slower. `route` sends questions with more than 20 options to an NLI model.",
+                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed the Laya head budget ({} tokens). lemmata scores them in rounds, which is slower. `route` sends questions with more than 20 options to an NLI model.",
                         qid, est_option_tokens, head_budget
                     );
                 }
@@ -525,7 +525,7 @@ impl LayaClassifier {
                 .round()
                 / 10000.0;
 
-            // Escalation signal from normalized entropy. lemma does not read Laya's act/escalate head:
+            // Escalation signal from normalized entropy. lemmata does not read Laya's act/escalate head:
             // upstream reports that head carries no usable signal, and confidence gating works better.
             let act_probability = (0.05 + 0.9 * entropy).clamp(0.0, 1.0);
 

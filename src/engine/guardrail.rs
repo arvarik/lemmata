@@ -308,7 +308,7 @@ impl GuardrailEngine {
     }
 
     pub fn print_report(records: &[AuditRecord]) {
-        println!("\n🛡️  Lemma Declarative Policy Guardrails Enforcement");
+        println!("\n🛡️  Lemmata Declarative Policy Guardrails Enforcement");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         let mut table = Table::new();

@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use lemma::datasource::FileSource;
-use lemma::engine::LayaClassifier;
-use lemma::engine::shortlist::{expand_shortlisted_logits, shortlist_options};
-use lemma::model::{Checkpoint, Question, QuestionType, estimate_tokens};
+use lemmata::datasource::FileSource;
+use lemmata::engine::LayaClassifier;
+use lemmata::engine::shortlist::{expand_shortlisted_logits, shortlist_options};
+use lemmata::model::{Checkpoint, Question, QuestionType, estimate_tokens};
 
 fn build_20_class_enterprise_question() -> Question {
     // 20 enterprise departments: each option is 6 whitespace words ("key: five word description")

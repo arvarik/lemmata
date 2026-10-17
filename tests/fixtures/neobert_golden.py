@@ -1,6 +1,6 @@
 """Write tests/fixtures/neobert_golden.json from the NeoBERT reference code (model.py).
 
-The Rust parity test (tests/neobert_parity_test.rs) compares lemma's NeoBERT port with
+The Rust parity test (tests/neobert_parity_test.rs) compares lemmata's NeoBERT port with
 these token IDs and masked-LM logits: the top 20 tokens at each [MASK], plus a few fixed
 tokens.
 

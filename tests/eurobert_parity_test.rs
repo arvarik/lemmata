@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use lemma::model::eurobert::EuroBertMlm;
+use lemmata::model::eurobert::EuroBertMlm;
 use tokenizers::Tokenizer;
 
 #[test]

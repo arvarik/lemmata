@@ -52,7 +52,7 @@ impl OodDetector {
     pub fn new(profile: OodProfile) -> Result<Self> {
         if profile.energy_kind != ENERGY_KIND {
             bail!(
-                "OOD profile '{}' was fitted by an older lemma that computed energy from probabilities. Refit it with `lemma ood fit`.",
+                "OOD profile '{}' was fitted by an older lemmata that computed energy from probabilities. Refit it with `lemmata ood fit`.",
                 profile.name
             );
         }

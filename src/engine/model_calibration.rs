@@ -8,9 +8,9 @@ use crate::engine::classifier::ClassifierConfig;
 use crate::model::{Checkpoint, Question};
 
 /// Canonical filename for per-checkpoint persisted calibration profiles.
-pub const MODEL_CALIBRATION_FILENAME: &str = "lemma_calibration.json";
+pub const MODEL_CALIBRATION_FILENAME: &str = "lemmata_calibration.json";
 
-/// Return the default local calibration file path `<ckpt.local_dir()>/lemma_calibration.json`.
+/// Return the default local calibration file path `<ckpt.local_dir()>/lemmata_calibration.json`.
 pub fn calibration_path_for(ckpt: Checkpoint) -> PathBuf {
     ckpt.local_dir().join(MODEL_CALIBRATION_FILENAME)
 }
@@ -23,7 +23,7 @@ pub fn save_checkpoint_calibration(
     save_checkpoint_calibration_at(&ckpt.local_dir(), cfg)
 }
 
-/// Persist a calibrated configuration into `<dir>/lemma_calibration.json`.
+/// Persist a calibrated configuration into `<dir>/lemmata_calibration.json`.
 pub fn save_checkpoint_calibration_at(dir: &Path, cfg: &CalibratedAgentConfig) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create calibration directory: {}", dir.display()))?;
@@ -40,7 +40,7 @@ pub fn load_checkpoint_calibration(ckpt: Checkpoint) -> Option<CalibratedAgentCo
     load_checkpoint_calibration_from(&ckpt.local_dir())
 }
 
-/// Load a persisted calibration configuration from `<dir>/lemma_calibration.json` (or directly if `dir` is a JSON file).
+/// Load a persisted calibration configuration from `<dir>/lemmata_calibration.json` (or directly if `dir` is a JSON file).
 pub fn load_checkpoint_calibration_from(dir: &Path) -> Option<CalibratedAgentConfig> {
     let path = if dir.is_file() {
         dir.to_path_buf()
@@ -65,7 +65,7 @@ pub fn apply_persisted_calibration(config: &mut ClassifierConfig, cal: &Calibrat
         .extend(cal.cost_weights.iter().map(|(k, &v)| (k.clone(), v)));
 }
 
-/// Fit post-hoc temperature scaling + optional Q-ATS for each checkpoint and persist `lemma_calibration.json`.
+/// Fit post-hoc temperature scaling + optional Q-ATS for each checkpoint and persist `lemmata_calibration.json`.
 pub fn calibrate_and_persist_checkpoints(
     checkpoints: &[Checkpoint],
     items: &[DataItem],
