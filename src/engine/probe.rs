@@ -16,8 +16,9 @@ use crate::model::{Checkpoint, ChunkStrategy, Question, QuestionType};
 
 /// File format of this build's probes.
 pub const PROBE_KIND: &str = "lemma-probe-v1";
-/// L2 strengths tried on the held-out fifth of the training data.
-const L2_GRID: [f64; 4] = [1e-4, 1e-3, 1e-2, 1e-1];
+/// L2 strengths tried on the held-out fifth of the training data. The large values let a
+/// residual probe shrink to the zero-shot logits plus a per-label bias.
+const L2_GRID: [f64; 6] = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0];
 const ITERATIONS: usize = 1000;
 
 /// A fitted probe for one choice question of one checkpoint.
@@ -40,6 +41,11 @@ pub struct Probe {
     /// Zero-shot accuracy of the same checkpoint on the same held-out fifth.
     #[serde(default)]
     pub zero_shot_validation_accuracy: f64,
+    /// The probe's logits are added to the checkpoint's zero-shot logits for the question, so it
+    /// learns a correction instead of replacing the zero-shot head. `fit_probe` keeps this when it
+    /// beats the plain probe on the held-out fifth.
+    #[serde(default)]
+    pub residual: bool,
 }
 
 impl Probe {
@@ -58,8 +64,10 @@ impl Probe {
         Ok(probe)
     }
 
-    /// One logit per label, in `labels` order.
-    pub fn logits(&self, embedding: &[f32]) -> Vec<f64> {
+    /// One logit per label, in `labels` order. A residual probe adds `zero_shot` (the
+    /// checkpoint's raw logits for the question, rounded to 4 decimals as answers report them).
+    pub fn logits(&self, embedding: &[f32], zero_shot: Option<&[f64]>) -> Vec<f64> {
+        let base = zero_shot.filter(|_| self.residual);
         let d = self.mean.len();
         let x: Vec<f32> = embedding
             .iter()
@@ -73,6 +81,7 @@ impl Probe {
             .map(|(j, b)| {
                 let row = &self.weights[j * d..(j + 1) * d];
                 f64::from(b + row.iter().zip(&x).map(|(w, v)| w * v).sum::<f32>())
+                    + base.map_or(0.0, |z| z[j])
             })
             .collect()
     }
@@ -139,16 +148,80 @@ pub fn fit_probe(
         );
     }
 
+    // Zero-shot logits for every item: the residual probe's base, and the baseline to beat.
+    let zero_shot =
+        crate::engine::LayaClassifier::with_checkpoint(ckpt).with_chunk_strategy(strategy);
+    let mut zs_logits = Vec::with_capacity(kept.len());
+    let mut zs_hit = Vec::with_capacity(kept.len());
+    for (item, &y) in kept.iter().zip(&ys) {
+        let ans = zero_shot
+            .classify(&item.state, &questions)?
+            .answers
+            .remove(qid);
+        let ans = ans.ok_or_else(|| anyhow::anyhow!("no zero-shot answer for '{qid}'"))?;
+        zs_hit.push(ans.choice.as_deref().map(str::to_lowercase) == Some(labels[y].to_lowercase()));
+        zs_logits.push(
+            ans.logits
+                .unwrap_or_default()
+                .iter()
+                .map(|&z| z as f32)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    let k = labels.len();
+    let plain = fit_features(&xs, &ys, k, None)?;
+    let residual = fit_features(&xs, &ys, k, Some(&zs_logits))?;
+    let use_residual = residual.validation_accuracy >= plain.validation_accuracy;
+    let fit = if use_residual { residual } else { plain };
+
+    let n = ys.len();
+    let valid: Vec<usize> = (0..n).filter(|i| i % 5 == 4).collect();
+    let zs_correct = valid.iter().filter(|&&i| zs_hit[i]).count();
+    Ok(Probe {
+        kind: PROBE_KIND.to_string(),
+        checkpoint: ckpt,
+        question_id: qid.to_string(),
+        labels,
+        mean: fit.mean,
+        std: fit.std,
+        weights: fit.weights,
+        bias: fit.bias,
+        l2: fit.l2,
+        train_samples: n,
+        validation_accuracy: fit.validation_accuracy,
+        zero_shot_validation_accuracy: zs_correct as f64 / valid.len().max(1) as f64,
+        residual: use_residual,
+    })
+}
+
+struct FeatureFit {
+    mean: Vec<f32>,
+    std: Vec<f32>,
+    weights: Vec<f32>,
+    bias: Vec<f32>,
+    l2: f64,
+    validation_accuracy: f64,
+}
+
+/// Standardize `xs`, choose L2 on every fifth item, then refit on all items with that L2.
+/// `base` holds per-item logits that the model's output is added to (a residual probe).
+fn fit_features(
+    xs: &[Vec<f32>],
+    ys: &[usize],
+    k: usize,
+    base: Option<&[Vec<f32>]>,
+) -> Result<FeatureFit> {
     let d = xs[0].len();
     let n = xs.len();
     let mut mean = vec![0f32; d];
-    for x in &xs {
+    for x in xs {
         for (m, v) in mean.iter_mut().zip(x) {
             *m += v / n as f32;
         }
     }
     let mut std = vec![0f32; d];
-    for x in &xs {
+    for x in xs {
         for ((s, v), m) in std.iter_mut().zip(x).zip(&mean) {
             *s += (v - m).powi(2) / n as f32;
         }
@@ -165,15 +238,22 @@ pub fn fit_probe(
         })
         .collect();
 
-    // Hold out every fifth item to choose the L2 strength, then refit on everything.
     let (train, valid): (Vec<usize>, Vec<usize>) = (0..n).partition(|i| i % 5 != 4);
-    let k = labels.len();
     let mut best = (f64::NEG_INFINITY, L2_GRID[0]);
+    let score = |w: &[f32], b: &[f32], i: usize| -> Vec<f32> {
+        let mut z = linear(w, b, &rows[i], d);
+        if let Some(base) = base {
+            for (zj, bj) in z.iter_mut().zip(&base[i]) {
+                *zj += bj;
+            }
+        }
+        z
+    };
     for l2 in L2_GRID {
-        let (w, b) = softmax_regression(&rows, &ys, &train, k, l2)?;
+        let (w, b) = softmax_regression(&rows, ys, &train, k, l2, base)?;
         let correct = valid
             .iter()
-            .filter(|&&i| argmax(&linear(&w, &b, &rows[i], d)) == ys[i])
+            .filter(|&&i| argmax(&score(&w, &b, i)) == ys[i])
             .count();
         let acc = correct as f64 / valid.len().max(1) as f64;
         // On ties, prefer the stronger penalty.
@@ -182,30 +262,14 @@ pub fn fit_probe(
         }
     }
     let all: Vec<usize> = (0..n).collect();
-    let (weights, bias) = softmax_regression(&rows, &ys, &all, k, best.1)?;
-
-    // The same held-out items, scored zero-shot, so the caller can see whether the probe helps.
-    let zero_shot =
-        crate::engine::LayaClassifier::with_checkpoint(ckpt).with_chunk_strategy(strategy);
-    let mut zs_correct = 0;
-    for &i in &valid {
-        let res = zero_shot.classify(&kept[i].state, &questions)?;
-        let choice = res.answers[qid].choice.as_deref().map(str::to_lowercase);
-        zs_correct += usize::from(choice.as_deref() == Some(labels[ys[i]].to_lowercase().as_str()));
-    }
-    Ok(Probe {
-        kind: PROBE_KIND.to_string(),
-        checkpoint: ckpt,
-        question_id: qid.to_string(),
-        labels,
+    let (weights, bias) = softmax_regression(&rows, ys, &all, k, best.1, base)?;
+    Ok(FeatureFit {
         mean,
         std,
         weights,
         bias,
         l2: best.1,
-        train_samples: n,
         validation_accuracy: best.0,
-        zero_shot_validation_accuracy: zs_correct as f64 / valid.len().max(1) as f64,
     })
 }
 
@@ -238,6 +302,7 @@ fn softmax_regression(
     subset: &[usize],
     k: usize,
     l2: f64,
+    base: Option<&[Vec<f32>]>,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
     let dev = Device::Cpu;
     let n = subset.len();
@@ -252,6 +317,16 @@ fn softmax_regression(
         onehot[r * k + ys[i]] = 1.0;
     }
     let y = Tensor::from_vec(onehot, (n, k), &dev)?;
+    let offset = match base {
+        Some(base) => {
+            let flat: Vec<f32> = subset
+                .iter()
+                .flat_map(|&i| base[i].iter().copied())
+                .collect();
+            Tensor::from_vec(flat, (n, k), &dev)?
+        }
+        None => Tensor::zeros((n, k), candle_core::DType::F32, &dev)?,
+    };
 
     let xt = x.t()?.contiguous()?;
     let mut v = Tensor::ones((d, 1), candle_core::DType::F32, &dev)?;
@@ -266,7 +341,7 @@ fn softmax_regression(
     let mut w = Tensor::zeros((d, k), candle_core::DType::F32, &dev)?;
     let mut b = Tensor::zeros(k, candle_core::DType::F32, &dev)?;
     for _ in 0..ITERATIONS {
-        let z = x.matmul(&w)?.broadcast_add(&b)?;
+        let z = (x.matmul(&w)?.broadcast_add(&b)? + &offset)?;
         let p = candle_nn::ops::softmax(&z, D::Minus1)?;
         let g = ((p - &y)? / n as f64)?;
         let gw = (xt.matmul(&g)? + (&w * (2.0 * l2))?)?;
@@ -294,11 +369,26 @@ mod tests {
             .collect();
         let ys: Vec<usize> = (0..40).map(|i| i % 2).collect();
         let all: Vec<usize> = (0..40).collect();
-        let (w, b) = softmax_regression(&rows, &ys, &all, 2, 1e-3).unwrap();
+        let (w, b) = softmax_regression(&rows, &ys, &all, 2, 1e-3, None).unwrap();
         let correct = all
             .iter()
             .filter(|&&i| argmax(&linear(&w, &b, &rows[i], 3)) == ys[i])
             .count();
         assert_eq!(correct, 40);
+    }
+
+    #[test]
+    fn residual_fit_keeps_correct_zero_shot_logits() {
+        // The zero-shot logits already name the label, and the embedding is noise.
+        let ys: Vec<usize> = (0..60).map(|i| i % 3).collect();
+        let xs: Vec<Vec<f32>> = (0..60)
+            .map(|i| vec![((i * 37) % 11) as f32, ((i * 17) % 7) as f32])
+            .collect();
+        let base: Vec<Vec<f32>> = ys
+            .iter()
+            .map(|&y| (0..3).map(|j| if j == y { 2.0 } else { 0.0 }).collect())
+            .collect();
+        let fit = fit_features(&xs, &ys, 3, Some(&base)).unwrap();
+        assert_eq!(fit.validation_accuracy, 1.0);
     }
 }

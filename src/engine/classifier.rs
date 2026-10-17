@@ -748,9 +748,32 @@ impl LayaClassifier {
         }
         let embedding = crate::model::native::shared(ckpt, dir)?
             .embed(state_text, self.config.chunk_strategy)?;
+        if embedding.len() != probe.mean.len() {
+            bail!(
+                "The probe expects {}-dimensional embeddings, and {ckpt} produced {}. Refit the probe.",
+                probe.mean.len(),
+                embedding.len()
+            );
+        }
+        let mut input_tokens = estimate_tokens(state_text);
+        // A residual probe corrects the zero-shot logits, which it was fitted on rounded to 4
+        // decimals, as answers report them.
+        let zero_shot = if probe.residual {
+            let scored = self.score_options(state_text, q, &q.render_options(), ckpt, true)?;
+            input_tokens += scored.input_tokens;
+            Some(
+                scored
+                    .logits
+                    .iter()
+                    .map(|z| (z * 10000.0).round() / 10000.0)
+                    .collect::<Vec<f64>>(),
+            )
+        } else {
+            None
+        };
         Ok(crate::model::native::Scored {
-            logits: probe.logits(&embedding),
-            input_tokens: estimate_tokens(state_text),
+            logits: probe.logits(&embedding, zero_shot.as_deref()),
+            input_tokens,
         })
     }
 
