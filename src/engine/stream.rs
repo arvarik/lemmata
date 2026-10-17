@@ -33,6 +33,10 @@ pub struct StreamPipelineConfig {
     /// Signing key for attestation HMAC proofs.
     pub attest_secret: String,
 
+    /// File for the full signed receipts, so `lemma attest verify` can check them later.
+    /// Without it, records keep only each receipt's digest.
+    pub receipt_log: Option<std::path::PathBuf>,
+
     /// Maximum events to process before terminating (None = infinite stream).
     pub limit: Option<usize>,
 }
@@ -46,6 +50,7 @@ impl Default for StreamPipelineConfig {
             enable_cache: false,
             enable_attest: false,
             attest_secret: String::new(),
+            receipt_log: None,
             limit: None,
         }
     }
@@ -154,6 +159,16 @@ impl StreamPipeline {
         let start_time = Instant::now();
         let schema_hash = compute_schema_hash(&self.questions);
         let receipt_schema_digest = crate::engine::attest::schema_digest(&self.questions)?;
+        let mut receipt_out = match (&self.attest_engine, &self.config.receipt_log) {
+            (Some(_), Some(path)) => {
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir)?;
+                }
+                // The chain starts at the genesis hash each run, so each run gets a fresh log.
+                Some(std::io::BufWriter::new(std::fs::File::create(path)?))
+            }
+            _ => None,
+        };
 
         let mut total_ingested = 0;
         let mut total_classified = 0;
@@ -246,6 +261,10 @@ impl StreamPipeline {
                         action,
                         &receipt_schema_digest,
                     )?;
+                    if let Some(out) = &mut receipt_out {
+                        use std::io::Write;
+                        writeln!(out, "{}", serde_json::to_string(&receipt)?)?;
+                    }
                     record.receipt_digest = Some(receipt.receipt_digest);
                     total_attested += 1;
                 }
@@ -305,6 +324,11 @@ impl StreamPipeline {
         } else {
             0.0
         };
+
+        if let Some(out) = &mut receipt_out {
+            use std::io::Write;
+            out.flush()?;
+        }
 
         Ok(StreamMetrics {
             total_ingested,
@@ -551,6 +575,7 @@ mod tests {
                 enable_cache: true,
                 enable_attest: true,
                 attest_secret: "test_secret".into(),
+                receipt_log: None,
                 limit: None,
             });
 

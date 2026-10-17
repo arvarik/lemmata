@@ -2573,6 +2573,7 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
             }
             (_, secret) => secret.unwrap_or_default(),
         },
+        receipt_log: args.receipt_log,
         limit: args.limit,
     };
 

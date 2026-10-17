@@ -1443,6 +1443,10 @@ pub struct StreamArgs {
     #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
     pub attest_secret: Option<String>,
 
+    /// Write the full signed receipts to this JSONL file, for `lemma attest verify`
+    #[arg(long, requires = "attest")]
+    pub receipt_log: Option<PathBuf>,
+
     /// Maximum number of events to process before stopping (default: unlimited)
     #[arg(long)]
     pub limit: Option<usize>,

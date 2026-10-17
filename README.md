@@ -470,7 +470,8 @@ lemma stream \
   --escalate-sink "output/human_review_queue.jsonl" \
   --batch-size 32 \
   --attest \
-  --cache  # --attest reads the key from LEMMA_ATTEST_KEY
+  --receipt-log output/stream_receipts.jsonl \
+  --cache  # --attest reads the key from LEMMA_ATTEST_KEY; verify with `lemma attest verify --receipt-log output/stream_receipts.jsonl`
 
 # 2. Lakehouse columnar projection
 lemma stream \
