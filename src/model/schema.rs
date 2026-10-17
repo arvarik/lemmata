@@ -13,7 +13,7 @@ pub enum QuestionType {
     Noul,
 }
 
-/// A typed question schema definition conforming to Laya / Jev request specification.
+/// A typed question schema definition conforming to the Laya request specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
     #[serde(rename = "type")]
