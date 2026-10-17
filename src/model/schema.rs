@@ -657,14 +657,19 @@ mod tests {
             criteria,
             hypothesis_template: None,
         };
-        let object = q(Some(serde_json::json!({"false": "routine", "true": "urgent"})));
+        let object = q(Some(
+            serde_json::json!({"false": "routine", "true": "urgent"}),
+        ));
         let array = q(Some(serde_json::json!(["false: routine", "true: urgent"])));
         for question in [object, array] {
             assert_eq!(
                 question.noul_descriptions(),
                 Some(("routine".into(), "urgent".into()))
             );
-            assert_eq!(question.render_options(), ["false: routine", "true: urgent"]);
+            assert_eq!(
+                question.render_options(),
+                ["false: routine", "true: urgent"]
+            );
         }
         let bare = q(None);
         assert_eq!(bare.noul_descriptions(), None);
