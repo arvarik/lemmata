@@ -98,7 +98,7 @@ The repo's own sets are small, so treat these as smoke checks:
 What the table shows:
 - Laya leads on topic classification and on the typed-decision benchmarks. Convai lists topic classification as an in-task family for Laya.
 - The NLI models lead on sentiment and on many labels. Laya reaches 54-58% at 77 labels with lemma's tournament (36-38% with upstream's even shrink, against Convai's own 0.425).
-- Multilingual tweet sentiment is hard for every model (chance is 33%). `deberta-v3` does best at 61%.
+- Multilingual tweet sentiment is hard for every model (chance is 33%). `deberta-v3` does best at 61%. For scale, XLM-T, a model trained on tweets and fully supervised on this benchmark, reports macro-F1 of 66.9 (Arabic), 67.9 (Spanish), and 77.3 (German) ([Barbieri et al. 2022](https://arxiv.org/abs/2104.12250)). Its own test splits are the source of these 900 items.
 - EuroBERT and NeoBERT are pretrained encoders without a classifier, so label-word scoring is their ceiling.
 
 Choice options keep the order the schema lists them in, as Laya was trained. For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
