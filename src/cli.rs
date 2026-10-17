@@ -19,11 +19,21 @@ pub struct Cli {
     )]
     pub backend: Backend,
 
+    /// Device for native models. `auto` uses the Metal GPU when one is present
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        env = "LEMMA_DEVICE",
+        default_value_t = DeviceChoice::Auto
+    )]
+    pub device: DeviceChoice,
+
     #[command(subcommand)]
     pub command: Commands,
 }
 
-pub use crate::model::native::Backend;
+pub use crate::model::native::{Backend, DeviceChoice};
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -1432,6 +1442,10 @@ pub struct StreamArgs {
     /// HMAC-SHA256 key that signs receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
     #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
     pub attest_secret: Option<String>,
+
+    /// Write the full signed receipts to this JSONL file, for `lemma attest verify`
+    #[arg(long, requires = "attest")]
+    pub receipt_log: Option<PathBuf>,
 
     /// Maximum number of events to process before stopping (default: unlimited)
     #[arg(long)]

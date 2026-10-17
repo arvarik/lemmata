@@ -1,5 +1,4 @@
 use anyhow::Result;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -565,16 +564,15 @@ impl HierarchicalRouter {
 
     /// Classify a slice of DataItems in parallel using Rayon.
     pub fn classify_items(&self, items: &[DataItem]) -> Result<Vec<HierarchicalDecisionResult>> {
-        items
-            .par_iter()
-            .map(|item| {
-                let text = match &item.state {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
-                self.route_text(&text, Some(item.id.clone()))
-            })
-            .collect()
+        crate::model::native::map_items(items, |item| {
+            let text = match &item.state {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            self.route_text(&text, Some(item.id.clone()))
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Benchmark hierarchical routing over a test dataset.

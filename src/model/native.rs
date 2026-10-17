@@ -39,7 +39,45 @@ pub enum Backend {
     Native = 2,
 }
 
+/// Where native models run.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceChoice {
+    /// The Metal GPU when one is present (macOS), otherwise the CPU
+    Auto,
+    /// The CPU
+    Cpu,
+    /// The Metal GPU. Fails when none is present
+    Metal,
+}
+
 static BACKEND: AtomicU8 = AtomicU8::new(Backend::Mock as u8);
+static DEVICE_CHOICE: OnceLock<DeviceChoice> = OnceLock::new();
+static DEVICE: OnceLock<Device> = OnceLock::new();
+
+/// Choose the device before the first model loads. Later calls have no effect.
+pub fn set_device(choice: DeviceChoice) {
+    let _ = DEVICE_CHOICE.set(choice);
+}
+
+/// The device every native model loads onto.
+pub fn device() -> Result<Device> {
+    if let Some(d) = DEVICE.get() {
+        return Ok(d.clone());
+    }
+    let metal = || Device::new_metal(0).map_err(|e| anyhow!("no Metal GPU: {e}"));
+    // The CLI sets the choice. Library callers can set LEMMA_DEVICE, and otherwise get the CPU.
+    let from_env = || {
+        let value = std::env::var("LEMMA_DEVICE").ok()?;
+        <DeviceChoice as clap::ValueEnum>::from_str(&value, true).ok()
+    };
+    let choice = DEVICE_CHOICE.get().copied().or_else(from_env);
+    let device = match choice.unwrap_or(DeviceChoice::Cpu) {
+        DeviceChoice::Cpu => Device::Cpu,
+        DeviceChoice::Metal => metal()?,
+        DeviceChoice::Auto => metal().unwrap_or(Device::Cpu),
+    };
+    Ok(DEVICE.get_or_init(|| device).clone())
+}
 static MODELS: OnceLock<Mutex<HashMap<PathBuf, Arc<NativeModel>>>> = OnceLock::new();
 
 pub fn set_backend(backend: Backend) {
@@ -110,6 +148,21 @@ pub(crate) fn warn_simulated(ckpt: Checkpoint, dir: &Path) {
     }
 }
 
+/// True when native models run on a GPU, where classify calls from many threads only queue.
+pub fn runs_on_gpu() -> bool {
+    backend() != Backend::Mock && device().is_ok_and(|d| d.is_metal())
+}
+
+/// Map `f` over `items`: in parallel on the CPU, in order on a GPU.
+pub fn map_items<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
+    use rayon::prelude::*;
+    if runs_on_gpu() {
+        items.iter().map(f).collect()
+    } else {
+        items.par_iter().map(f).collect()
+    }
+}
+
 /// Checkpoints that commands such as `compare all` run under the active backend.
 pub fn runnable_checkpoints() -> Vec<Checkpoint> {
     if backend() == Backend::Mock {
@@ -174,6 +227,16 @@ pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
     Ok(model)
 }
 
+/// Drop every cached model. Callers that use one checkpoint at a time call this between
+/// checkpoints, so memory holds one model instead of all of them.
+pub fn release_models() {
+    if let Some(models) = MODELS.get()
+        && let Ok(mut models) = models.lock()
+    {
+        models.clear();
+    }
+}
+
 /// One scoring call: a state text, a question, and its rendered options.
 pub struct ScoreRequest<'a> {
     pub state: &'a str,
@@ -199,10 +262,15 @@ pub enum NativeModel {
 
 impl NativeModel {
     pub fn score(&self, req: &ScoreRequest) -> Result<Scored> {
+        Ok(self.score_batch(std::slice::from_ref(req))?.remove(0))
+    }
+
+    /// Score several questions about the same text. Laya runs them all in one forward pass.
+    pub fn score_batch(&self, reqs: &[ScoreRequest]) -> Result<Vec<Scored>> {
         match self {
-            Self::Laya(m) => m.score(req),
-            Self::Nli(m) => m.score(req),
-            Self::Mlm(m) => m.score(req),
+            Self::Laya(m) => m.score_batch(reqs),
+            Self::Nli(m) => reqs.iter().map(|r| m.score(r)).collect(),
+            Self::Mlm(m) => reqs.iter().map(|r| m.score(r)).collect(),
         }
     }
 }
@@ -274,8 +342,9 @@ impl HeadLayer {
         })
     }
 
-    /// `x` is (1, seq, d). There is no padding mask, because lemma runs one sequence per pass.
-    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+    /// `x` is (batch, seq, d). `key_bias` is (batch, 1, 1, seq): 0 for real tokens and a large
+    /// negative value for padding, so no query attends to padding.
+    fn forward(&self, x: &Tensor, key_bias: &Tensor) -> candle_core::Result<Tensor> {
         let (b, t, d) = x.dims3()?;
         let hd = d / self.n_heads;
         let qkv = x
@@ -286,7 +355,7 @@ impl HeadLayer {
         let q = qkv.get(0)?.contiguous()?;
         let k = qkv.get(1)?.contiguous()?;
         let v = qkv.get(2)?.contiguous()?;
-        let att = (q.matmul(&k.t()?)? / (hd as f64).sqrt())?;
+        let att = (q.matmul(&k.t()?)? / (hd as f64).sqrt())?.broadcast_add(key_bias)?;
         let att = candle_nn::ops::softmax_last_dim(&att)?;
         let ctx = att.matmul(&v)?.transpose(1, 2)?.reshape((b, t, d))?;
         let x = (x + ctx.apply(&self.out_proj)?)?;
@@ -313,6 +382,7 @@ pub struct LayaModel {
     cls_id: u32,
     sep_id: u32,
     mask_id: u32,
+    pad_id: u32,
     mask_token: String,
     device: Device,
 }
@@ -380,8 +450,9 @@ impl LayaModel {
         let (_, cls_id) = special("cls_token")?;
         let (_, sep_id) = special("sep_token")?;
         let (mask_token, mask_id) = special("mask_token")?;
+        let (_, pad_id) = special("pad_token")?;
 
-        let device = Device::Cpu;
+        let device = device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -413,6 +484,7 @@ impl LayaModel {
             cls_id,
             sep_id,
             mask_id,
+            pad_id,
             mask_token,
             device,
         })
@@ -523,66 +595,109 @@ impl LayaModel {
         options: &[String],
     ) -> Result<Vec<f64>> {
         let (ids, markers) = self.build_sequence(state, qtype, instructions, options)?;
-        self.forward(&ids, &markers, qtype, options.len())
+        Ok(self.forward_batch(&[(ids, markers, qtype)])?.remove(0))
     }
 
-    fn score(&self, req: &ScoreRequest) -> Result<Scored> {
-        let q = req.question;
-        let (prefix, markers) = self.build_prefix(q.qtype, &q.instructions, req.options)?;
-        let state_ids = self.encode(&req.state.replace(&self.mask_token, " "))?;
-        let mut input_tokens = 0;
-        let mut per_window = Vec::new();
-        for window in state_windows(&state_ids, self.state_room(prefix.len()), req.strategy) {
-            let (ids, markers) = self.with_state(&prefix, &markers, &window);
-            input_tokens += ids.len();
-            per_window.push(self.forward(&ids, &markers, q.qtype, req.options.len())?);
+    /// Every question's windows go into one padded forward pass, then each question pools its
+    /// own windows.
+    fn score_batch(&self, reqs: &[ScoreRequest]) -> Result<Vec<Scored>> {
+        let mut seqs = Vec::new();
+        let mut owner = Vec::new();
+        for (i, req) in reqs.iter().enumerate() {
+            let q = req.question;
+            let (prefix, markers) = self.build_prefix(q.qtype, &q.instructions, req.options)?;
+            let state_ids = self.encode(&req.state.replace(&self.mask_token, " "))?;
+            for window in state_windows(&state_ids, self.state_room(prefix.len()), req.strategy) {
+                let (ids, m) = self.with_state(&prefix, &markers, &window);
+                if m.len() != req.options.len() {
+                    bail!(
+                        "{} options do not fit in head_max_len={} tokens",
+                        req.options.len(),
+                        self.head_max_len
+                    );
+                }
+                seqs.push((ids, m, q.qtype));
+                owner.push(i);
+            }
         }
-        Ok(Scored {
-            logits: pool(per_window),
-            input_tokens,
-        })
+        let tokens: Vec<usize> = seqs.iter().map(|(ids, _, _)| ids.len()).collect();
+        let mut per_req: Vec<(Vec<Vec<f64>>, usize)> = vec![(Vec::new(), 0); reqs.len()];
+        // ponytail: one batch for all windows; a very long sliding-window input pads every
+        // question's sequences to its longest window. Split the batch if memory matters.
+        for ((logits, i), n) in self
+            .forward_batch(&seqs)?
+            .into_iter()
+            .zip(owner)
+            .zip(tokens)
+        {
+            per_req[i].0.push(logits);
+            per_req[i].1 += n;
+        }
+        Ok(per_req
+            .into_iter()
+            .map(|(windows, input_tokens)| Scored {
+                logits: pool(windows),
+                input_tokens,
+            })
+            .collect())
     }
 
-    // ponytail: one sequence per forward pass on CPU. Batch questions with a padding mask, or add
-    // a Metal/CUDA device, if throughput matters.
-    fn forward(
+    /// Raw option logits for several `(ids, markers, qtype)` sequences in one padded pass.
+    fn forward_batch(
         &self,
-        ids: &[u32],
-        markers: &[usize],
-        qtype: QuestionType,
-        n_options: usize,
-    ) -> Result<Vec<f64>> {
-        if markers.len() != n_options {
-            bail!(
-                "{n_options} options do not fit in head_max_len={} tokens",
-                self.head_max_len
-            );
-        }
+        seqs: &[(Vec<u32>, Vec<usize>, QuestionType)],
+    ) -> Result<Vec<Vec<f64>>> {
         let dev = &self.device;
-        let input = Tensor::new(ids, dev)?.unsqueeze(0)?;
-        let attention = Tensor::ones((1, ids.len()), DType::F32, dev)?;
-        // Upstream QTYPES order: choice = 0, score = 1, noul = 2.
-        let qtype_idx = Tensor::new(&[qtype as u32], dev)?;
-
-        let mut h = self.encoder.forward(&input, &attention)?;
-        h = h.broadcast_add(&self.type_emb.forward(&qtype_idx)?.unsqueeze(1)?)?;
-        for layer in &self.head {
-            h = layer.forward(&h)?;
+        let (b, t) = (
+            seqs.len(),
+            seqs.iter().map(|s| s.0.len()).max().unwrap_or(0),
+        );
+        let mut ids = Vec::with_capacity(b * t);
+        let mut mask = Vec::with_capacity(b * t);
+        for (seq, _, _) in seqs {
+            ids.extend_from_slice(seq);
+            ids.extend(std::iter::repeat_n(self.pad_id, t - seq.len()));
+            mask.extend((0..t).map(|i| if i < seq.len() { 1f32 } else { 0f32 }));
         }
-        let marker_idx = Tensor::new(markers.iter().map(|&m| m as u32).collect::<Vec<_>>(), dev)?;
-        let logits = h
-            .squeeze(0)?
-            .index_select(&marker_idx, 0)?
+        let input = Tensor::from_vec(ids, (b, t), dev)?;
+        let mask = Tensor::from_vec(mask, (b, t), dev)?;
+        // Upstream QTYPES order: choice = 0, score = 1, noul = 2.
+        let qtypes = Tensor::new(seqs.iter().map(|s| s.2 as u32).collect::<Vec<_>>(), dev)?;
+        let key_bias = ((mask.ones_like()? - &mask)? * -1e9)?.reshape((b, 1, 1, t))?;
+
+        let mut h = self.encoder.forward(&input, &mask)?;
+        h = h.broadcast_add(&self.type_emb.forward(&qtypes)?.unsqueeze(1)?)?;
+        for layer in &self.head {
+            h = layer.forward(&h, &key_bias)?;
+        }
+        // Gather every marker row from the flattened batch, then split per sequence.
+        let rows: Vec<u32> = seqs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| s.1.iter().map(move |&m| (i * t + m) as u32))
+            .collect();
+        let d = h.dim(2)?;
+        let flat = h.reshape((b * t, d))?;
+        let logits = flat
+            .index_select(&Tensor::new(rows, dev)?, 0)?
             .apply(&self.scorer_norm)?
             .apply(&self.scorer_hidden)?
             .gelu_erf()?
             .apply(&self.scorer_out)?
-            .squeeze(1)?;
-        Ok(logits
-            .to_vec1::<f32>()?
-            .into_iter()
-            .map(f64::from)
-            .collect())
+            .squeeze(1)?
+            .to_vec1::<f32>()?;
+        let mut out = Vec::with_capacity(b);
+        let mut at = 0;
+        for (_, markers, _) in seqs {
+            out.push(
+                logits[at..at + markers.len()]
+                    .iter()
+                    .map(|&z| f64::from(z))
+                    .collect(),
+            );
+            at += markers.len();
+        }
+        Ok(out)
     }
 }
 
@@ -643,7 +758,7 @@ impl NliModel {
             .or_else(|| labels.iter().map(|(i, _)| *i).find(|&i| i != entail))
             .ok_or_else(|| anyhow!("id2label needs a second label"))?;
 
-        let device = Device::Cpu;
+        let device = device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -929,12 +1044,15 @@ impl MlmModel {
         }
         options
             .iter()
-            .map(|o| level_description(q, o).unwrap_or_else(|| render(q, o, Some("{label}"))))
+            .map(|o| {
+                level_description(q, o)
+                    .unwrap_or_else(|| render(q, o, Some("{label}")).replace('_', " "))
+            })
             .collect()
     }
 
-    /// Mean log-probability of each label's tokens, with one mask per token after `question`.
-    /// Returns the scores and the number of tokens the model read.
+    /// Log-probability of each label (the sum over its tokens), with one mask per token after
+    /// `question`. Returns the scores and the number of tokens the model read.
     fn label_log_probs(
         &self,
         context: &[u32],
@@ -970,18 +1088,19 @@ impl MlmModel {
                         .iter()
                         .zip(&log_probs)
                         .map(|(&t, row)| row[t as usize])
-                        .sum::<f64>()
-                        / n as f64;
+                        .sum::<f64>();
                 }
             }
         }
         Ok((scores, tokens))
     }
 
-    /// Each option's score is the mean log-probability of its label tokens after the question,
-    /// minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al.
-    /// 2021). The subtraction removes the label words' prior, which otherwise makes common words
-    /// such as "other" win. A positive score means the text raises the label's probability.
+    /// Each option's score is the log-probability of its label after the question, minus the same
+    /// score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021): the
+    /// pointwise mutual information between label and text. The subtraction removes the label
+    /// words' prior, which otherwise makes common words such as "other" win. Summing over tokens
+    /// (not averaging) keeps multi-token labels comparable: an easy token such as "/" in
+    /// "Sci/Tech" scores about the same with and without the text, so it cancels.
     fn score(&self, req: &ScoreRequest) -> Result<Scored> {
         let q = req.question;
         let words = Self::label_words(q, req.options);
@@ -991,11 +1110,9 @@ impl MlmModel {
         } else if q.qtype == QuestionType::Noul {
             format!("\nStatement: {ins}\nIs the statement true? Answer:")
         } else {
-            format!(
-                "\nQuestion: {} Options: {}.\nAnswer:",
-                q.instructions.trim(),
-                words.join(", ")
-            )
+            // No options list: with one, the model copies the only option that fits the number of
+            // masks (for example the 3-token "Sci/Tech"), whatever the text says.
+            format!("\nQuestion: {ins}\nAnswer:")
         };
         let question = self.encode(&question)?;
         let labels = words
@@ -1075,10 +1192,12 @@ fn hypothesis(q: &Question, option: &str, template: Option<&str>) -> String {
     if let Some(desc) = level_description(q, option) {
         return format!("This text is about {desc}.");
     }
-    let label = render(q, option, Some("{label}"));
+    let raw = render(q, option, Some("{label}"));
+    // Underscored labels such as `activate_my_card` read better as words.
+    let label = raw.replace('_', " ");
     let desc = render(q, option, Some("{description}"));
-    // The renderer falls back to the instructions when the option has no description.
-    if desc == label || desc == q.instructions.trim() {
+    // The renderer falls back to the instructions (or the label) when the option has no description.
+    if desc == raw || desc == q.instructions.trim() {
         format!("This text is about {label}.")
     } else {
         format!("This text is about {label} ({desc}).")

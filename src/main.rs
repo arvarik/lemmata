@@ -34,6 +34,7 @@ use lemma::{
 fn main() -> Result<()> {
     let cli = Cli::parse();
     lemma::model::native::set_backend(cli.backend);
+    lemma::model::native::set_device(cli.device);
     if let Err(e) = run(cli) {
         if let Some(io_err) = e.downcast_ref::<std::io::Error>()
             && io_err.kind() == std::io::ErrorKind::BrokenPipe
@@ -2572,6 +2573,7 @@ fn handle_stream(args: StreamArgs) -> Result<()> {
             }
             (_, secret) => secret.unwrap_or_default(),
         },
+        receipt_log: args.receipt_log,
         limit: args.limit,
     };
 

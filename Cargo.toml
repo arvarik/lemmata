@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "science"]
 clap = { version = "4.6.7", features = ["derive", "env"] }
 clap_complete = "4.6.11"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 csv = "1.4.0"
 rayon = "1.12.0"
 anyhow = "1.0.104"
@@ -28,11 +28,11 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-
 sha2 = "0.11.1"
 hmac = "0.13.0"
 
-# Apple's Accelerate framework runs candle's matrix multiplies on macOS (Intel and Apple Silicon).
+# On macOS, Accelerate runs candle's CPU matrix multiplies, and Metal runs models on the GPU.
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.11.0", features = ["accelerate"] }
-candle-nn = { version = "0.11.0", features = ["accelerate"] }
-candle-transformers = { version = "0.11.0", features = ["accelerate"] }
+candle-core = { version = "0.11.0", features = ["accelerate", "metal"] }
+candle-nn = { version = "0.11.0", features = ["accelerate", "metal"] }
+candle-transformers = { version = "0.11.0", features = ["accelerate", "metal"] }
 
 [lib]
 name = "lemma"

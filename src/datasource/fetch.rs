@@ -262,12 +262,19 @@ impl HuggingFaceSource {
     }
 
     /// Auto-generate aligned Lemma questions schema from dataset class labels
+    /// `observed` holds the string labels seen in the fetched rows, used when the dataset declares
+    /// no class names (for example a `label_text` column).
     pub fn generate_questions_schema(
         &self,
         cols: &DiscoveredColumns,
+        observed: &[String],
     ) -> BTreeMap<String, Question> {
         let mut questions = BTreeMap::new();
-        if let Some(labels) = &cols.class_labels {
+        let labels = cols
+            .class_labels
+            .clone()
+            .or_else(|| (!observed.is_empty()).then(|| observed.to_vec()));
+        if let Some(labels) = &labels {
             let q = Question::new_choice(
                 format!(
                     "Classify the input into one of the designated categories for {}",
@@ -318,8 +325,19 @@ impl HuggingFaceSource {
         }
 
         let stdout = curl_fetch(&url, &headers, 20)?;
-        let resp: HfRowsResponse = serde_json::from_str(&stdout)
+        let value: serde_json::Value = serde_json::from_str(&stdout)
             .with_context(|| format!("Failed to parse HF response JSON: {}", stdout))?;
+        // The datasets server answers some requests (missing splits, script-based datasets) with
+        // {"error": ...} instead of rows.
+        if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
+            bail!(
+                "Hugging Face datasets server cannot serve {dataset_id} (config {}, split {}): {err}",
+                self.config,
+                self.split
+            );
+        }
+        let resp: HfRowsResponse = serde_json::from_value(value)
+            .with_context(|| format!("Unexpected HF response shape: {}", stdout))?;
         Ok(resp)
     }
 
@@ -429,7 +447,12 @@ impl HuggingFaceSource {
         }
 
         let schema = if let Some(c) = &cols {
-            self.generate_questions_schema(c)
+            let observed: std::collections::BTreeSet<String> = items
+                .iter()
+                .filter_map(|i| i.ground_truth.as_ref()?.get("classification")?.as_str())
+                .map(str::to_string)
+                .collect();
+            self.generate_questions_schema(c, &observed.into_iter().collect::<Vec<_>>())
         } else {
             BTreeMap::new()
         };
@@ -787,11 +810,23 @@ mod tests {
         assert_eq!(cols.label_col, Some("label".to_string()));
         assert_eq!(cols.class_labels.as_ref().unwrap().len(), 4);
 
-        let schema = source.generate_questions_schema(&cols);
+        let schema = source.generate_questions_schema(&cols, &[]);
         assert!(schema.contains_key("classification"));
         let q = &schema["classification"];
         let mut opts = q.render_options();
         opts.sort();
         assert_eq!(opts, vec!["Business", "Sci/Tech", "Sports", "World"]);
+
+        // Without declared class names (a `label_text` column), the observed labels are the options.
+        let plain = DiscoveredColumns {
+            class_labels: None,
+            ..cols
+        };
+        let observed = vec!["activate_my_card".to_string(), "card_arrival".to_string()];
+        let schema = source.generate_questions_schema(&plain, &observed);
+        assert_eq!(
+            schema["classification"].render_options(),
+            ["activate_my_card", "card_arrival"]
+        );
     }
 }

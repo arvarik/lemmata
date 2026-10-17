@@ -98,7 +98,7 @@ impl NeoBertMlm {
         let cfg: Config = serde_json::from_str(&text)
             .with_context(|| format!("Malformed NeoBERT config in {}", path.display()))?;
 
-        let device = Device::Cpu;
+        let device = crate::model::native::device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
