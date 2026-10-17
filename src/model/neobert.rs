@@ -169,4 +169,25 @@ impl NeoBertMlm {
             .apply(&self.decoder)?;
         Ok(logits.to_vec2::<f32>()?)
     }
+
+    /// Mean of the final normalized hidden states over all tokens, for linear probes.
+    pub fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        let max_len = self.cos.dim(0)?;
+        if ids.is_empty() || ids.len() > max_len {
+            bail!("NeoBERT reads 1 to {max_len} tokens, got {}", ids.len());
+        }
+        let t = ids.len();
+        let cos = self.cos.narrow(0, 0, t)?;
+        let sin = self.sin.narrow(0, 0, t)?;
+        let mut x = self
+            .embed
+            .forward(&Tensor::new(ids, &self.device)?.unsqueeze(0)?)?;
+        for block in &self.blocks {
+            x = block.forward(&x, &cos, &sin)?;
+        }
+        Ok(x.squeeze(0)?
+            .apply(&self.layer_norm)?
+            .mean(0)?
+            .to_vec1::<f32>()?)
+    }
 }

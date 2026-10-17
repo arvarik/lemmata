@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{Embedding, LayerNorm, Linear, VarBuilder};
 use candle_transformers::models::debertav2::{
-    Config as DebertaConfig, DebertaV2SeqClassificationModel,
+    Config as DebertaConfig, DebertaV2ContextPooler, DebertaV2Model,
 };
 use candle_transformers::models::modernbert::{Config as EncoderConfig, ModernBert};
 use tokenizers::Tokenizer;
@@ -265,6 +265,46 @@ impl NativeModel {
         Ok(self.score_batch(std::slice::from_ref(req))?.remove(0))
     }
 
+    /// Mean-pooled final hidden states of the encoder for `text`, for linear probes. Long text
+    /// is split with `strategy` like scoring, and the window embeddings are averaged.
+    pub fn embed(&self, text: &str, strategy: ChunkStrategy) -> Result<Vec<f32>> {
+        let windows: Vec<Vec<f32>> = match self {
+            Self::Laya(m) => {
+                let ids = m.encode(&text.replace(&m.mask_token, " "))?;
+                state_windows(&ids, m.max_len.saturating_sub(2), strategy)
+                    .iter()
+                    .map(|w| mean_hidden(&m.encoder, &m.device, &framed(m.cls_id, w, m.sep_id)))
+                    .collect::<Result<_>>()?
+            }
+            Self::Nli(m) => {
+                let ids = m.encode(text)?;
+                state_windows(&ids, m.max_len.saturating_sub(2), strategy)
+                    .iter()
+                    .map(|w| m.mean_hidden(&framed(m.cls_id, w, m.sep_id)))
+                    .collect::<Result<_>>()?
+            }
+            Self::Mlm(m) => {
+                let ids = m.encode(text)?;
+                let room = m.max_len.saturating_sub(m.prefix.len() + m.suffix.len());
+                state_windows(&ids, room, strategy)
+                    .iter()
+                    .map(|w| {
+                        m.encoder
+                            .mean_hidden(&[&m.prefix[..], w, &m.suffix[..]].concat())
+                    })
+                    .collect::<Result<_>>()?
+            }
+        };
+        let n = windows.len().max(1) as f32;
+        let mut mean = vec![0.0; windows.first().map_or(0, Vec::len)];
+        for w in &windows {
+            for (m, v) in mean.iter_mut().zip(w) {
+                *m += v / n;
+            }
+        }
+        Ok(mean)
+    }
+
     /// Score several questions about the same text. Laya runs them all in one forward pass.
     pub fn score_batch(&self, reqs: &[ScoreRequest]) -> Result<Vec<Scored>> {
         match self {
@@ -304,6 +344,25 @@ pub fn state_windows(state: &[u32], room: usize, strategy: ChunkStrategy) -> Vec
             }
         }
     }
+}
+
+fn framed(first: u32, body: &[u32], last: u32) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(body.len() + 2);
+    ids.push(first);
+    ids.extend_from_slice(body);
+    ids.push(last);
+    ids
+}
+
+/// Mean over tokens of a ModernBERT encoder's final hidden states for one unpadded sequence.
+fn mean_hidden(encoder: &ModernBert, device: &Device, ids: &[u32]) -> Result<Vec<f32>> {
+    let input = Tensor::new(ids, device)?.unsqueeze(0)?;
+    let mask = Tensor::ones((1, ids.len()), DType::F32, device)?;
+    Ok(encoder
+        .forward(&input, &mask)?
+        .squeeze(0)?
+        .mean(0)?
+        .to_vec1::<f32>()?)
 }
 
 fn pool(per_window: Vec<Vec<f64>>) -> Vec<f64> {
@@ -825,7 +884,12 @@ enum NliBackbone {
         classifier: Linear,
         mean_pool: bool,
     },
-    Deberta(Box<DebertaV2SeqClassificationModel>),
+    /// `DebertaV2ForSequenceClassification` in parts, so probes can read the hidden states.
+    Deberta {
+        encoder: Box<DebertaV2Model>,
+        pooler: Box<DebertaV2ContextPooler>,
+        classifier: Linear,
+    },
 }
 
 /// A zero-shot NLI cross-encoder: scores (text, hypothesis) pairs as entailment.
@@ -897,11 +961,14 @@ impl NliModel {
             }
             Some("deberta-v2") => {
                 let deb_cfg: DebertaConfig = serde_json::from_value(cfg.clone())?;
-                NliBackbone::Deberta(Box::new(DebertaV2SeqClassificationModel::load(
-                    vb.pp("deberta"),
-                    &deb_cfg,
-                    None,
-                )?))
+                let pooler = DebertaV2ContextPooler::load(vb.pp("deberta"), &deb_cfg)?;
+                let classifier =
+                    candle_nn::linear(pooler.output_dim()?, labels.len(), vb.pp("classifier"))?;
+                NliBackbone::Deberta {
+                    encoder: Box::new(DebertaV2Model::load(vb.pp("deberta"), &deb_cfg)?),
+                    pooler: Box::new(pooler),
+                    classifier,
+                }
             }
             other => bail!("unsupported NLI model_type {other:?}"),
         };
@@ -951,6 +1018,21 @@ impl NliModel {
         ids
     }
 
+    /// Mean over tokens of the encoder's final hidden states for one unpadded sequence.
+    fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        match &self.backbone {
+            NliBackbone::ModernBert { encoder, .. } => mean_hidden(encoder, &self.device, ids),
+            NliBackbone::Deberta { encoder, .. } => {
+                let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+                Ok(encoder
+                    .forward(&input, None, None)?
+                    .squeeze(0)?
+                    .mean(0)?
+                    .to_vec1::<f32>()?)
+            }
+        }
+    }
+
     /// Raw classifier logits for one encoded pair, in `id2label` order.
     pub fn forward(&self, ids: &[u32]) -> Result<Vec<f64>> {
         let mut rows = self.forward_batch(&[ids.to_vec()])?;
@@ -993,8 +1075,13 @@ impl NliModel {
                     .apply(norm)?
                     .apply(classifier)?
             }
-            NliBackbone::Deberta(model) => {
-                model.forward(&input, None, Some(mask.to_dtype(DType::I64)?))?
+            NliBackbone::Deberta {
+                encoder,
+                pooler,
+                classifier,
+            } => {
+                let h = encoder.forward(&input, None, Some(mask.to_dtype(DType::I64)?))?;
+                pooler.forward(&h)?.apply(classifier)?
             }
         };
         Ok(logits
@@ -1077,6 +1164,13 @@ impl MlmEncoder {
         match self {
             Self::EuroBert(m) => m.mlm_logits_at(ids, positions),
             Self::NeoBert(m) => m.mlm_logits_at(ids, positions),
+        }
+    }
+
+    fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        match self {
+            Self::EuroBert(m) => m.mean_hidden(ids),
+            Self::NeoBert(m) => m.mean_hidden(ids),
         }
     }
 }

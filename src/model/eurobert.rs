@@ -222,4 +222,23 @@ impl EuroBertMlm {
             .apply(&self.lm_head)?;
         Ok(logits.to_vec2::<f32>()?)
     }
+
+    /// Mean of the final normalized hidden states over all tokens, for linear probes.
+    pub fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        if ids.is_empty() {
+            bail!("EuroBERT needs at least one token");
+        }
+        let (cos, sin) = self.rope_tables(ids.len())?;
+        let mut h = self
+            .embed_tokens
+            .forward(&Tensor::new(ids, &self.device)?.unsqueeze(0)?)?;
+        for layer in &self.layers {
+            h = layer.forward(&h, &cos, &sin)?;
+        }
+        Ok(self
+            .norm
+            .forward(&h.squeeze(0)?)?
+            .mean(0)?
+            .to_vec1::<f32>()?)
+    }
 }

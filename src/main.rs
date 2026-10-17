@@ -68,6 +68,9 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Attest(args) => handle_attest(args),
         Commands::Hierarchical(args) => handle_hierarchical(args),
         Commands::Calibrate(args) => handle_calibrate(args),
+        Commands::Probe(args) => match args.action {
+            lemma::cli::ProbeCommands::Fit(fit) => handle_probe_fit(fit),
+        },
         Commands::Stream(args) => handle_stream(args),
         Commands::Active(args) => handle_active(args),
         Commands::Stats(args) => handle_stats(args),
@@ -339,6 +342,9 @@ fn handle_classify(args: lemma::cli::ClassifyArgs) -> Result<()> {
     config.hypothesis_template = args.hypothesis_template.clone();
     config.chunk_strategy = chunk_strategy;
     config.shortlist_k = args.shortlist_k;
+    if let Some(path) = &args.probe {
+        config.probe = Some(std::sync::Arc::new(lemma::engine::Probe::load(path)?));
+    }
     if (args.temperature - 1.0).abs() > 1e-6 {
         config.temperature = args.temperature;
         if args.config.is_none() {
@@ -789,6 +795,9 @@ fn handle_test(args: TestArgs) -> Result<()> {
     cfg.hypothesis_template = args.hypothesis_template.clone();
     cfg.chunk_strategy = chunk_strategy;
     cfg.shortlist_k = args.shortlist_k;
+    if let Some(path) = &args.probe {
+        cfg.probe = Some(std::sync::Arc::new(lemma::engine::Probe::load(path)?));
+    }
     if let Some(config_path) = &args.config {
         apply_calibrated_config(&mut cfg, config_path, args.temperature.is_none())?;
     }
@@ -2453,6 +2462,58 @@ fn handle_hierarchical(args: lemma::cli::HierarchicalArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn handle_probe_fit(args: lemma::cli::ProbeFitArgs) -> Result<()> {
+    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    if checkpoint == Checkpoint::AutoRoute {
+        bail!("A probe reads one model's embeddings. Choose a checkpoint other than route.");
+    }
+    let strategy = args
+        .chunk_strategy
+        .parse::<lemma::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let questions = load_questions_from_file(&args.schema)?;
+    let qid = match &args.question {
+        Some(q) => q.clone(),
+        None => {
+            let choices: Vec<&String> = questions
+                .iter()
+                .filter(|(_, q)| q.qtype == lemma::model::QuestionType::Choice)
+                .map(|(id, _)| id)
+                .collect();
+            match choices.as_slice() {
+                [only] => (*only).clone(),
+                _ => bail!(
+                    "The schema has {} choice questions. Pick one with --question.",
+                    choices.len()
+                ),
+            }
+        }
+    };
+    let q = questions
+        .get(&qid)
+        .ok_or_else(|| anyhow::anyhow!("Question '{qid}' is not in the schema"))?;
+    let items = resolve_data_source(std::path::Path::new("data"), Some(&args.data), false, None)?
+        .read_items()?;
+    let probe = lemma::engine::fit_probe(checkpoint, &items, &qid, q, strategy)?;
+    write_json_file(&args.output, &probe)?;
+    println!(
+        "🧭 Probe for '{qid}' on {}: {} labels, {} training items, L2 {}. Held-out accuracy: probe {:.1}%, zero-shot {:.1}%. Saved to {}",
+        checkpoint.repo_id(),
+        probe.labels.len(),
+        probe.train_samples,
+        probe.l2,
+        probe.validation_accuracy * 100.0,
+        probe.zero_shot_validation_accuracy * 100.0,
+        args.output.display()
+    );
+    if probe.validation_accuracy < probe.zero_shot_validation_accuracy {
+        eprintln!(
+            "⚠️  The probe is less accurate than zero-shot scoring here. Fine-tuned checkpoints (Laya, NLI) usually do better with `lemma calibrate --fit-label-bias`."
+        );
+    }
+    Ok(())
 }
 
 fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
