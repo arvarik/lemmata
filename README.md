@@ -31,7 +31,7 @@ Latency and accuracy figures above are Convai's own measurements on a Tesla T4, 
 
 ### Inference backends
 
-lemma runs every checkpoint's real weights natively with [candle](https://github.com/huggingface/candle). On macOS it runs models on the Metal GPU, and does CPU matrix math through Apple's Accelerate framework. Linux and Windows run on the CPU. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
+lemma runs every checkpoint's real weights natively with [candle](https://github.com/huggingface/candle). On macOS it runs models on the Metal GPU, and does CPU matrix math through Apple's Accelerate framework. Linux runs on the CPU. `tests/native_probe_test.rs` fits a probe and classifies through it. `tests/native_robustness_test.rs` checks every installed model's answers on hostile inputs (empty, mask tokens, control characters, mixed scripts, very long text). `tests/native_consistency_test.rs` checks that answers do not change across repeated calls, batch and single calls, a question asked alone or with others, chunk strategies on short text, and (for NLI) option order. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
 
 | `--backend` (or `LEMMA_BACKEND`) | Behavior |
 |---|---|
@@ -47,13 +47,21 @@ Every mock result has a `mock:` model id, so simulated decisions cannot pass for
 | `cpu` | The CPU |
 | `metal` | The Metal GPU. Fails when none is present |
 
-On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Median latency for one item with 3 questions (`lemma bench`, Apple M5 Pro):
+On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Latency for one item with 3 questions, and the peak memory of the process (`lemma --device <d> bench -m <ckpt> --iterations 5 --warmup 2` on `data/customer_support.jsonl`, Apple M5 Pro, peak memory from `/usr/bin/time -l`):
 
-| Checkpoint | CPU | Metal |
-|---|---|---|
-| `english` | 354 ms | 94 ms |
-| `deberta-v3` | 1299 ms | 231 ms |
-| `eurobert` | 125 ms | 33 ms |
+| Checkpoint | CPU p50 / p95 | CPU peak memory | Metal p50 / p95 | Metal peak memory |
+|---|---|---|---|---|
+| `english` | 306 / 332 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `multilingual` | 126 / 148 ms | 2.7 GB | 44 / 51 ms | 1.7 GB |
+| `typed-decisions` | 309 / 335 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `route` | 310 / 335 ms | 2.6 GB | 95 / 101 ms | 1.6 GB |
+| `modernbert-zeroshot` | 501 / 554 ms | 2.4 GB | 140 / 152 ms | 1.5 GB |
+| `modernbert-nli` | 511 / 558 ms | 3.0 GB | 140 / 152 ms | 3.0 GB |
+| `deberta-v3` | 1286 / 1384 ms | 2.9 GB | 230 / 243 ms | 1.8 GB |
+| `eurobert` | 112 / 118 ms | 2.6 GB | 31 / 32 ms | 2.6 GB |
+| `neobert` | 186 / 189 ms | 1.9 GB | 44 / 45 ms | 1.9 GB |
+
+The robustness, consistency, and probe tests pass on both devices (`LEMMA_DEVICE=metal cargo test --release --test native_robustness_test --test native_consistency_test --test native_probe_test`).
 
 | How lemma scores options | Checkpoints |
 |---|---|
@@ -61,32 +69,49 @@ On the GPU, batch commands classify items in order, because calls from many thre
 | NLI zero-shot cross-encoder | `modernbert-zeroshot`, `modernbert-nli`, `deberta-v3` |
 | Masked-LM label words | `eurobert`, `neobert` |
 
+**Laya checkpoints with many options:** the decision head fits all option texts into 192 (English) or 256 tokens. Upstream shrinks every option evenly when they overflow, which cuts Banking77's 77 labels to 2 tokens each. lemma instead scores groups of options that fit, then scores the leading options together in a final round. Eliminated options rank below every finalist.
+
 **NLI checkpoints** score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. All of a question's hypotheses run as one padded batch. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
 
 **Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions}\nAnswer:` with one mask per label token. An option's score is the log-probability of its label tokens (their sum), minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. The prompt does not list the options, because the model then copies whichever option has the right number of tokens. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
 
-Zero-shot accuracy, measured with `lemma test`. AG News, SST-2, and Banking77 are 200 public items each (`lemma fetch`, with a seeded random sample for Banking77). Golden is `data/system1_golden_benchmark.jsonl` (72 questions), and support is `data/customer_support.jsonl` (18 questions):
+Zero-shot accuracy, measured with `lemma test` on public data from `lemma fetch`: 1,000 seeded random items from the AG News and Banking77 test splits, the full SST-2 validation split (872), and 900 tweets from `cardiffnlp/tweet_sentiment_multilingual` (300 each in German, Spanish, and Arabic, 3 classes). Brackets give the 95% Wilson interval:
 
-| Checkpoint | AG News (4 topics) | SST-2 (sentiment) | Banking77 (77 intents) | Golden | Support |
-|---|---|---|---|---|---|
-| `english` | 95.0% | 86.5% | 36.0% | 62.5% | 83.3% |
-| `multilingual` | 93.5% | 79.0% | 32.0% | 68.1% | 66.7% |
-| `typed-decisions` | 95.5% | 86.0% | 37.0% | 79.2% | 94.4% |
-| `route` | 88.0% | 93.0% | 73.0% | 76.4% | 94.4% |
-| `modernbert-zeroshot` | 83.5% | 95.5% | 70.5% | 52.8% | 83.3% |
-| `modernbert-nli` | 88.0% | 96.5% | 73.0% | 59.7% | 77.8% |
-| `deberta-v3` | 88.0% | 93.0% | 68.5% | 73.6% | 83.3% |
-| `eurobert` | 69.5% | 78.5% | 34.5% | 52.8% | 55.6% |
-| `neobert` | 62.5% | 77.5% | 44.5% | 66.7% | 44.4% |
+| Checkpoint | AG News, 1,000 | SST-2, 872 | Banking77, 1,000 | Multilingual sentiment, 900 |
+|---|---|---|---|---|
+| `english` | 92.3% (90–94) | 88.9% (87–91) | 58.3% (55–61) | 47.6% (44–51) |
+| `multilingual` | 92.6% (91–94) | 82.2% (80–85) | 54.0% (51–57) | 49.9% (47–53) |
+| `typed-decisions` | 92.5% (91–94) | 88.9% (87–91) | 57.1% (54–60) | 48.9% (46–52) |
+| `route` | 89.3% (87–91) | 95.1% (93–96) | 71.0% (68–74) | 57.8% (55–61) |
+| `modernbert-zeroshot` | 87.4% (85–89) | 94.7% (93–96) | 70.5% (68–73) | 47.6% (44–51) |
+| `modernbert-nli` | 89.8% (88–92) | 96.0% (94–97) | 71.0% (68–74) | 48.4% (45–52) |
+| `deberta-v3` | 89.3% (87–91) | 95.2% (94–96) | 67.8% (65–71) | 61.2% (58–64) |
+| `eurobert` | 65.8% (63–69) | 78.7% (76–81) | 34.3% (31–37) | 46.4% (43–50) |
+| `neobert` | 62.1% (59–65) | 78.9% (76–81) | 42.8% (40–46) | 37.9% (35–41) |
+
+The repo's own sets are small, so treat these as smoke checks:
+
+| Checkpoint | Golden (72 questions) | Support (18 questions) |
+|---|---|---|
+| `english` | 62.5% | 83.3% |
+| `multilingual` | 68.1% | 66.7% |
+| `typed-decisions` | 79.2% | 94.4% |
+| `route` | 76.4% | 94.4% |
+| `modernbert-zeroshot` | 52.8% | 83.3% |
+| `modernbert-nli` | 59.7% | 77.8% |
+| `deberta-v3` | 73.6% | 83.3% |
+| `eurobert` | 52.8% | 55.6% |
+| `neobert` | 66.7% | 44.4% |
 
 What the table shows:
 - Laya leads on topic classification and on the typed-decision benchmarks. Convai lists topic classification as an in-task family for Laya.
-- The NLI models lead on sentiment and on many labels. Laya drops to 32-37% at 77 labels, which matches Convai's own Banking77 result (0.425).
+- The NLI models lead on sentiment and on many labels. Laya reaches 54-58% at 77 labels with lemma's tournament (36-38% with upstream's even shrink, against Convai's own 0.425).
+- Multilingual tweet sentiment is hard for every model (chance is 33%). `deberta-v3` does best at 61%. For scale, XLM-T, a model trained on tweets and fully supervised on this benchmark, reports macro-F1 of 66.9 (Arabic), 67.9 (Spanish), and 77.3 (German) ([Barbieri et al. 2022](https://arxiv.org/abs/2104.12250)). Its own test splits are the source of these 900 items. A `deberta-v3` probe fitted on all 5,517 training tweets reaches 64.3% (61–67). More training data helps some models (`eurobert` 54.0% to 60.9% from 600 to 5,517 tweets) and not others (`multilingual` 59.0% to 59.1%).
 - EuroBERT and NeoBERT are pretrained encoders without a classifier, so label-word scoring is their ceiling.
 
 Choice options keep the order the schema lists them in, as Laya was trained. For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
 
-`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy table below).
+`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy tables).
 
 `--chunk-strategy` works on real tokenizer tokens with native inference. `head-tail` keeps the first quarter of the token budget and the last three quarters (about 128 + 382 tokens of 510, as in Sun et al. 2019). `sliding-window` uses windows that overlap by a third and pools their logits. `input_tokens` reports the tokens the model read, and `latency_ms` excludes the one-time model load, which lemma prints to stderr.
 
@@ -456,6 +481,59 @@ lemma calibrate \
   --adaptive \
   --adaptive-gamma 0.30 \
   --export-config config/laya_qats.json
+
+# 3. Also correct the model's preference for some labels (needs labelled data you will not test on)
+lemma calibrate \
+  -c eurobert \
+  --val-data data/train_sample.jsonl \
+  --schema schema/questions.json \
+  --fit-label-bias \
+  --export-config config/eurobert_bias.json
+lemma test -c eurobert --file data/test.jsonl --schema schema/questions.json --config config/eurobert_bias.json
+```
+
+Zero-shot accuracy, then accuracy with `--fit-label-bias` fitted on 500 separate training items (600 for multilingual sentiment) and tested on the same sets as the accuracy table above:
+
+| Checkpoint | AG News | SST-2 | Banking77 | Multilingual sentiment |
+|---|---|---|---|---|
+| `english` | 92.3% → 92.4% | 88.9% → 91.3% | 58.3% → 60.1% | 47.6% → 51.6% |
+| `multilingual` | 92.6% → 92.6% | 82.2% → 84.3% | 54.0% → 55.2% | 49.9% → 55.0% |
+| `typed-decisions` | 92.5% → 93.0% | 88.9% → 92.1% | 57.1% → 60.2% | 48.9% → 49.3% |
+| `modernbert-zeroshot` | 87.4% → 88.0% | 94.7% → 95.0% | 70.5% → 73.6% | 47.6% → 49.9% |
+| `modernbert-nli` | 89.8% → 89.9% | 96.0% → 96.2% | 71.0% → 74.3% | 48.4% → 55.1% |
+| `deberta-v3` | 89.3% → 90.1% | 95.2% → 95.3% | 67.8% → 72.5% | 61.2% → 61.3% |
+| `eurobert` | 65.8% → 71.3% | 78.7% → 78.7% | 34.3% → 39.8% | 46.4% → 41.9% |
+| `neobert` | 62.1% → 76.5% | 78.9% → 85.3% | 42.8% → 47.7% | 37.9% → 40.9% |
+
+The bias helps most where a model prefers some label words (NeoBERT on AG News: +14 points) and with many labels (Banking77: +1 to +6). It hurt EuroBERT on multilingual sentiment (-4.5). It is refused for `route`, which picks a different model per input. On multilingual sentiment a single bias lowered route from 57.8% to 54.0%.
+
+`--fit-label-bias` fits one bias per choice label that maximizes the likelihood of the labelled answers (vector scaling with a bias term, Guo et al. 2017), and exports it as `cost_weights`. Zero-shot models favor some label words regardless of the text, and the bias removes that prior. Temperatures do not change which option wins, but the bias does.
+
+### 22b. Supervised Linear Probes (`lemma probe fit`)
+With labelled data, a probe learns one choice question directly. It fits a softmax regression on the checkpoint's mean-pooled final hidden states (standardized per dimension), and picks the L2 strength on a held-out fifth of the training data. `--probe` then replaces zero-shot scoring for that question in `classify` and `test`. Probes need real weights. They lift the base encoders the most (NeoBERT on Banking77: 42.8% zero-shot, 71.8% with a probe fitted on 500 items):
+
+Accuracy (%) as zero-shot / `--fit-label-bias` / probe, each fitted on the same 500 training items (600 for multilingual sentiment) and tested on the sets of the accuracy table above. Bold marks the best of the three:
+
+| Checkpoint | AG News | SST-2 | Banking77 | Multilingual sentiment |
+|---|---|---|---|---|
+| `english` | 92.3 / **92.4** / 91.5 | 88.9 / **91.3** / 91.3 | 58.3 / 60.1 / **67.5** | 47.6 / **51.6** / 46.4 |
+| `multilingual` | **92.6** / 92.6 / 92.4 | 82.2 / 84.3 / **85.2** | 54.0 / 55.2 / **60.9** | 49.9 / 55.0 / **59.0** |
+| `typed-decisions` | 92.5 / **93.0** / 92.4 | 88.9 / **92.1** / 91.9 | 57.1 / **60.2** / 60.0 | 48.9 / **49.3** / 46.2 |
+| `modernbert-zeroshot` | 87.4 / 88.0 / **88.2** | 94.7 / **95.0** / 94.8 | 70.5 / 73.6 / **79.7** | 47.6 / 49.9 / **50.7** |
+| `modernbert-nli` | 89.8 / **89.9** / 86.9 | 96.0 / 96.2 / **96.4** | 71.0 / 74.3 / **78.4** | 48.4 / 55.1 / **59.8** |
+| `deberta-v3` | 89.3 / **90.1** / 89.8 | 95.2 / **95.3** / 95.0 | 67.8 / **72.5** / 70.8 | 61.2 / 61.3 / **61.7** |
+| `eurobert` | 65.8 / 71.3 / **86.3** | 78.7 / 78.7 / **81.0** | 34.3 / 39.8 / **61.4** | 46.4 / 41.9 / **54.0** |
+| `neobert` | 62.1 / 76.5 / **88.5** | 78.9 / 85.3 / **87.5** | 42.8 / 47.7 / **71.8** | 37.9 / 40.9 / **44.8** |
+
+`lemma probe fit` fits two probes and keeps the one with the better held-out accuracy. A **plain** probe replaces zero-shot scoring, which suits the base encoders (EuroBERT, NeoBERT), whose embeddings are general. A **residual** probe adds a learned correction to the checkpoint's zero-shot logits, which suits the fine-tuned checkpoints (Laya, NLI), whose embeddings serve their own scoring heads. With a large L2 the residual probe reduces to zero-shot plus a per-label bias. Across these 32 cells the probe was best in 19, label bias in 12, and zero-shot in 1. `probe fit` reports the probe's and the zero-shot accuracy on the same held-out fifth, and warns when the probe loses.
+
+```bash
+# Fit on labelled training data (not on the data you test on)
+lemma probe fit -c eurobert --data data/train.jsonl --schema schema/topics.json --output probes/eurobert-topics.json
+
+# Use the probe
+lemma test -c eurobert --file data/test.jsonl --schema schema/topics.json --probe probes/eurobert-topics.json
+lemma classify -c eurobert --text "Stocks fell after the earnings report" --schema schema/topics.json --probe probes/eurobert-topics.json
 ```
 
 ### 23. Micro-Batch Streaming (`lemma stream`)

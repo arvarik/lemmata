@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{Embedding, LayerNorm, Linear, VarBuilder};
 use candle_transformers::models::debertav2::{
-    Config as DebertaConfig, DebertaV2SeqClassificationModel,
+    Config as DebertaConfig, DebertaV2ContextPooler, DebertaV2Model,
 };
 use candle_transformers::models::modernbert::{Config as EncoderConfig, ModernBert};
 use tokenizers::Tokenizer;
@@ -265,6 +265,46 @@ impl NativeModel {
         Ok(self.score_batch(std::slice::from_ref(req))?.remove(0))
     }
 
+    /// Mean-pooled final hidden states of the encoder for `text`, for linear probes. Long text
+    /// is split with `strategy` like scoring, and the window embeddings are averaged.
+    pub fn embed(&self, text: &str, strategy: ChunkStrategy) -> Result<Vec<f32>> {
+        let windows: Vec<Vec<f32>> = match self {
+            Self::Laya(m) => {
+                let ids = m.encode(&text.replace(&m.mask_token, " "))?;
+                state_windows(&ids, m.max_len.saturating_sub(2), strategy)
+                    .iter()
+                    .map(|w| mean_hidden(&m.encoder, &m.device, &framed(m.cls_id, w, m.sep_id)))
+                    .collect::<Result<_>>()?
+            }
+            Self::Nli(m) => {
+                let ids = m.encode(text)?;
+                state_windows(&ids, m.max_len.saturating_sub(2), strategy)
+                    .iter()
+                    .map(|w| m.mean_hidden(&framed(m.cls_id, w, m.sep_id)))
+                    .collect::<Result<_>>()?
+            }
+            Self::Mlm(m) => {
+                let ids = m.encode(text)?;
+                let room = m.max_len.saturating_sub(m.prefix.len() + m.suffix.len());
+                state_windows(&ids, room, strategy)
+                    .iter()
+                    .map(|w| {
+                        m.encoder
+                            .mean_hidden(&[&m.prefix[..], w, &m.suffix[..]].concat())
+                    })
+                    .collect::<Result<_>>()?
+            }
+        };
+        let n = windows.len().max(1) as f32;
+        let mut mean = vec![0.0; windows.first().map_or(0, Vec::len)];
+        for w in &windows {
+            for (m, v) in mean.iter_mut().zip(w) {
+                *m += v / n;
+            }
+        }
+        Ok(mean)
+    }
+
     /// Score several questions about the same text. Laya runs them all in one forward pass.
     pub fn score_batch(&self, reqs: &[ScoreRequest]) -> Result<Vec<Scored>> {
         match self {
@@ -304,6 +344,25 @@ pub fn state_windows(state: &[u32], room: usize, strategy: ChunkStrategy) -> Vec
             }
         }
     }
+}
+
+fn framed(first: u32, body: &[u32], last: u32) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(body.len() + 2);
+    ids.push(first);
+    ids.extend_from_slice(body);
+    ids.push(last);
+    ids
+}
+
+/// Mean over tokens of a ModernBERT encoder's final hidden states for one unpadded sequence.
+fn mean_hidden(encoder: &ModernBert, device: &Device, ids: &[u32]) -> Result<Vec<f32>> {
+    let input = Tensor::new(ids, device)?.unsqueeze(0)?;
+    let mask = Tensor::ones((1, ids.len()), DType::F32, device)?;
+    Ok(encoder
+        .forward(&input, &mask)?
+        .squeeze(0)?
+        .mean(0)?
+        .to_vec1::<f32>()?)
 }
 
 fn pool(per_window: Vec<Vec<f64>>) -> Vec<f64> {
@@ -601,6 +660,120 @@ impl LayaModel {
     /// Every question's windows go into one padded forward pass, then each question pools its
     /// own windows.
     fn score_batch(&self, reqs: &[ScoreRequest]) -> Result<Vec<Scored>> {
+        let mut out: Vec<Option<Scored>> = (0..reqs.len()).map(|_| None).collect();
+        let mut fitting = Vec::new();
+        for (i, req) in reqs.iter().enumerate() {
+            let lens = self.option_lengths(req.options)?;
+            if lens.iter().sum::<usize>() + 16 > self.head_max_len {
+                out[i] = Some(self.score_tournament(req, &lens)?);
+            } else {
+                fitting.push(i);
+            }
+        }
+        let fitted = self.score_fitting(&fitting.iter().map(|&i| &reqs[i]).collect::<Vec<_>>())?;
+        for (i, scored) in fitting.into_iter().zip(fitted) {
+            out[i] = Some(scored);
+        }
+        Ok(out.into_iter().flatten().collect())
+    }
+
+    /// Tokens each option takes in the prefix: its `[MASK]` marker plus up to 48 text tokens.
+    fn option_lengths(&self, options: &[String]) -> Result<Vec<usize>> {
+        options
+            .iter()
+            .map(|o| {
+                let text = self.encode(&format!(" {}", o.replace(&self.mask_token, " ")))?;
+                Ok(1 + text.len().min(MAX_OPTION_TOKENS))
+            })
+            .collect()
+    }
+
+    /// Upstream shrinks every option evenly when the options overflow `head_max_len`, which cuts
+    /// Banking77's 77 labels to 2 tokens each. Instead, score groups that fit, then score the
+    /// leaders together. Eliminated options keep their first-round order, below every finalist.
+    fn score_tournament(&self, req: &ScoreRequest, lens: &[usize]) -> Result<Scored> {
+        let budget = self.head_max_len.saturating_sub(16);
+        let fits = |idx: &[usize]| idx.iter().map(|&i| lens[i]).sum::<usize>() <= budget;
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new()];
+        for i in 0..lens.len() {
+            let mut candidate = groups.last().cloned().unwrap_or_default();
+            candidate.push(i);
+            if fits(&candidate) || groups.last().is_some_and(Vec::is_empty) {
+                *groups.last_mut().unwrap() = candidate;
+            } else {
+                groups.push(vec![i]);
+            }
+        }
+        let round = |group: &[usize]| -> Vec<String> {
+            group.iter().map(|&i| req.options[i].clone()).collect()
+        };
+
+        let group_options: Vec<Vec<String>> = groups.iter().map(|g| round(g)).collect();
+        let first: Vec<ScoreRequest> = group_options
+            .iter()
+            .map(|options| ScoreRequest { options, ..*req })
+            .collect();
+        let mut r1 = vec![f64::NEG_INFINITY; lens.len()];
+        let mut input_tokens = 0;
+        for (group, scored) in groups
+            .iter()
+            .zip(self.score_fitting(&first.iter().collect::<Vec<_>>())?)
+        {
+            input_tokens += scored.input_tokens;
+            for (&i, z) in group.iter().zip(scored.logits) {
+                r1[i] = z;
+            }
+        }
+
+        // Finalists: the best first-round options that fit in one prefix, in their original order.
+        let mut ranked: Vec<usize> = (0..lens.len()).collect();
+        ranked.sort_by(|&a, &b| r1[b].total_cmp(&r1[a]));
+        let mut finalists = Vec::new();
+        for &i in &ranked {
+            let mut next = finalists.clone();
+            next.push(i);
+            if !fits(&next) {
+                break;
+            }
+            finalists = next;
+        }
+        finalists.sort_unstable();
+        let final_options = round(&finalists);
+        let last = ScoreRequest {
+            options: &final_options,
+            ..*req
+        };
+        let scored = self.score_fitting(&[&last])?.remove(0);
+        input_tokens += scored.input_tokens;
+
+        let mut logits = r1.clone();
+        let lowest_final = scored.logits.iter().copied().fold(f64::INFINITY, f64::min);
+        let best_out = (0..lens.len())
+            .filter(|i| !finalists.contains(i))
+            .map(|i| r1[i])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let offset = if best_out.is_finite() {
+            best_out - lowest_final + 5.0
+        } else {
+            0.0
+        };
+        for z in logits.iter_mut() {
+            *z -= offset;
+        }
+        for (&i, z) in finalists.iter().zip(scored.logits) {
+            logits[i] = z;
+        }
+        Ok(Scored {
+            logits,
+            input_tokens,
+        })
+    }
+
+    /// Requests whose options fit in the prefix: every window of every request in one pass.
+    fn score_fitting(&self, reqs: &[&ScoreRequest]) -> Result<Vec<Scored>> {
+        if reqs.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut seqs = Vec::new();
         let mut owner = Vec::new();
         for (i, req) in reqs.iter().enumerate() {
@@ -711,7 +884,12 @@ enum NliBackbone {
         classifier: Linear,
         mean_pool: bool,
     },
-    Deberta(Box<DebertaV2SeqClassificationModel>),
+    /// `DebertaV2ForSequenceClassification` in parts, so probes can read the hidden states.
+    Deberta {
+        encoder: Box<DebertaV2Model>,
+        pooler: Box<DebertaV2ContextPooler>,
+        classifier: Linear,
+    },
 }
 
 /// A zero-shot NLI cross-encoder: scores (text, hypothesis) pairs as entailment.
@@ -783,11 +961,14 @@ impl NliModel {
             }
             Some("deberta-v2") => {
                 let deb_cfg: DebertaConfig = serde_json::from_value(cfg.clone())?;
-                NliBackbone::Deberta(Box::new(DebertaV2SeqClassificationModel::load(
-                    vb.pp("deberta"),
-                    &deb_cfg,
-                    None,
-                )?))
+                let pooler = DebertaV2ContextPooler::load(vb.pp("deberta"), &deb_cfg)?;
+                let classifier =
+                    candle_nn::linear(pooler.output_dim()?, labels.len(), vb.pp("classifier"))?;
+                NliBackbone::Deberta {
+                    encoder: Box::new(DebertaV2Model::load(vb.pp("deberta"), &deb_cfg)?),
+                    pooler: Box::new(pooler),
+                    classifier,
+                }
             }
             other => bail!("unsupported NLI model_type {other:?}"),
         };
@@ -837,6 +1018,21 @@ impl NliModel {
         ids
     }
 
+    /// Mean over tokens of the encoder's final hidden states for one unpadded sequence.
+    fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        match &self.backbone {
+            NliBackbone::ModernBert { encoder, .. } => mean_hidden(encoder, &self.device, ids),
+            NliBackbone::Deberta { encoder, .. } => {
+                let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+                Ok(encoder
+                    .forward(&input, None, None)?
+                    .squeeze(0)?
+                    .mean(0)?
+                    .to_vec1::<f32>()?)
+            }
+        }
+    }
+
     /// Raw classifier logits for one encoded pair, in `id2label` order.
     pub fn forward(&self, ids: &[u32]) -> Result<Vec<f64>> {
         let mut rows = self.forward_batch(&[ids.to_vec()])?;
@@ -879,8 +1075,13 @@ impl NliModel {
                     .apply(norm)?
                     .apply(classifier)?
             }
-            NliBackbone::Deberta(model) => {
-                model.forward(&input, None, Some(mask.to_dtype(DType::I64)?))?
+            NliBackbone::Deberta {
+                encoder,
+                pooler,
+                classifier,
+            } => {
+                let h = encoder.forward(&input, None, Some(mask.to_dtype(DType::I64)?))?;
+                pooler.forward(&h)?.apply(classifier)?
             }
         };
         Ok(logits
@@ -963,6 +1164,13 @@ impl MlmEncoder {
         match self {
             Self::EuroBert(m) => m.mlm_logits_at(ids, positions),
             Self::NeoBert(m) => m.mlm_logits_at(ids, positions),
+        }
+    }
+
+    fn mean_hidden(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        match self {
+            Self::EuroBert(m) => m.mean_hidden(ids),
+            Self::NeoBert(m) => m.mean_hidden(ids),
         }
     }
 }

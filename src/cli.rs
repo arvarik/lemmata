@@ -107,6 +107,9 @@ pub enum Commands {
     #[command(visible_alias = "tune")]
     Calibrate(CalibrateArgs),
 
+    /// Fit supervised linear probes on labelled data
+    Probe(ProbeArgs),
+
     /// Process live streaming events with micro-batching, lakehouse columnar projection, and dual sinks
     Stream(StreamArgs),
 
@@ -323,6 +326,10 @@ pub struct ClassifyArgs {
     /// Keep only the top-k options by lexical match (hashed word features and a synonym table) before model scoring (0 = disabled)
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
+
+    /// Supervised probe from `lemma probe fit`. It replaces zero-shot scoring for its question
+    #[arg(long)]
+    pub probe: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -489,6 +496,10 @@ pub struct TestArgs {
     /// Keep only the top-k options by lexical match (hashed word features and a synonym table) before model scoring (0 = disabled)
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
+
+    /// Supervised probe from `lemma probe fit`. It replaces zero-shot scoring for its question
+    #[arg(long)]
+    pub probe: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1344,6 +1355,11 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = crate::engine::calibrate::DEFAULT_MIN_BUCKET_SAMPLES)]
     pub min_bucket_samples: usize,
 
+    /// Also fit a bias per choice label on the labelled data and export it as cost weights.
+    /// It removes a model's preference for some labels. Fit on data you will not test on
+    #[arg(long)]
+    pub fit_label_bias: bool,
+
     /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
     #[arg(
         short,
@@ -1807,4 +1823,43 @@ pub struct GuideArgs {
     /// Output workflow recipes as structured JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ProbeArgs {
+    #[command(subcommand)]
+    pub action: ProbeCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProbeCommands {
+    /// Fit a probe for one choice question on labelled items and save it as JSON
+    Fit(ProbeFitArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ProbeFitArgs {
+    /// Labelled training data (JSON, JSONL, or CSV with ground truth). Do not test on it
+    #[arg(short, long)]
+    pub data: PathBuf,
+
+    /// Question schema
+    #[arg(short, long)]
+    pub schema: PathBuf,
+
+    /// Choice question to probe (default: the schema's only choice question)
+    #[arg(short, long)]
+    pub question: Option<String>,
+
+    /// Checkpoint whose embeddings the probe reads
+    #[arg(short, long, visible_alias = "model", default_value = "english")]
+    pub checkpoint: String,
+
+    /// Long-text strategy for the embeddings (truncate, head-tail, sliding-window)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
+
+    /// File to write the probe to
+    #[arg(short, long)]
+    pub output: PathBuf,
 }

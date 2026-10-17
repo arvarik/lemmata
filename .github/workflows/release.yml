@@ -54,9 +54,6 @@ jobs:
           # macOS Apple Silicon (ARM64)
           - target: aarch64-apple-darwin
             os: macos-latest
-          # Windows x86_64 (MSVC)
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
 
     steps:
       - name: Checkout repository
@@ -76,7 +73,7 @@ jobs:
       - name: Attest Build Provenance
         uses: actions/attest@v4
         with:
-          subject-path: ${{ steps.upload.outputs.tar || steps.upload.outputs.zip }}
+          subject-path: ${{ steps.upload.outputs.tar }}
 
   publish-ghcr-package:
     name: Publish GHCR Container Package

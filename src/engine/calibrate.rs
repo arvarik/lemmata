@@ -936,9 +936,166 @@ where
     (best_x, best_f, iter)
 }
 
+/// Result of [`fit_label_bias`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelBiasFit {
+    /// `exp(bias)` per lowercase choice label, for `cost_weights`.
+    pub weights: BTreeMap<String, f64>,
+    /// Per choice question: (labelled samples, accuracy before, accuracy after) on the fit data.
+    pub questions: BTreeMap<String, (usize, f64, f64)>,
+}
+
+/// L2 penalty on the label biases. It keeps labels with few or no examples near zero.
+const LABEL_BIAS_L2: f64 = 0.01;
+
+fn softmax_with_bias(log_p: &[f64], bias: &[f64]) -> Vec<f64> {
+    let z: Vec<f64> = log_p.iter().zip(bias).map(|(a, b)| a + b).collect();
+    let max = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let e: Vec<f64> = z.iter().map(|v| (v - max).exp()).collect();
+    let sum: f64 = e.iter().sum();
+    e.into_iter().map(|v| v / sum).collect()
+}
+
+/// Gradient descent on the mean negative log-likelihood of `softmax(log_p + bias)`, plus L2.
+/// The objective is convex in the bias. The result is centered, which softmax ignores.
+fn fit_bias(samples: &[(Vec<f64>, usize)], k: usize) -> Vec<f64> {
+    let n = samples.len().max(1) as f64;
+    let mut bias = vec![0.0; k];
+    for _ in 0..500 {
+        let mut grad: Vec<f64> = bias.iter().map(|b| 2.0 * LABEL_BIAS_L2 * b).collect();
+        for (log_p, target) in samples {
+            for (j, q_j) in softmax_with_bias(log_p, &bias).into_iter().enumerate() {
+                grad[j] += (q_j - f64::from(j == *target)) / n;
+            }
+        }
+        for (b, g) in bias.iter_mut().zip(grad) {
+            *b -= g;
+        }
+    }
+    let mean = bias.iter().sum::<f64>() / k as f64;
+    bias.iter().map(|b| b - mean).collect()
+}
+
+fn argmax(v: &[f64]) -> usize {
+    v.iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map_or(0, |(i, _)| i)
+}
+
+/// Fit one log-bias per choice label that maximizes the likelihood of the labelled answers
+/// (vector scaling with a bias term, Guo et al. 2017), with L2 regularization. Zero-shot models
+/// favor some label words regardless of the text, and the bias removes that prior. The result
+/// goes into `cost_weights`, because `classify` picks `argmax p × w`, which is `p` shifted by
+/// `ln w`. Fit on held-out labelled data, not on the data you will test on.
+pub fn fit_label_bias(
+    classifier: &LayaClassifier,
+    items: &[DataItem],
+    questions: &BTreeMap<String, Question>,
+) -> Result<LabelBiasFit> {
+    let results = classifier.classify_batch(items, questions)?;
+    let mut fit = LabelBiasFit {
+        weights: BTreeMap::new(),
+        questions: BTreeMap::new(),
+    };
+    for (qid, q) in questions {
+        if q.qtype != QuestionType::Choice {
+            continue;
+        }
+        let mut labels: Vec<String> = Vec::new();
+        let mut samples: Vec<(Vec<f64>, usize)> = Vec::new();
+        for (item, (_, res)) in items.iter().zip(&results) {
+            let Some(ans) = res.answers.get(qid) else {
+                continue;
+            };
+            if labels.is_empty() {
+                labels = ans.probabilities.keys().cloned().collect();
+            }
+            let truth = crate::engine::metrics::resolve_ground_truth_for_question(
+                item.ground_truth.as_ref(),
+                qid,
+                q,
+                questions.len(),
+            )
+            .and_then(|v| v.as_str().map(str::to_lowercase));
+            let Some(target) =
+                truth.and_then(|t| labels.iter().position(|l| l.to_lowercase() == t))
+            else {
+                continue;
+            };
+            // Probabilities are rounded to 4 decimals, so floor them before the log.
+            let log_p = labels
+                .iter()
+                .map(|l| {
+                    ans.probabilities
+                        .get(l)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .max(1e-6)
+                        .ln()
+                })
+                .collect();
+            samples.push((log_p, target));
+        }
+        if samples.is_empty() {
+            continue;
+        }
+
+        let k = labels.len();
+        let n = samples.len() as f64;
+        let bias = fit_bias(&samples, k);
+        let zero = vec![0.0; k];
+        let accuracy = |b: &[f64]| {
+            samples
+                .iter()
+                .filter(|(log_p, t)| argmax(&softmax_with_bias(log_p, b)) == *t)
+                .count() as f64
+                / n
+        };
+        fit.questions.insert(
+            qid.clone(),
+            (samples.len(), accuracy(&zero), accuracy(&bias)),
+        );
+        for (label, b) in labels.iter().zip(&bias) {
+            let key = label.to_lowercase();
+            if fit.weights.contains_key(&key) {
+                eprintln!(
+                    "⚠️  Label '{label}' appears in more than one choice question. Its bias comes from the first one."
+                );
+                continue;
+            }
+            fit.weights.insert(key, b.exp());
+        }
+    }
+    Ok(fit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_bias_removes_a_constant_label_preference() {
+        // The model always gives label 0 a +1.0 head start, so it wins even when label 1 is true.
+        let samples: Vec<(Vec<f64>, usize)> = (0..40)
+            .map(|i| {
+                let target = i % 2;
+                let mut log_p = vec![-2.0, -2.0];
+                log_p[target] += 0.6;
+                log_p[0] += 1.0;
+                (log_p, target)
+            })
+            .collect();
+        let before = samples.iter().filter(|(lp, t)| argmax(lp) == *t).count();
+        let bias = fit_bias(&samples, 2);
+        let after = samples
+            .iter()
+            .filter(|(lp, t)| argmax(&softmax_with_bias(lp, &bias)) == *t)
+            .count();
+        assert_eq!(before, 20);
+        assert_eq!(after, 40);
+        assert!(bias[1] > bias[0]);
+    }
 
     #[test]
     fn test_golden_section_parabola_minimum() {

@@ -17,6 +17,7 @@ pub mod learn_visuals;
 pub mod metrics;
 pub mod model_calibration;
 pub mod ood;
+pub mod probe;
 pub mod shortlist;
 pub mod slicing;
 pub mod stats;
@@ -36,7 +37,8 @@ pub use cache::{
 };
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
-    CalibrationReport, CalibrationTuner, QatsProfile, parse_cost_weights,
+    CalibrationReport, CalibrationTuner, LabelBiasFit, QatsProfile, fit_label_bias,
+    parse_cost_weights,
 };
 pub use cascade::{
     CascadeConfig, CascadeDecision, CascadePolicy, CascadeRouter, CascadeSweepPoint, SystemTier,
@@ -77,6 +79,7 @@ pub use model_calibration::{
     save_checkpoint_calibration, save_checkpoint_calibration_at,
 };
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
+pub use probe::{PROBE_KIND, Probe, choice_labels, fit_probe};
 pub use shortlist::{ShortlistResult, expand_shortlisted_logits, shortlist_options};
 pub use slicing::{
     ArenaSliceRow, SliceBy, SliceMetricEntry, compute_arena_slice_matrix, evaluate_slices,

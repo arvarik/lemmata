@@ -350,7 +350,19 @@ impl HuggingFaceSource {
 
         while items.len() < self.limit {
             let batch_size = (self.limit - items.len()).min(100);
-            let page = self.fetch_page(&canonical_id, current_offset, batch_size)?;
+            let page = match self.fetch_page(&canonical_id, current_offset, batch_size) {
+                Ok(page) => page,
+                // Keep the rows already fetched. A rate limit late in a large fetch would
+                // otherwise throw them all away.
+                Err(e) if !items.is_empty() => {
+                    eprintln!(
+                        "⚠️  Stopped at offset {current_offset} after {} rows: {e:#}. Keeping the rows fetched so far. Rerun with --offset {current_offset} to continue.",
+                        items.len()
+                    );
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
             if page.rows.is_empty() {
                 break;
             }

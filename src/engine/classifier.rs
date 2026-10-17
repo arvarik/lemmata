@@ -35,6 +35,9 @@ pub struct ClassifierConfig {
     pub chunk_strategy: crate::model::ChunkStrategy,
     #[serde(default)]
     pub shortlist_k: usize,
+    /// A supervised probe that replaces zero-shot scoring for its one question.
+    #[serde(skip)]
+    pub probe: Option<std::sync::Arc<crate::engine::probe::Probe>>,
 }
 
 impl ClassifierConfig {
@@ -86,6 +89,7 @@ impl ClassifierConfig {
             hypothesis_template: None,
             chunk_strategy: crate::model::ChunkStrategy::default(),
             shortlist_k: 0,
+            probe: None,
         };
         if let Some(cal) = crate::engine::model_calibration::load_checkpoint_calibration(checkpoint)
         {
@@ -343,10 +347,21 @@ impl LayaClassifier {
         };
         let plan_options: Vec<Vec<String>> = plans.iter().map(eval_options).collect();
         // Native models score every question in one call (Laya batches them in one forward pass).
-        let mut batched: Vec<Option<crate::model::native::Scored>> = if native {
-            let reqs: Vec<crate::model::native::ScoreRequest> = questions
-                .values()
-                .zip(&plan_options)
+        let probed = |qid: &str| self.config.probe.as_ref().filter(|p| p.question_id == qid);
+        // The probed question gets its scores from the probe, so the batch leaves it out.
+        let batch_index: Vec<usize> = questions
+            .keys()
+            .enumerate()
+            .filter(|(_, qid)| probed(qid).is_none())
+            .map(|(i, _)| i)
+            .collect();
+        let mut batched: Vec<Option<crate::model::native::Scored>> =
+            (0..questions.len()).map(|_| None).collect();
+        if native {
+            let all: Vec<&Question> = questions.values().collect();
+            let reqs: Vec<crate::model::native::ScoreRequest> = batch_index
+                .iter()
+                .map(|&i| (all[i], &plan_options[i]))
                 .map(|(q, options)| crate::model::native::ScoreRequest {
                     state: &state_text,
                     question: q,
@@ -356,14 +371,11 @@ impl LayaClassifier {
                     multi_label: self.config.multi_label,
                 })
                 .collect();
-            crate::model::native::shared(active_ckpt, &dir)?
-                .score_batch(&reqs)?
-                .into_iter()
-                .map(Some)
-                .collect()
-        } else {
-            (0..questions.len()).map(|_| None).collect()
-        };
+            let scores = crate::model::native::shared(active_ckpt, &dir)?.score_batch(&reqs)?;
+            for (&i, scored) in batch_index.iter().zip(scores) {
+                batched[i] = Some(scored);
+            }
+        }
 
         for (i, (qid, q)) in questions.iter().enumerate() {
             let (options, shortlist) = &plans[i];
@@ -376,7 +388,9 @@ impl LayaClassifier {
                 .map(|o| estimate_tokens(o))
                 .sum::<usize>();
 
-            if est_option_tokens > head_budget {
+            // Only Laya has a head budget. NLI and masked-LM models score each option on its own.
+            let laya = Checkpoint::laya_checkpoints().contains(&active_ckpt);
+            if laya && est_option_tokens > head_budget {
                 let warn_set = WARNED_HEAD_BUDGET.get_or_init(|| Mutex::new(HashSet::new()));
                 if let Ok(mut guard) = warn_set.lock()
                     && guard.insert(format!(
@@ -387,20 +401,25 @@ impl LayaClassifier {
                     ))
                 {
                     eprintln!(
-                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed head budget ({} tokens). High cardinality may degrade accuracy.",
+                        "⚠️  Warning: Question '{}' options (~{} tokens) exceed the Laya head budget ({} tokens). lemma scores them in rounds, which is slower. `route` sends questions with more than 20 options to an NLI model.",
                         qid, est_option_tokens, head_budget
                     );
                 }
             }
 
             // Raw logits for the options, pooled across windows for the sliding-window strategy
-            let scored = match batched[i].take() {
-                Some(scored) => scored,
-                None => self.score_options(&state_text, q, eval_options, active_ckpt, true)?,
+            let probe = probed(qid);
+            let scored = match (probe, batched[i].take()) {
+                (Some(p), _) => self.probe_scores(p, &state_text, q, active_ckpt, native, &dir)?,
+                (None, Some(scored)) => scored,
+                (None, None) => {
+                    self.score_options(&state_text, q, eval_options, active_ckpt, true)?
+                }
             };
             total_tokens += scored.input_tokens;
             let eval_logits = scored.logits;
-            let raw_logits = if let Some(s) = &shortlist {
+            // A probe scores every option, so there is nothing to expand.
+            let raw_logits = if let (None, Some(s)) = (probe, shortlist) {
                 crate::engine::expand_shortlisted_logits(
                     &eval_logits,
                     &s.kept_indices,
@@ -476,6 +495,10 @@ impl LayaClassifier {
                 }
             }
 
+            // A probe is trained by cross-entropy, so its logits need no temperature.
+            if probe.is_some() {
+                temp = 1.0;
+            }
             let scaled_logits: Vec<f64> = raw_logits.iter().map(|&z| z / temp.max(0.01)).collect();
 
             // Softmax
@@ -693,6 +716,65 @@ impl LayaClassifier {
         })
         .into_iter()
         .collect()
+    }
+
+    /// Logits for a probed question: the probe applied to the encoder's embedding of the text.
+    fn probe_scores(
+        &self,
+        probe: &crate::engine::probe::Probe,
+        state_text: &str,
+        q: &Question,
+        ckpt: Checkpoint,
+        native: bool,
+        dir: &std::path::Path,
+    ) -> Result<crate::model::native::Scored> {
+        if !native {
+            bail!("A probe needs the real weights of {ckpt}, but this run uses the mock.");
+        }
+        if probe.checkpoint != ckpt {
+            bail!(
+                "The probe for '{}' was fitted on {}, but this question runs on {ckpt}. Classify with -c {}.",
+                probe.question_id,
+                probe.checkpoint,
+                probe.checkpoint.short_name()
+            );
+        }
+        if probe.labels != crate::engine::probe::choice_labels(q) {
+            bail!(
+                "The probe for '{}' has labels {:?}, which do not match the schema.",
+                probe.question_id,
+                probe.labels
+            );
+        }
+        let embedding = crate::model::native::shared(ckpt, dir)?
+            .embed(state_text, self.config.chunk_strategy)?;
+        if embedding.len() != probe.mean.len() {
+            bail!(
+                "The probe expects {}-dimensional embeddings, and {ckpt} produced {}. Refit the probe.",
+                probe.mean.len(),
+                embedding.len()
+            );
+        }
+        let mut input_tokens = estimate_tokens(state_text);
+        // A residual probe corrects the zero-shot logits, which it was fitted on rounded to 4
+        // decimals, as answers report them.
+        let zero_shot = if probe.residual {
+            let scored = self.score_options(state_text, q, &q.render_options(), ckpt, true)?;
+            input_tokens += scored.input_tokens;
+            Some(
+                scored
+                    .logits
+                    .iter()
+                    .map(|z| (z * 10000.0).round() / 10000.0)
+                    .collect::<Vec<f64>>(),
+            )
+        } else {
+            None
+        };
+        Ok(crate::model::native::Scored {
+            logits: probe.logits(&embedding, zero_shot.as_deref()),
+            input_tokens,
+        })
     }
 
     /// Raw (pre-temperature) logit per option for the configured checkpoint.
