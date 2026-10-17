@@ -228,7 +228,7 @@ fn test_multibyte_utf8_labels_and_cjk_token_estimation() {
 }
 
 #[test]
-fn test_consensus_epistemic_uncertainty_and_checkpoint_verification() {
+fn test_ensemble_disagreement_and_checkpoint_verification() {
     let items = vec![DataItem::new(
         "m1",
         serde_json::json!({ "text": "请立即退还重复收取的发票账单费用" }),
@@ -246,7 +246,7 @@ fn test_consensus_epistemic_uncertainty_and_checkpoint_verification() {
         Checkpoint::TypedDecisions,
     ]);
     let res = engine.evaluate_batch(&items, &questions).unwrap();
-    assert!(res[0].questions["dept"].epistemic_uncertainty > 0.0);
+    assert!(res[0].questions["dept"].disagreement > 0.0);
 
     let dl = Downloader {
         cli_binary: "hf".into(),

@@ -30,9 +30,11 @@ fn test_cli_flag_aliases() {
         Cli::try_parse_from([
             "lemmata",
             "defer",
-            "tune",
+            "fit",
             "--eval-data",
             "data/customer_support.jsonl",
+            "--schema",
+            "schema/questions.json",
             "--target-acc",
             "0.95",
         ])
@@ -141,13 +143,13 @@ fn test_arena_sweep_baseline_and_cost_calibration_e2e() {
             < 1e-6
     );
 
-    // #2 Pareto Frontier Sweep (`lemmata defer sweep --json`)
-    let out_sweep = Command::new(bin)
+    // #2 Deferral fit (`lemmata defer fit --json`): 6 labelled items cannot certify 90% accuracy
+    let out_fit = Command::new(bin)
         .env("LEMMATA_BACKEND", "mock")
         .args([
             "defer",
-            "sweep",
-            "--file",
+            "fit",
+            "--val-data",
             "data/customer_support.jsonl",
             "-s",
             "schema/questions.json",
@@ -156,17 +158,13 @@ fn test_arena_sweep_baseline_and_cost_calibration_e2e() {
             "--json",
         ])
         .output()
-        .expect("Failed to execute lemmata defer sweep --json");
-    assert!(out_sweep.status.success());
-    let parsed_sweep: serde_json::Value =
-        serde_json::from_slice(&out_sweep.stdout).expect("Defer sweep output must be valid JSON");
-    let sweep_arr = parsed_sweep.as_array().expect("Sweep JSON must be array");
-    assert_eq!(sweep_arr.len(), 19);
-    assert!(
-        sweep_arr
-            .iter()
-            .any(|p| p["is_optimal"].as_bool() == Some(true))
-    );
+        .expect("Failed to execute lemmata defer fit --json");
+    assert!(!out_fit.status.success(), "no threshold can be certified");
+    assert!(String::from_utf8_lossy(&out_fit.stderr).contains("needs at least"));
+    let parsed_fit: serde_json::Value =
+        serde_json::from_slice(&out_fit.stdout).expect("Defer fit output must be valid JSON");
+    assert_eq!(parsed_fit["points"].as_array().map(Vec::len), Some(20));
+    assert!(parsed_fit["policy"].is_null());
 
     // #3 CI Regression Gate & Baseline Diff (`lemmata test --save-baseline` + `--baseline`)
     let out_save = Command::new(bin)
@@ -595,6 +593,14 @@ fn test_documented_commands_parse() {
                     .step_by(2)
                     .map(|span| format!("`{span}`")),
             );
+        }
+    }
+
+    // The examples in each subcommand's --help.
+    use clap::CommandFactory;
+    for sub in Cli::command().get_subcommands() {
+        if let Some(help) = sub.get_after_help() {
+            texts.extend(help.to_string().lines().map(|l| l.trim().to_string()));
         }
     }
 

@@ -1,12 +1,20 @@
+//! Deferral to System 2: decide which items System 1 keeps and which it hands to a larger model or
+//! a person.
+//!
+//! `fit` picks the loosest risk threshold whose kept items reach a target accuracy with a stated
+//! confidence. It tests a fixed grid of thresholds with an exact binomial test and a Bonferroni
+//! correction, as in Learn then Test (Angelopoulos et al., arXiv:2110.01052). lemmata never
+//! calls System 2 itself.
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::datasource::DataItem;
 use crate::engine::classifier::LayaClassifier;
-use crate::model::{DecisionResult, Question};
+use crate::model::{DecisionAnswer, DecisionResult, Question};
 
-/// Target execution tier in a hybrid System 1 / System 2 cascade.
+/// Where an item goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemTier {
@@ -17,18 +25,16 @@ pub enum SystemTier {
 impl SystemTier {
     pub fn badge(&self) -> &'static str {
         match self {
-            Self::System1Fast => "⚡ SYSTEM 1 (Laya 33ms)",
-            Self::System2Deliberative => "🧠 SYSTEM 2 (Frontier LLM)",
+            Self::System1Fast => "⚡ KEEP (System 1)",
+            Self::System2Deliberative => "🧠 DEFER (System 2)",
         }
     }
 }
 
-/// Configuration for cost-aware cascading.
+/// Settings for `defer run`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CascadeConfig {
-    pub entropy_weight: f64,
-    pub margin_weight: f64,
-    pub act_weight: f64,
+    /// Keep an item when its risk is at or below this value.
     pub risk_threshold: f64,
     pub system2_cost_per_call: f64,
 }
@@ -36,56 +42,78 @@ pub struct CascadeConfig {
 impl Default for CascadeConfig {
     fn default() -> Self {
         Self {
-            entropy_weight: 0.40,
-            margin_weight: 0.35,
-            act_weight: 0.25,
             risk_threshold: 0.45,
-            system2_cost_per_call: 0.005, // $0.005 per System 2 call
+            system2_cost_per_call: 0.005,
         }
     }
 }
 
-/// Cascaded routing decision for a single input item.
+/// The routing decision for one item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CascadeDecision {
     pub item_id: String,
     pub tier: SystemTier,
-    pub composite_risk: f64,
-    pub normalized_entropy: f64,
-    pub top2_margin: f64,
-    pub act_probability: f64,
+    /// 1 minus the smallest top-option probability across the item's questions.
+    pub risk: f64,
     pub system1_result: DecisionResult,
     pub cost_usd: f64,
+    /// A prompt for System 2 with the System 1 probabilities, for deferred items only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_seed: Option<String>,
 }
 
-/// Summary report of a Pareto frontier optimization run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CascadePolicy {
-    pub optimal_threshold: f64,
-    pub target_accuracy: f64,
-    pub expected_accuracy: f64,
-    pub system1_coverage_rate: f64,
-    pub system2_escalation_rate: f64,
-    pub cost_savings_percent: f64,
-    pub estimated_cost_per_1000: f64,
-}
+/// The fixed risk thresholds that `fit` tests. Fixing them before the data arrives keeps the
+/// Bonferroni guarantee valid.
+pub const RISK_GRID: [f64; 20] = [
+    0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+    0.60, 0.70, 0.80, 0.90, 1.00,
+];
 
-/// A single evaluated risk threshold point along the System 1 / System 2 Pareto frontier.
+/// One tested threshold.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CascadeSweepPoint {
+pub struct DeferPoint {
     pub threshold: f64,
-    pub expected_accuracy: f64,
-    pub system1_coverage_rate: f64,
-    pub system2_escalation_rate: f64,
-    pub cost_savings_percent: f64,
-    pub estimated_cost_per_1000: f64,
-    pub meets_sla: bool,
-    pub is_optimal: bool,
+    pub kept: usize,
+    pub kept_correct: usize,
+    /// Share of the labelled items that System 1 keeps.
+    pub coverage: f64,
+    pub kept_accuracy: f64,
+    /// One-sided Clopper-Pearson lower bound on the accuracy of kept items.
+    pub accuracy_lower_bound: f64,
+    pub deferral_cost_per_1000: f64,
+    /// The lower bound reaches the target accuracy.
+    pub certified: bool,
 }
 
-/// Cost-aware hybrid System 1 / System 2 router.
+/// The threshold that `fit` chose. `defer run --policy` reads this file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferPolicy {
+    pub checkpoint: String,
+    pub threshold: f64,
+    pub target_accuracy: f64,
+    /// With this probability, the kept items reach the target accuracy on new data from the same
+    /// distribution.
+    pub confidence: f64,
+    pub labelled_items: usize,
+    pub coverage: f64,
+    pub kept_accuracy: f64,
+    pub accuracy_lower_bound: f64,
+    pub deferral_rate: f64,
+    pub deferral_cost_per_1000: f64,
+}
+
+/// The result of `fit`: every tested threshold, and the chosen one when one is certified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferFit {
+    pub labelled_items: usize,
+    /// Per-threshold error level: (1 - confidence) / number of thresholds.
+    pub alpha: f64,
+    pub points: Vec<DeferPoint>,
+    pub policy: Option<DeferPolicy>,
+    /// Kept items, all correct, that the smallest certifiable set needs.
+    pub min_items_needed: usize,
+}
+
 pub struct CascadeRouter {
     config: CascadeConfig,
 }
@@ -99,58 +127,21 @@ impl CascadeRouter {
         &self.config
     }
 
-    /// Calculate composite risk score R(x) for a decision result.
-    pub fn compute_risk(&self, result: &DecisionResult) -> (f64, f64, f64, f64) {
+    /// 1 minus the smallest top-option probability across the questions: an item is only as safe
+    /// as its least certain answer. An answer without option probabilities uses its confidence.
+    pub fn risk(result: &DecisionResult) -> f64 {
         if result.answers.is_empty() {
-            return (1.0, 1.0, 0.0, 1.0);
+            return 1.0;
         }
-
-        let mut entropies = Vec::new();
-        let mut margins = Vec::new();
-        let mut act_probs = Vec::new();
-
-        for ans in result.answers.values() {
-            let k = ans.probabilities.len().max(2);
-            let mut probs: Vec<f64> = ans.probabilities.values().copied().collect();
-            probs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Normalized Shannon Entropy: H(P) / ln(K)
-            let h: f64 = -probs
-                .iter()
-                .filter(|&&p| p > 1e-9)
-                .map(|&p| p * p.ln())
-                .sum::<f64>()
-                / (k as f64).ln().max(1e-9);
-            entropies.push(h.clamp(0.0, 1.0));
-
-            // Top-2 Probability Margin: p_1 - p_2
-            let p1 = probs.first().copied().unwrap_or(0.0);
-            let p2 = probs.get(1).copied().unwrap_or(0.0);
-            let margin = (p1 - p2).clamp(0.0, 1.0);
-            margins.push(margin);
-
-            let act = ans.act_probability.unwrap_or(0.1);
-            act_probs.push(act.clamp(0.0, 1.0));
-        }
-
-        let avg_h = entropies.iter().sum::<f64>() / entropies.len() as f64;
-        let avg_margin = margins.iter().sum::<f64>() / margins.len() as f64;
-        let avg_act = act_probs.iter().sum::<f64>() / act_probs.len() as f64;
-
-        // Composite risk R(x) in [0, 1]
-        let risk = self.config.entropy_weight * avg_h
-            + self.config.margin_weight * (1.0 - avg_margin)
-            + self.config.act_weight * avg_act;
-
-        (
-            (risk * 10000.0).round() / 10000.0,
-            (avg_h * 10000.0).round() / 10000.0,
-            (avg_margin * 10000.0).round() / 10000.0,
-            (avg_act * 10000.0).round() / 10000.0,
-        )
+        let least_certain = result
+            .answers
+            .values()
+            .map(top_probability)
+            .fold(1.0, f64::min);
+        (1.0 - least_certain).clamp(0.0, 1.0)
     }
 
-    /// Route a single item through the cascade.
+    /// Classify one item and keep it or defer it.
     pub fn route(
         &self,
         item: &DataItem,
@@ -158,301 +149,255 @@ impl CascadeRouter {
         classifier: &LayaClassifier,
     ) -> Result<CascadeDecision> {
         let res = classifier.classify(&item.state, questions)?;
-        let (risk, norm_entropy, margin, act_prob) = self.compute_risk(&res);
-
+        let risk = Self::risk(&res);
         let tier = if risk <= self.config.risk_threshold {
             SystemTier::System1Fast
         } else {
             SystemTier::System2Deliberative
         };
-
-        let cost_usd = match tier {
-            SystemTier::System1Fast => 0.0,
-            SystemTier::System2Deliberative => self.config.system2_cost_per_call,
+        let (cost_usd, prompt_seed) = match tier {
+            SystemTier::System1Fast => (0.0, None),
+            SystemTier::System2Deliberative => {
+                let state = match &item.state {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other)?,
+                };
+                let prompt = format!(
+                    "Input context:\n{state}\n\nSystem 1 probabilities:\n{}\nSystem 1 risk: {:.1}%\n\nPlease deliberate and provide the final structured classification.",
+                    format_priors(&res),
+                    risk * 100.0
+                );
+                (self.config.system2_cost_per_call, Some(prompt))
+            }
         };
-
-        let prompt_seed = if tier == SystemTier::System2Deliberative {
-            let state_str = match &item.state {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other)?,
-            };
-            let avg_conf: f64 = if !res.answers.is_empty() {
-                res.answers.values().map(|a| a.confidence).sum::<f64>() / res.answers.len() as f64
-            } else {
-                1.0 - risk
-            };
-            Some(format!(
-                "Input context:\n{}\n\nSystem 1 Priors:\n{}\nSystem 1 Confidence: {:.1}%\nAct/Escalate Signal: {:.1}%\n\nPlease deliberate and provide final structured classification.",
-                state_str,
-                format_priors(&res),
-                avg_conf * 100.0,
-                act_prob * 100.0
-            ))
-        } else {
-            None
-        };
-
         Ok(CascadeDecision {
             item_id: item.id.clone(),
             tier,
-            composite_risk: risk,
-            normalized_entropy: norm_entropy,
-            top2_margin: margin,
-            act_probability: act_prob,
+            risk: (risk * 10000.0).round() / 10000.0,
             system1_result: res,
             cost_usd,
             prompt_seed,
         })
     }
 
-    fn collect_sample_evals(
+    /// Test every threshold in `RISK_GRID` on labelled items, and choose the loosest one whose
+    /// kept items reach `target_accuracy` with probability `confidence`.
+    pub fn fit(
         items: &[DataItem],
         questions: &BTreeMap<String, Question>,
         classifier: &LayaClassifier,
-        config: &CascadeConfig,
-    ) -> Result<Vec<(f64, bool)>> {
-        if items.is_empty() {
-            bail!("Cannot tune cascade on empty dataset");
+        target_accuracy: f64,
+        confidence: f64,
+        system2_cost: f64,
+    ) -> Result<DeferFit> {
+        if !(0.0..1.0).contains(&target_accuracy) || !(0.0..1.0).contains(&confidence) {
+            bail!("--target-accuracy and --confidence must be between 0 and 1");
         }
+        let samples = collect_samples(items, questions, classifier)?;
+        Ok(fit_samples(
+            &samples,
+            target_accuracy,
+            confidence,
+            system2_cost,
+            classifier.config().checkpoint.repo_id(),
+        ))
+    }
+}
 
-        let router = Self::new(config.clone());
-        let mut sample_evals: Vec<(f64, bool)> = Vec::new();
-        let batch_results = classifier.classify_batch(items, questions)?;
+/// `fit` on (risk, correct) pairs that are already scored.
+pub fn fit_samples(
+    samples: &[(f64, bool)],
+    target_accuracy: f64,
+    confidence: f64,
+    system2_cost: f64,
+    checkpoint: &str,
+) -> DeferFit {
+    {
+        let n = samples.len();
+        let alpha = (1.0 - confidence) / RISK_GRID.len() as f64;
 
-        for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
-            let Some(gt) = &item.ground_truth else {
+        let points: Vec<DeferPoint> = RISK_GRID
+            .iter()
+            .map(|&threshold| {
+                let kept: Vec<bool> = samples
+                    .iter()
+                    .filter(|(risk, _)| *risk <= threshold)
+                    .map(|&(_, correct)| correct)
+                    .collect();
+                let kept_correct = kept.iter().filter(|&&c| c).count();
+                let lower_bound = binomial_lower_bound(kept_correct, kept.len(), alpha);
+                let coverage = kept.len() as f64 / n as f64;
+                DeferPoint {
+                    threshold,
+                    kept: kept.len(),
+                    kept_correct,
+                    coverage,
+                    kept_accuracy: if kept.is_empty() {
+                        0.0
+                    } else {
+                        kept_correct as f64 / kept.len() as f64
+                    },
+                    accuracy_lower_bound: lower_bound,
+                    deferral_cost_per_1000: (1.0 - coverage) * 1000.0 * system2_cost,
+                    certified: !kept.is_empty() && lower_bound >= target_accuracy,
+                }
+            })
+            .collect();
+
+        let policy = points
+            .iter()
+            .filter(|p| p.certified)
+            .max_by(|a, b| a.coverage.total_cmp(&b.coverage))
+            .map(|p| DeferPolicy {
+                checkpoint: checkpoint.to_string(),
+                threshold: p.threshold,
+                target_accuracy,
+                confidence,
+                labelled_items: n,
+                coverage: p.coverage,
+                kept_accuracy: p.kept_accuracy,
+                accuracy_lower_bound: p.accuracy_lower_bound,
+                deferral_rate: 1.0 - p.coverage,
+                deferral_cost_per_1000: p.deferral_cost_per_1000,
+            });
+
+        DeferFit {
+            labelled_items: n,
+            alpha,
+            points,
+            policy,
+            min_items_needed: (alpha.ln() / target_accuracy.ln()).ceil() as usize,
+        }
+    }
+}
+
+/// The highest option probability of an answer.
+fn top_probability(answer: &DecisionAnswer) -> f64 {
+    if let Some(p) = answer.probabilities.values().copied().reduce(f64::max) {
+        return p;
+    }
+    if let Some(p) = answer.noul {
+        return p.max(1.0 - p);
+    }
+    answer.confidence
+}
+
+/// (risk, every question correct) for each item with ground truth.
+fn collect_samples(
+    items: &[DataItem],
+    questions: &BTreeMap<String, Question>,
+    classifier: &LayaClassifier,
+) -> Result<Vec<(f64, bool)>> {
+    if items.is_empty() {
+        bail!("Cannot fit a deferral threshold on an empty dataset");
+    }
+    let mut samples = Vec::new();
+    for (item, (_, res)) in items
+        .iter()
+        .zip(classifier.classify_batch(items, questions)?.iter())
+    {
+        let Some(gt) = item.ground_truth.as_ref().filter(|gt| !gt.is_empty()) else {
+            continue;
+        };
+        let mut correct = true;
+        let mut matched_any = false;
+        for (qid, question) in questions {
+            let Some(val) = crate::engine::metrics::resolve_ground_truth_for_question(
+                Some(gt),
+                qid,
+                question,
+                questions.len(),
+            ) else {
                 continue;
             };
-            if gt.is_empty() {
-                continue;
-            }
-
-            let (risk, _, _, _) = router.compute_risk(res);
-
-            let mut correct = true;
-            let mut matched_any = false;
-            for (qid, question) in questions {
-                let Some(val) = crate::engine::metrics::resolve_ground_truth_for_question(
-                    Some(gt),
-                    qid,
-                    question,
-                    questions.len(),
-                ) else {
-                    continue;
-                };
-                matched_any = true;
-
-                if let Some(ans) = res.answers.get(qid) {
-                    let matches = match &ans.qtype {
-                        crate::model::QuestionType::Choice => {
-                            let expected = val.as_str().unwrap_or("");
-                            ans.choice
-                                .as_deref()
-                                .is_some_and(|c| c.eq_ignore_ascii_case(expected))
-                                || ans.selected_labels.as_ref().is_some_and(|v| {
-                                    v.iter().any(|s| s.eq_ignore_ascii_case(expected))
-                                })
-                        }
-                        crate::model::QuestionType::Score => {
-                            let expected = val
-                                .as_f64()
-                                .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()));
-                            expected
-                                .zip(ans.score)
-                                .is_some_and(|(e, s)| (e - s).abs() < 0.5)
-                        }
-                        crate::model::QuestionType::Noul => {
-                            let expected = val
-                                .as_bool()
-                                .or_else(|| {
-                                    val.as_str()
-                                        .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
-                                })
-                                .or_else(|| val.as_i64().map(|n| n != 0));
-                            let pred_bool = ans.noul.map(|n| n >= 0.5);
-                            expected.is_some() && expected == pred_bool
-                        }
-                    };
-                    if !matches {
-                        correct = false;
-                        break;
-                    }
-                } else {
-                    correct = false;
-                    break;
+            matched_any = true;
+            let matches = res.answers.get(qid).is_some_and(|ans| match &ans.qtype {
+                crate::model::QuestionType::Choice => {
+                    let expected = val.as_str().unwrap_or("");
+                    ans.choice
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case(expected))
+                        || ans
+                            .selected_labels
+                            .as_ref()
+                            .is_some_and(|v| v.iter().any(|s| s.eq_ignore_ascii_case(expected)))
                 }
-            }
-            if matched_any {
-                sample_evals.push((risk, correct));
-            }
-        }
-
-        if sample_evals.is_empty() {
-            bail!("No labeled items with ground truth found for Pareto tuning");
-        }
-        Ok(sample_evals)
-    }
-
-    fn eval_at_tau(
-        sample_evals: &[(f64, bool)],
-        tau: f64,
-        system2_cost: f64,
-    ) -> (f64, f64, f64, f64, f64) {
-        let n = sample_evals.len() as f64;
-        let assumed_s2_acc = 0.98;
-        let mut s1_count = 0.0;
-        let mut s1_correct = 0.0;
-        for &(risk, is_correct) in sample_evals {
-            if risk <= tau {
-                s1_count += 1.0;
-                if is_correct {
-                    s1_correct += 1.0;
+                crate::model::QuestionType::Score => val
+                    .as_f64()
+                    .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()))
+                    .zip(ans.score)
+                    .is_some_and(|(e, s)| (e - s).abs() < 0.5),
+                crate::model::QuestionType::Noul => {
+                    let expected = val
+                        .as_bool()
+                        .or_else(|| {
+                            val.as_str()
+                                .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+                        })
+                        .or_else(|| val.as_i64().map(|n| n != 0));
+                    expected.is_some() && expected == ans.noul.map(|n| n >= 0.5)
                 }
-            }
-        }
-        let s1_acc = if s1_count > 0.0 {
-            s1_correct / s1_count
-        } else {
-            1.0
-        };
-        let s1_rate = s1_count / n;
-        let s2_rate = 1.0 - s1_rate;
-        let hybrid_acc = s1_rate * s1_acc + s2_rate * assumed_s2_acc;
-        let total_cost = (n - s1_count) * system2_cost;
-        let cost_per_1000 = s2_rate * 1000.0 * system2_cost;
-        let savings_pct = if system2_cost > 0.0 {
-            s1_rate * 100.0
-        } else {
-            0.0
-        };
-        (hybrid_acc, s1_rate, total_cost, cost_per_1000, savings_pct)
-    }
-
-    /// Sweep thresholds in [0.05, 0.95] (step 0.05) and return the Pareto cost/coverage/accuracy frontier.
-    pub fn sweep_pareto(
-        items: &[DataItem],
-        questions: &BTreeMap<String, Question>,
-        classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
-    ) -> Result<Vec<CascadeSweepPoint>> {
-        Self::sweep_pareto_with_config(
-            items,
-            questions,
-            classifier,
-            target_accuracy,
-            system2_cost,
-            &CascadeConfig::default(),
-        )
-    }
-
-    /// Sweep thresholds in [0.05, 0.95] (step 0.05) with custom router config weights.
-    pub fn sweep_pareto_with_config(
-        items: &[DataItem],
-        questions: &BTreeMap<String, Question>,
-        classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
-        config: &CascadeConfig,
-    ) -> Result<Vec<CascadeSweepPoint>> {
-        let sample_evals = Self::collect_sample_evals(items, questions, classifier, config)?;
-        let grid: Vec<f64> = (1..=19).map(|i| (i * 5) as f64 / 100.0).collect();
-
-        let mut best_idx = None;
-        let mut best_cost = f64::INFINITY;
-        let mut points = Vec::with_capacity(grid.len());
-
-        for (idx, &tau) in grid.iter().enumerate() {
-            let (hybrid_acc, s1_cov, total_cost, cost_1k, savings) =
-                Self::eval_at_tau(&sample_evals, tau, system2_cost);
-            let meets_sla = hybrid_acc >= target_accuracy;
-            if meets_sla && total_cost < best_cost {
-                best_cost = total_cost;
-                best_idx = Some(idx);
-            }
-            points.push(CascadeSweepPoint {
-                threshold: tau,
-                expected_accuracy: (hybrid_acc * 10000.0).round() / 10000.0,
-                system1_coverage_rate: (s1_cov * 10000.0).round() / 10000.0,
-                system2_escalation_rate: ((1.0 - s1_cov) * 10000.0).round() / 10000.0,
-                cost_savings_percent: (savings * 100.0).round() / 100.0,
-                estimated_cost_per_1000: (cost_1k * 100.0).round() / 100.0,
-                meets_sla,
-                is_optimal: false,
             });
-        }
-        if let Some(i) = best_idx {
-            points[i].is_optimal = true;
-        }
-        Ok(points)
-    }
-
-    /// Tune the Pareto-optimal threshold tau* to satisfy target accuracy with minimal cost using default config.
-    pub fn tune_pareto(
-        items: &[DataItem],
-        questions: &BTreeMap<String, Question>,
-        classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
-    ) -> Result<CascadePolicy> {
-        Self::tune_pareto_with_config(
-            items,
-            questions,
-            classifier,
-            target_accuracy,
-            system2_cost,
-            &CascadeConfig::default(),
-        )
-    }
-
-    /// Tune the Pareto-optimal threshold tau* with custom router config weights.
-    pub fn tune_pareto_with_config(
-        items: &[DataItem],
-        questions: &BTreeMap<String, Question>,
-        classifier: &LayaClassifier,
-        target_accuracy: f64,
-        system2_cost: f64,
-        config: &CascadeConfig,
-    ) -> Result<CascadePolicy> {
-        let sample_evals = Self::collect_sample_evals(items, questions, classifier, config)?;
-        let candidate_taus: Vec<f64> = (10..=90).map(|i| i as f64 / 100.0).collect();
-        let mut best_tau = 0.45;
-        let mut best_cost = f64::INFINITY;
-        let mut best_acc = 0.0;
-        let mut best_s1_cov = 0.0;
-        let mut best_cost_1k = 0.0;
-        let mut best_savings = 0.0;
-
-        for &tau in &candidate_taus {
-            let (hybrid_acc, s1_rate, total_cost, cost_1k, savings) =
-                Self::eval_at_tau(&sample_evals, tau, system2_cost);
-            if hybrid_acc >= target_accuracy && total_cost < best_cost {
-                best_cost = total_cost;
-                best_tau = tau;
-                best_acc = hybrid_acc;
-                best_s1_cov = s1_rate;
-                best_cost_1k = cost_1k;
-                best_savings = savings;
+            if !matches {
+                correct = false;
+                break;
             }
         }
-
-        if best_cost.is_infinite() {
-            bail!(
-                "Target accuracy {:.2}% cannot be achieved by cascade (maximum achievable: 98.00%). Consider lowering target accuracy.",
-                target_accuracy * 100.0
-            );
+        if matched_any {
+            samples.push((CascadeRouter::risk(res), correct));
         }
-
-        Ok(CascadePolicy {
-            optimal_threshold: best_tau,
-            target_accuracy,
-            expected_accuracy: (best_acc * 10000.0).round() / 10000.0,
-            system1_coverage_rate: (best_s1_cov * 10000.0).round() / 10000.0,
-            system2_escalation_rate: ((1.0 - best_s1_cov) * 10000.0).round() / 10000.0,
-            cost_savings_percent: (best_savings * 100.0).round() / 100.0,
-            estimated_cost_per_1000: (best_cost_1k * 100.0).round() / 100.0,
-        })
     }
+    if samples.is_empty() {
+        bail!("No labelled items with ground truth found. `defer fit` needs labelled data");
+    }
+    Ok(samples)
+}
+
+fn ln_factorials(n: usize) -> Vec<f64> {
+    let mut table = vec![0.0; n + 1];
+    for i in 1..=n {
+        table[i] = table[i - 1] + (i as f64).ln();
+    }
+    table
+}
+
+/// P(X >= k) for X ~ Binomial(n, p).
+fn binomial_upper_tail(k: usize, n: usize, p: f64, ln_fact: &[f64]) -> f64 {
+    if k == 0 || p >= 1.0 {
+        return 1.0;
+    }
+    if p <= 0.0 {
+        return 0.0;
+    }
+    let (ln_p, ln_q) = (p.ln(), (1.0 - p).ln());
+    (k..=n)
+        .map(|i| {
+            (ln_fact[n] - ln_fact[i] - ln_fact[n - i] + i as f64 * ln_p + (n - i) as f64 * ln_q)
+                .exp()
+        })
+        .sum::<f64>()
+        .min(1.0)
+}
+
+/// One-sided Clopper-Pearson lower bound on a success rate: with probability 1 - `alpha`, the
+/// true rate is at least this value. `correct` of `n` trials succeeded.
+pub fn binomial_lower_bound(correct: usize, n: usize, alpha: f64) -> f64 {
+    if n == 0 || correct == 0 {
+        return 0.0;
+    }
+    let ln_fact = ln_factorials(n);
+    // The tail grows with p. Bisect for the p where it reaches alpha, and keep the lower end so
+    // the bound never overstates accuracy.
+    let (mut lo, mut hi) = (0.0, correct as f64 / n as f64);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if binomial_upper_tail(correct, n, mid, &ln_fact) < alpha {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn format_priors(res: &DecisionResult) -> String {
@@ -474,110 +419,108 @@ mod tests {
     use super::*;
     use crate::model::Checkpoint;
 
-    #[test]
-    fn test_cascade_routing_high_confidence() {
-        let mut questions = BTreeMap::new();
-        questions.insert(
-            "dept".into(),
+    fn dept_questions() -> BTreeMap<String, Question> {
+        BTreeMap::from([(
+            "dept".to_string(),
             Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
-        );
+        )])
+    }
 
+    #[test]
+    fn lower_bound_matches_exact_clopper_pearson() {
+        // Reference values from exact integer binomial sums in Python.
+        assert!((binomial_lower_bound(95, 100, 0.05) - 0.897747).abs() < 1e-5);
+        assert!((binomial_lower_bound(95, 100, 0.025) - 0.887165).abs() < 1e-5);
+        // All correct: the bound is alpha^(1/n).
+        assert!((binomial_lower_bound(20, 20, 0.05) - 0.05f64.powf(1.0 / 20.0)).abs() < 1e-6);
+        assert_eq!(binomial_lower_bound(0, 10, 0.05), 0.0);
+        assert_eq!(binomial_lower_bound(0, 0, 0.05), 0.0);
+    }
+
+    #[test]
+    fn route_keeps_low_risk_and_defers_high_risk() {
         let item = DataItem::new(
             "c1",
             serde_json::json!({ "text": "Invoice payment billing refund charge immediate" }),
             "test",
         );
-
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-        let router = CascadeRouter::new(CascadeConfig::default());
-        let decision = router.route(&item, &questions, &classifier).unwrap();
-
-        // Clear billing intent should execute autonomously on System 1
+        let keep_all = CascadeRouter::new(CascadeConfig {
+            risk_threshold: 1.0,
+            ..Default::default()
+        });
+        let decision = keep_all
+            .route(&item, &dept_questions(), &classifier)
+            .unwrap();
         assert_eq!(decision.tier, SystemTier::System1Fast);
         assert_eq!(decision.cost_usd, 0.0);
-        assert!(decision.composite_risk < 0.45);
-    }
 
-    #[test]
-    fn test_cascade_routing_ambiguous_escalation() {
-        let mut questions = BTreeMap::new();
-        questions.insert(
-            "dept".into(),
-            Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
-        );
-
-        // Ambiguous mix of billing and technical words
-        let item = DataItem::new(
-            "c2",
-            serde_json::json!({ "text": "maybe something or other random words with no clear intent" }),
-            "test",
-        );
-
-        let cfg = CascadeConfig {
-            risk_threshold: 0.20, // Very strict threshold forces System 2
+        let defer_all = CascadeRouter::new(CascadeConfig {
+            risk_threshold: -1.0,
             ..Default::default()
-        };
-        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-        let router = CascadeRouter::new(cfg);
-        let decision = router.route(&item, &questions, &classifier).unwrap();
-
+        });
+        let decision = defer_all
+            .route(&item, &dept_questions(), &classifier)
+            .unwrap();
         assert_eq!(decision.tier, SystemTier::System2Deliberative);
         assert!(decision.cost_usd > 0.0);
         assert!(decision.prompt_seed.is_some());
     }
 
     #[test]
-    fn test_tune_pareto_unlabeled_items_rejected() {
-        let mut questions = BTreeMap::new();
-        questions.insert(
-            "dept".into(),
-            Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
+    fn fit_chooses_the_loosest_certified_threshold() {
+        // 200 confident items, all correct, and 100 risky items, half correct.
+        let mut samples = vec![(0.01, true); 200];
+        samples.extend((0..100).map(|i| (0.5, i % 2 == 0)));
+        let fit = fit_samples(&samples, 0.95, 0.95, 0.01, "test");
+        let policy = fit.policy.expect("the confident items alone reach 95%");
+        // Thresholds from 0.01 to 0.45 keep the same 200 items, and the loosest of them wins.
+        assert!((policy.threshold - 0.45).abs() < 1e-9);
+        assert!((policy.coverage - 200.0 / 300.0).abs() < 1e-9);
+        assert!(policy.accuracy_lower_bound >= 0.95);
+        let at = |t: f64| {
+            fit.points
+                .iter()
+                .find(|p| (p.threshold - t).abs() < 1e-9)
+                .unwrap()
+        };
+        assert!(!at(0.005).certified, "keeps nothing");
+        assert!(at(0.45).certified);
+        assert!(
+            !at(0.5).certified,
+            "the risky items drop accuracy to 250 / 300"
         );
-        let item = DataItem::new(
-            "c3",
-            serde_json::json!({ "text": "Invoice payment billing refund" }),
-            "test",
-        ); // Ground truth is None
-        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-        assert!(CascadeRouter::tune_pareto(&[item], &questions, &classifier, 0.95, 0.005).is_err());
+        assert!(!at(1.0).certified);
     }
 
     #[test]
-    fn test_tune_pareto_with_custom_config() {
-        let mut questions = BTreeMap::new();
-        questions.insert(
-            "dept".into(),
-            Question::new_choice("Department", vec!["billing".into(), "technical".into()]),
+    fn fit_needs_labels_and_enough_items() {
+        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
+        let unlabelled = DataItem::new("c3", serde_json::json!({ "text": "Invoice" }), "test");
+        assert!(
+            CascadeRouter::fit(
+                &[unlabelled],
+                &dept_questions(),
+                &classifier,
+                0.95,
+                0.95,
+                0.005
+            )
+            .is_err()
         );
-        let mut gt = BTreeMap::new();
-        gt.insert("dept".into(), serde_json::Value::String("billing".into()));
 
+        let gt = BTreeMap::from([("dept".to_string(), serde_json::json!("billing"))]);
         let item = DataItem::new(
             "c4",
             serde_json::json!({ "text": "Invoice payment billing refund immediate" }),
             "test",
         )
         .with_ground_truth(gt);
-
-        let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-        let custom_cfg = CascadeConfig {
-            entropy_weight: 0.50,
-            margin_weight: 0.30,
-            act_weight: 0.20,
-            risk_threshold: 0.50,
-            system2_cost_per_call: 0.01,
-        };
-        let policy = CascadeRouter::tune_pareto_with_config(
-            &[item],
-            &questions,
-            &classifier,
-            0.90,
-            0.01,
-            &custom_cfg,
-        )
-        .unwrap();
-
-        assert!(policy.optimal_threshold > 0.0);
-        assert!(policy.expected_accuracy >= 0.90);
+        let fit =
+            CascadeRouter::fit(&[item], &dept_questions(), &classifier, 0.95, 0.95, 0.005).unwrap();
+        // One item cannot show 95% accuracy at 95% confidence.
+        assert!(fit.policy.is_none());
+        assert_eq!(fit.points.len(), RISK_GRID.len());
+        assert_eq!(fit.min_items_needed, 117);
     }
 }

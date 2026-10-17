@@ -5,7 +5,7 @@ use lemmata::engine::{
     CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
     ConsensusStatus, DecisionCache, Evaluator, GuardAction, GuardrailEngine, GuardrailPolicy,
     HierarchicalRouter, LayaClassifier, OodDetector, PolicyRule, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, SystemStatsReport, SystemTier,
+    SchemaSynthesizer, StatsEngine, SystemStatsReport, SystemTier,
 };
 use lemmata::model::{Checkpoint, HierarchicalSchema, Question, QuestionType, inspect_safetensors};
 use lemmata::resolve_data_source_filtered;
@@ -401,7 +401,7 @@ fn test_multi_label_classification() {
 }
 
 #[test]
-fn test_semantic_decision_cache_integration() {
+fn test_decision_cache_integration() {
     let mut questions = BTreeMap::new();
     questions.insert(
         "dept".into(),
@@ -409,51 +409,32 @@ fn test_semantic_decision_cache_integration() {
     );
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let mut cache = DecisionCache::new(SemanticCacheConfig {
-        semantic: true,
-        ..Default::default()
-    });
+    let mut cache = DecisionCache::in_memory();
 
     let original_text = "Please refund duplicate charge on invoice";
     let state = serde_json::Value::String(original_text.into());
     let schema_hash = "dept_schema";
 
     // 1. Initial lookup is a miss
-    let initial_res = cache.lookup(original_text, schema_hash);
-    assert!(matches!(
-        initial_res,
-        lemmata::engine::CacheLookupResult::Miss
-    ));
+    assert!(cache.lookup(original_text, schema_hash).is_none());
 
     // 2. Classify and insert into cache
     let decision = classifier.classify(&state, &questions).unwrap();
-    let inserted = cache.insert(original_text, schema_hash, &decision);
-    assert!(inserted);
+    cache.insert(original_text, schema_hash, &decision);
 
-    // 3. Exact cache lookup hits in sub-millisecond time
-    match cache.lookup(original_text, schema_hash) {
-        lemmata::engine::CacheLookupResult::ExactHit(res) => {
-            assert_eq!(res.answers["dept"].choice.as_deref(), Some("billing"));
-            assert!(res.latency_ms < 1.0);
-        }
-        _ => panic!("Expected exact cache hit"),
-    }
+    // 3. The exact text hits and runs no model
+    let hit = cache
+        .lookup(original_text, schema_hash)
+        .expect("exact cache hit");
+    assert_eq!(hit.answers["dept"].choice, decision.answers["dept"].choice);
+    assert_eq!(hit.latency_ms, 0.0);
 
-    // 4. Paraphrased semantic lookup hits with high cosine similarity
+    // 4. A paraphrase misses: the cache never guesses from similar text
     let paraphrased_text = "Can I get a refund for a duplicate invoice charge?";
-    match cache.lookup(paraphrased_text, schema_hash) {
-        lemmata::engine::CacheLookupResult::SemanticHit {
-            result, similarity, ..
-        } => {
-            assert_eq!(result.answers["dept"].choice.as_deref(), Some("billing"));
-            assert!(similarity >= 0.85);
-        }
-        _ => panic!("Expected semantic cache hit for paraphrased text"),
-    }
+    assert!(cache.lookup(paraphrased_text, schema_hash).is_none());
 
-    assert_eq!(cache.stats().exact_hits, 1);
-    assert_eq!(cache.stats().semantic_hits, 1);
-    assert!(cache.stats().hit_rate() > 0.60);
+    assert_eq!(cache.stats().hits, 1);
+    assert_eq!(cache.stats().misses, 2);
 }
 
 #[test]
@@ -551,17 +532,18 @@ fn test_cost_aware_cascade_pareto_tuning() {
     ];
 
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let policy = CascadeRouter::tune_pareto(&items, &questions, &classifier, 0.95, 0.005).unwrap();
-
-    assert!(policy.system1_coverage_rate >= 0.50);
-    assert!(policy.cost_savings_percent >= 50.0);
+    let fit = CascadeRouter::fit(&items, &questions, &classifier, 0.95, 0.95, 0.005).unwrap();
+    // Two labelled items cannot show 95% accuracy at 95% confidence.
+    assert_eq!(fit.labelled_items, 2);
+    assert!(fit.policy.is_none());
+    assert!(fit.min_items_needed > 2);
 
     let router = CascadeRouter::new(CascadeConfig::default());
     let decision = router.route(&items[0], &questions, &classifier).unwrap();
 
     assert_eq!(decision.tier, SystemTier::System1Fast);
     assert_eq!(decision.cost_usd, 0.0);
-    assert!(decision.composite_risk < 0.45);
+    assert!(decision.risk < 0.45);
 }
 
 #[test]
@@ -736,8 +718,8 @@ fn test_hierarchical_routing_execution() {
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
     let router = HierarchicalRouter::new(schema, classifier)
-        .with_coarse_threshold(0.50)
-        .with_escalate_threshold(0.75);
+        .with_beam(2)
+        .with_path_threshold(0.10);
 
     // 1. Card stolen ticket -> cards -> lost_or_stolen
     let card_ticket = "My debit card was stolen while traveling in London, please cancel it immediately to prevent fraud.";
@@ -775,8 +757,8 @@ fn test_hierarchical_routing_coarse_escalation_gate() {
     let schema_path = Path::new("schema/banking_hierarchy.json");
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    // Setting coarse_threshold high (0.95) forces escalation on ambiguous/out-of-domain inputs
-    let router = HierarchicalRouter::new(schema, classifier).with_coarse_threshold(0.95);
+    // A high path threshold (0.95) escalates ambiguous or out-of-domain inputs
+    let router = HierarchicalRouter::new(schema, classifier).with_path_threshold(0.95);
 
     let irrelevant_ticket =
         "Can you tell me what the current weather forecast is for tomorrow morning?";
@@ -785,8 +767,8 @@ fn test_hierarchical_routing_coarse_escalation_gate() {
         .unwrap();
 
     assert!(res.escalated);
-    assert_eq!(res.status, "ESCALATED_AT_COARSE");
-    assert_eq!(res.steps.len(), 1); // Only evaluated Stage 1!
+    assert_eq!(res.status, "ESCALATED");
+    assert!(res.compound_confidence < 0.95);
     assert!(res.escalation_reason.is_some());
 }
 
@@ -795,7 +777,7 @@ fn test_hierarchical_batch_and_benchmark() {
     let schema_path = Path::new("schema/banking_hierarchy.json");
     let schema = HierarchicalSchema::load_from_file(schema_path).unwrap();
     let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let router = HierarchicalRouter::new(schema, classifier).with_coarse_threshold(0.40);
+    let router = HierarchicalRouter::new(schema, classifier).with_path_threshold(0.40);
 
     let source = resolve_data_source_filtered(
         Path::new("data"),
@@ -1079,36 +1061,6 @@ fn test_stats_engine_speed_performance_accuracy() {
 }
 
 #[test]
-fn test_stats_engine_with_semantic_cache() {
-    let source = lemmata::resolve_data_source(
-        Path::new("data"),
-        Some(Path::new("data/customer_support.jsonl")),
-        false,
-        None,
-    )
-    .unwrap();
-    let items = source.read_items().unwrap();
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-
-    let stats_engine = StatsEngine::new(classifier)
-        .with_iterations(3)
-        .with_warmup(1)
-        .with_cache(true, 0.90);
-
-    let report = stats_engine.evaluate(&items, &questions).unwrap();
-
-    assert!(report.performance.cache_summary.is_some());
-    let cache = report.performance.cache_summary.as_ref().unwrap();
-    assert!(cache.enabled);
-    assert!(cache.total_lookups > 0);
-    // Across 3 iterations, iterations 2 & 3 should hit cache!
-    assert!(cache.hit_rate_pct > 30.0);
-    assert!(cache.exact_hits > 0);
-    assert!(cache.speedup_ratio >= 1.0);
-}
-
-#[test]
 fn test_stats_engine_export_file() {
     let source = lemmata::resolve_data_source(
         Path::new("data"),
@@ -1231,8 +1183,8 @@ fn test_schema_hash_isolation_and_exact_keys() {
 
     assert_ne!(hash_support, hash_sentiment);
 
-    let key_support = DecisionCache::make_exact_key("hello world", &hash_support);
-    let key_sentiment = DecisionCache::make_exact_key("hello world", &hash_sentiment);
+    let key_support = DecisionCache::key("hello world", &hash_support);
+    let key_sentiment = DecisionCache::key("hello world", &hash_sentiment);
 
     assert_ne!(key_support, key_sentiment);
 }

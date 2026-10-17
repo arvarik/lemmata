@@ -103,7 +103,7 @@ impl CurriculumPhase {
     pub fn key_takeaways(&self) -> &'static [&'static str] {
         match self {
             Self::Phase1Foundations => &[
-                "Bidirectional encoders see full left+right context simultaneously in a single forward pass (<40ms).",
+                "Bidirectional encoders see full left+right context simultaneously in a single forward pass.",
                 "2025/2026 architectures (ModernBERT, mmBERT, DeBERTa-v3, EuroBERT, NeoBERT) add RoPE, SwiGLU, FlashAttention, and 8k context.",
                 "System 1 handles high-throughput structured classification at ~250x lower cost than autoregressive System 2 LLMs.",
             ],
@@ -115,7 +115,7 @@ impl CurriculumPhase {
             Self::Phase3ScalingContextAndTaxonomies => &[
                 "Naive prefix truncation drops late-document incidents ('Lost in the Tail'); --chunk-strategy head-tail or sliding-window preserves tail signals.",
                 "--shortlist-k prunes high-cardinality taxonomies (K > 10) in O(1) via bi-encoder cosine similarity before cross-encoder scoring.",
-                "--model auto-best routes each item in <0.5ms using Unicode script, token length, label count K, and typed-head requirements.",
+                "--model auto-best routes each item without a model call, using Unicode script, token length, label count K, and typed-head requirements.",
             ],
             Self::Phase4CalibrationAndUncertainty => &[
                 "Raw softmax probabilities are often overconfident; normalized negentropy 1 - H(p)/ln(K) + top-2 margin yields a richer confidence signal.",
@@ -123,7 +123,7 @@ impl CurriculumPhase {
                 "Split Conformal Prediction (lemmata conformal --alpha 0.05) guarantees >=95% true-label coverage via adaptive prediction sets C(x).",
             ],
             Self::Phase5ProductionCascadingAndOps => &[
-                "Pareto Cascading (lemmata defer) resolves 75-85% of traffic in System 1 (<40ms) and escalates only high-risk items to System 2.",
+                "Deferral (lemmata defer fit) keeps only the items whose accuracy it can certify on labelled data, and sends the rest to System 2. How many it keeps depends on your data.",
                 "Ensembles (lemmata ensemble) combine diverse paradigms and measure their disagreement as mutual information (the generalized Jensen-Shannon divergence).",
                 "Diagnostic slicing (--slice-by) and signed decision receipts (classify --receipts, then lemmata attest verify) close the production loop.",
             ],
@@ -264,127 +264,182 @@ fn format_prediction(ans: &crate::model::DecisionAnswer) -> String {
     }
 }
 
+/// Run a live lab. Under the `native` backend, a lab whose checkpoints are not installed explains
+/// how to download them instead of failing.
+fn live_lab_or_notice(
+    needs: &[Checkpoint],
+    lab: impl FnOnce() -> anyhow::Result<LiveLabOutput>,
+) -> LiveLabOutput {
+    use crate::model::native::{Backend, backend, native_available};
+    let missing: Vec<Checkpoint> = needs
+        .iter()
+        .copied()
+        .filter(|&c| backend() == Backend::Native && !native_available(c))
+        .collect();
+    if missing.is_empty() {
+        match lab() {
+            Ok(out) => return out,
+            Err(e) => {
+                return LiveLabOutput {
+                    title: "Live lab (failed)".to_string(),
+                    explanation: format!("The live lab could not run: {e}"),
+                    metrics_summary: Vec::new(),
+                    try_command: "lemmata info".to_string(),
+                };
+            }
+        }
+    }
+    LiveLabOutput {
+        title: "Live lab (needs model weights)".to_string(),
+        explanation: format!(
+            "This lab runs {}. Download the missing checkpoints to see it live, or run `lemmata --backend auto learn` to simulate them.",
+            needs
+                .iter()
+                .map(|c| c.repo_id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        metrics_summary: missing
+            .iter()
+            .map(|c| {
+                (
+                    c.repo_id().to_string(),
+                    format!("lemmata download --checkpoint {}", c.repo_id()),
+                )
+            })
+            .collect(),
+        try_command: format!("lemmata download --checkpoint {}", missing[0].repo_id()),
+    }
+}
+
 fn build_phase_1() -> PhaseLesson {
     let phase = CurriculumPhase::Phase1Foundations;
-
-    // Live Lab: Run English, Multilingual, and TypedDecisions checkpoints on concrete prompts
-    let clf_en = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let clf_multi = LayaClassifier::with_checkpoint(Checkpoint::Multilingual);
-    let clf_typed = LayaClassifier::with_checkpoint(Checkpoint::TypedDecisions);
-
-    let q_route = Question::new_choice(
-        "Route incoming customer ticket to the owning department",
-        vec![
-            "billing".to_string(),
-            "technical".to_string(),
-            "security".to_string(),
-            "sales".to_string(),
+    let live_lab = live_lab_or_notice(
+        &[
+            Checkpoint::English,
+            Checkpoint::Multilingual,
+            Checkpoint::TypedDecisions,
         ],
+        || -> anyhow::Result<LiveLabOutput> {
+            // Live Lab: Run English, Multilingual, and TypedDecisions checkpoints on concrete prompts
+            let clf_en = LayaClassifier::with_checkpoint(Checkpoint::English);
+            let clf_multi = LayaClassifier::with_checkpoint(Checkpoint::Multilingual);
+            let clf_typed = LayaClassifier::with_checkpoint(Checkpoint::TypedDecisions);
+
+            let q_route = Question::new_choice(
+                "Route incoming customer ticket to the owning department",
+                vec![
+                    "billing".to_string(),
+                    "technical".to_string(),
+                    "security".to_string(),
+                    "sales".to_string(),
+                ],
+            );
+            let en_text = "We did not have a technical outage; our April enterprise invoice was charged twice";
+            let ans_en = clf_en.classify_single(en_text, &q_route)?;
+
+            let explain_rep = crate::engine::explain::AttributionEngine::new(&clf_en).explain(
+                en_text,
+                "route",
+                &q_route,
+                "billing",
+                "technical",
+            )?;
+            let top_pos = explain_rep
+                .attributions
+                .iter()
+                .max_by(|a, b| a.delta_margin.total_cmp(&b.delta_margin))
+                .map(|a| format!("'{}' ({:+.3})", a.token, a.delta_margin))
+                .unwrap_or_else(|| "none".to_string());
+            let suppressed_neg = explain_rep
+                .attributions
+                .iter()
+                .min_by(|a, b| a.delta_margin.total_cmp(&b.delta_margin))
+                .map(|a| format!("'{}' ({:+.3})", a.token, a.delta_margin))
+                .unwrap_or_else(|| "none".to_string());
+
+            let ans_multi = clf_multi.classify_single(
+                "緊急：本番環境のAPIゲートウェイでタイムアウトエラーが多発しています",
+                &q_route,
+            )?;
+
+            let q_score = Question::new_score(
+                "Rate production incident severity from 1 (minor) to 4 (critical outage)",
+                vec![
+                    "1: Minor cosmetic issue".to_string(),
+                    "2: Degraded non-critical feature".to_string(),
+                    "3: Major service disruption".to_string(),
+                    "4: Critical multi-region outage".to_string(),
+                ],
+            );
+            let q_noul = Question::new_noul("Does this incident require immediate on-call paging?");
+            let mut typed_map = BTreeMap::new();
+            typed_map.insert("severity".to_string(), q_score);
+            typed_map.insert("page_oncall".to_string(), q_noul);
+            let typed_res = clf_typed
+            .classify(
+                &serde_json::Value::String(
+                    "CRITICAL: Primary database cluster is unreachable across all availability zones; SLA breach imminent.".to_string(),
+                ),
+                &typed_map,
+            )
+            ?;
+
+            let sev_ans = &typed_res.answers["severity"];
+            let page_ans = &typed_res.answers["page_oncall"];
+
+            Ok(LiveLabOutput {
+            title: "Live Lab 1: Sub-Millisecond Bidirectional Triage Across English, CJK & Typed Heads"
+                .to_string(),
+            explanation: "We just ran live forward passes across Laya's English (ModernBERT-large), Multilingual (mmBERT), and TypedDecisions checkpoints, plus leave-one-out contrastive token attribution. Notice how bidirectional encoding evaluates all candidate labels and typed questions in a single non-autoregressive pass.".to_string(),
+            metrics_summary: vec![
+                (
+                    "English (convaiinnovations/laya)".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}% | window={}t",
+                        format_prediction(&ans_en),
+                        ans_en.confidence * 100.0,
+                        Checkpoint::English.context_window()
+                    ),
+                ),
+                (
+                    "Contrastive Attribution Top Driver".to_string(),
+                    format!(
+                        "top_billing={} | suppressed_negation={} (margin={:+.2})",
+                        top_pos, suppressed_neg, explain_rep.baseline_margin
+                    ),
+                ),
+                (
+                    "Multilingual CJK (laya-multilingual)".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}% | window={}t",
+                        format_prediction(&ans_multi),
+                        ans_multi.confidence * 100.0,
+                        Checkpoint::Multilingual.context_window()
+                    ),
+                ),
+                (
+                    "Typed Score E[y] (laya-typed-decisions)".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}% | latency={:.2}ms",
+                        format_prediction(sev_ans),
+                        sev_ans.confidence * 100.0,
+                        typed_res.latency_ms
+                    ),
+                ),
+                (
+                    "Typed Noul Assertion (page_oncall)".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}%",
+                        format_prediction(page_ans),
+                        page_ans.confidence * 100.0
+                    ),
+                ),
+            ],
+            try_command: "lemmata explain \"Our April invoice was charged twice\" --labels \"billing,technical,security\"".to_string(),
+        })
+        },
     );
-    let en_text =
-        "We did not have a technical outage; our April enterprise invoice was charged twice";
-    let ans_en = clf_en
-        .classify_single(en_text, &q_route)
-        .expect("Phase 1 English classification");
-
-    let explain_rep = crate::engine::explain::AttributionEngine::new(&clf_en)
-        .explain(en_text, "route", &q_route, "billing", "technical")
-        .expect("Phase 1 Contrastive Attribution");
-    let top_pos = explain_rep
-        .attributions
-        .iter()
-        .max_by(|a, b| a.delta_margin.total_cmp(&b.delta_margin))
-        .map(|a| format!("'{}' ({:+.3})", a.token, a.delta_margin))
-        .unwrap_or_else(|| "none".to_string());
-    let suppressed_neg = explain_rep
-        .attributions
-        .iter()
-        .min_by(|a, b| a.delta_margin.total_cmp(&b.delta_margin))
-        .map(|a| format!("'{}' ({:+.3})", a.token, a.delta_margin))
-        .unwrap_or_else(|| "none".to_string());
-
-    let ans_multi = clf_multi
-        .classify_single(
-            "緊急：本番環境のAPIゲートウェイでタイムアウトエラーが多発しています",
-            &q_route,
-        )
-        .expect("Phase 1 Multilingual classification");
-
-    let q_score = Question::new_score(
-        "Rate production incident severity from 1 (minor) to 4 (critical outage)",
-        vec![
-            "1: Minor cosmetic issue".to_string(),
-            "2: Degraded non-critical feature".to_string(),
-            "3: Major service disruption".to_string(),
-            "4: Critical multi-region outage".to_string(),
-        ],
-    );
-    let q_noul = Question::new_noul("Does this incident require immediate on-call paging?");
-    let mut typed_map = BTreeMap::new();
-    typed_map.insert("severity".to_string(), q_score);
-    typed_map.insert("page_oncall".to_string(), q_noul);
-    let typed_res = clf_typed
-        .classify(
-            &serde_json::Value::String(
-                "CRITICAL: Primary database cluster is unreachable across all availability zones; SLA breach imminent.".to_string(),
-            ),
-            &typed_map,
-        )
-        .expect("Phase 1 TypedDecisions classification");
-
-    let sev_ans = &typed_res.answers["severity"];
-    let page_ans = &typed_res.answers["page_oncall"];
-
-    let live_lab = LiveLabOutput {
-        title: "Live Lab 1: Sub-Millisecond Bidirectional Triage Across English, CJK & Typed Heads"
-            .to_string(),
-        explanation: "We just ran live forward passes across Laya's English (ModernBERT-large), Multilingual (mmBERT), and TypedDecisions checkpoints, plus leave-one-out contrastive token attribution. Notice how bidirectional encoding evaluates all candidate labels and typed questions in a single non-autoregressive pass.".to_string(),
-        metrics_summary: vec![
-            (
-                "English (convaiinnovations/laya)".to_string(),
-                format!(
-                    "pred={} | conf={:.1}% | window={}t",
-                    format_prediction(&ans_en),
-                    ans_en.confidence * 100.0,
-                    Checkpoint::English.context_window()
-                ),
-            ),
-            (
-                "Contrastive Attribution Top Driver".to_string(),
-                format!(
-                    "top_billing={} | suppressed_negation={} (margin={:+.2})",
-                    top_pos, suppressed_neg, explain_rep.baseline_margin
-                ),
-            ),
-            (
-                "Multilingual CJK (laya-multilingual)".to_string(),
-                format!(
-                    "pred={} | conf={:.1}% | window={}t",
-                    format_prediction(&ans_multi),
-                    ans_multi.confidence * 100.0,
-                    Checkpoint::Multilingual.context_window()
-                ),
-            ),
-            (
-                "Typed Score E[y] (laya-typed-decisions)".to_string(),
-                format!(
-                    "pred={} | conf={:.1}% | latency={:.2}ms",
-                    format_prediction(sev_ans),
-                    sev_ans.confidence * 100.0,
-                    typed_res.latency_ms
-                ),
-            ),
-            (
-                "Typed Noul Assertion (page_oncall)".to_string(),
-                format!(
-                    "pred={} | conf={:.1}%",
-                    format_prediction(page_ans),
-                    page_ans.confidence * 100.0
-                ),
-            ),
-        ],
-        try_command: "lemmata explain \"Our April invoice was charged twice\" --labels \"billing,technical,security\"".to_string(),
-    };
 
     PhaseLesson {
         phase: phase.number(),
@@ -395,11 +450,11 @@ fn build_phase_1() -> PhaseLesson {
             "Daniel Kahneman's dual-process theory divides cognition into System 1 (fast, automatic, pattern-recognizing) ",
             "and System 2 (slow, deliberate, step-by-step reasoning).\n\n",
             "In modern AI infrastructure, causal autoregressive LLMs (GPT-4o, Claude 3.7, Llama-3-70B) are System 2 engines: ",
-            "they generate tokens one-by-one from left to right (500-3000ms, ~$0.005/call). Using a 70B causal LLM just to ",
+            "they generate tokens one-by-one from left to right, so each call is slower and costs more. Using a 70B causal LLM just to ",
             "classify an email into 4 folders or check a guardrail is like hiring a Supreme Court justice to sort postal mail.\n\n",
             "System 1 Decision Models (Laya, ModernBERT, DeBERTa-v3, mmBERT, EuroBERT, NeoBERT) are compact (210M-435M parameter) ",
             "non-autoregressive BIDIRECTIONAL encoders. Because every token attends to both past AND future tokens simultaneously ",
-            "in a single forward pass, they resolve classification, ordinal scoring, and policy routing in <40ms at ~250x lower cost."
+            "in a single forward pass, they resolve classification, ordinal scoring, and policy routing at a small fraction of the cost of an LLM call."
         )
         .to_string(),
         ascii_diagram: concat!(
@@ -411,7 +466,7 @@ fn build_phase_1() -> PhaseLesson {
             "         \\                      |                         |                      /\n",
             "          +====================> [ Joint Decision Head ] <======================+\n",
             "                                        |\n",
-            "                         P(billing)=0.94, P(technical)=0.03  (<40ms total!)"
+            "                         P(billing)=0.94, P(technical)=0.03"
         )
         .to_string(),
         core_concepts: vec![
@@ -464,114 +519,116 @@ fn build_phase_1() -> PhaseLesson {
 
 fn build_phase_2() -> PhaseLesson {
     let phase = CurriculumPhase::Phase2HeadParadigms;
-
-    let sample_text = "We did not have a technical outage; instead, our invoice was charged twice.";
-    let question = Question::new_choice(
-        "Identify the customer's actual support issue",
-        vec![
-            "billing: Invoice, charge, refund, or payment dispute".to_string(),
-            "technical: API bug, outage, crash, or integration failure".to_string(),
-            "security: Unauthorized access, MFA, or phishing alert".to_string(),
-            "account: Profile settings, SSO login, or seat management".to_string(),
+    let live_lab = live_lab_or_notice(
+        &[
+            Checkpoint::English,
+            Checkpoint::DebertaV3ZeroShot,
+            Checkpoint::EuroBert,
         ],
+        || -> anyhow::Result<LiveLabOutput> {
+            let sample_text =
+                "We did not have a technical outage; instead, our invoice was charged twice.";
+            let question = Question::new_choice(
+                "Identify the customer's actual support issue",
+                vec![
+                    "billing: Invoice, charge, refund, or payment dispute".to_string(),
+                    "technical: API bug, outage, crash, or integration failure".to_string(),
+                    "security: Unauthorized access, MFA, or phishing alert".to_string(),
+                    "account: Profile settings, SSO login, or seat management".to_string(),
+                ],
+            );
+
+            let clf_joint = LayaClassifier::with_checkpoint(Checkpoint::English);
+            let clf_nli = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot);
+            let clf_mlm = LayaClassifier::with_checkpoint(Checkpoint::EuroBert);
+
+            let ans_joint = clf_joint.classify_single(sample_text, &question)?;
+            let ans_nli = clf_nli.classify_single(sample_text, &question)?;
+            let ans_mlm = clf_mlm.classify_single(sample_text, &question)?;
+
+            // Minimal-pair counterfactual flip (Distill.pub / Gardner et al. Contrast Sets)
+            let cf_tech = clf_joint
+                .classify_single("API outage and crash; not a billing charge", &question)?;
+            let cf_bill = clf_joint
+                .classify_single("API is fine; billing invoice charged twice", &question)?;
+
+            let nli_hyp =
+                render_nli_hypothesis(&question, "billing: Invoice, charge, refund", None);
+            let mlm_prompt = render_mlm_verbalizer_prompt(sample_text, &question);
+
+            Ok(LiveLabOutput {
+            title: "Live Lab 2: Comparing the 3 Zero-Shot Head Paradigms on Adversarial Negation"
+                .to_string(),
+            explanation: format!(
+                "Input: \"{}\"\nWe ran this exact contrastive negation prompt through all 3 head paradigms: JointSinglePass (laya-en), PairwiseNliCrossEncoder (deberta-v3-zs), and GenerativeMlmVerbalizer (eurobert-210m), plus a minimal-pair counterfactual flip.",
+                sample_text
+            ),
+            metrics_summary: vec![
+                (
+                    format!(
+                        "1. {} ({})",
+                        Checkpoint::English.short_name(),
+                        head_paradigm_for(Checkpoint::English).complexity_notation()
+                    ),
+                    format!(
+                        "pred={} | P(billing)={:.3} | conf={:.1}%",
+                        format_prediction(&ans_joint),
+                        ans_joint.probabilities.get("billing").copied().unwrap_or(0.0),
+                        ans_joint.confidence * 100.0
+                    ),
+                ),
+                (
+                    format!(
+                        "2. {} ({})",
+                        Checkpoint::DebertaV3ZeroShot.short_name(),
+                        head_paradigm_for(Checkpoint::DebertaV3ZeroShot).complexity_notation()
+                    ),
+                    format!(
+                        "pred={} | P(billing)={:.3} | conf={:.1}%",
+                        format_prediction(&ans_nli),
+                        ans_nli.probabilities.get("billing").copied().unwrap_or(0.0),
+                        ans_nli.confidence * 100.0
+                    ),
+                ),
+                (
+                    format!(
+                        "3. {} ({})",
+                        Checkpoint::EuroBert.short_name(),
+                        head_paradigm_for(Checkpoint::EuroBert).complexity_notation()
+                    ),
+                    format!(
+                        "pred={} | P(billing)={:.3} | conf={:.1}%",
+                        format_prediction(&ans_mlm),
+                        ans_mlm.probabilities.get("billing").copied().unwrap_or(0.0),
+                        ans_mlm.confidence * 100.0
+                    ),
+                ),
+                (
+                    "Minimal-Pair Counterfactual Flip".to_string(),
+                    format!(
+                        "\"API timed out/outage; not billing\" -> {} ({:.0}%) | \"API is fine; billing invoice charged twice\" -> {} ({:.0}%)",
+                        format_prediction(&cf_tech),
+                        cf_tech.confidence * 100.0,
+                        format_prediction(&cf_bill),
+                        cf_bill.confidence * 100.0
+                    ),
+                ),
+                (
+                    "Rendered NLI Hypothesis".to_string(),
+                    format!("\"{}\"", nli_hyp),
+                ),
+                (
+                    "Rendered MLM Cloze Prompt".to_string(),
+                    format!(
+                        "\"{}\"",
+                        mlm_prompt.chars().take(72).collect::<String>()
+                    ),
+                ),
+            ],
+            try_command: "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
+        })
+        },
     );
-
-    let clf_joint = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let clf_nli = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot);
-    let clf_mlm = LayaClassifier::with_checkpoint(Checkpoint::EuroBert);
-
-    let ans_joint = clf_joint
-        .classify_single(sample_text, &question)
-        .expect("Phase 2 JointSinglePass");
-    let ans_nli = clf_nli
-        .classify_single(sample_text, &question)
-        .expect("Phase 2 PairwiseNliCrossEncoder");
-    let ans_mlm = clf_mlm
-        .classify_single(sample_text, &question)
-        .expect("Phase 2 GenerativeMlmVerbalizer");
-
-    // Minimal-pair counterfactual flip (Distill.pub / Gardner et al. Contrast Sets)
-    let cf_tech = clf_joint
-        .classify_single("API outage and crash; not a billing charge", &question)
-        .expect("Phase 2 Counterfactual A");
-    let cf_bill = clf_joint
-        .classify_single("API is fine; billing invoice charged twice", &question)
-        .expect("Phase 2 Counterfactual B");
-
-    let nli_hyp = render_nli_hypothesis(&question, "billing: Invoice, charge, refund", None);
-    let mlm_prompt = render_mlm_verbalizer_prompt(sample_text, &question);
-
-    let live_lab = LiveLabOutput {
-        title: "Live Lab 2: Comparing the 3 Zero-Shot Head Paradigms on Adversarial Negation"
-            .to_string(),
-        explanation: format!(
-            "Input: \"{}\"\nWe ran this exact contrastive negation prompt through all 3 head paradigms: JointSinglePass (laya-en), PairwiseNliCrossEncoder (deberta-v3-zs), and GenerativeMlmVerbalizer (eurobert-210m), plus a minimal-pair counterfactual flip.",
-            sample_text
-        ),
-        metrics_summary: vec![
-            (
-                format!(
-                    "1. {} ({})",
-                    Checkpoint::English.short_name(),
-                    head_paradigm_for(Checkpoint::English).complexity_notation()
-                ),
-                format!(
-                    "pred={} | P(billing)={:.3} | conf={:.1}%",
-                    format_prediction(&ans_joint),
-                    ans_joint.probabilities.get("billing").copied().unwrap_or(0.0),
-                    ans_joint.confidence * 100.0
-                ),
-            ),
-            (
-                format!(
-                    "2. {} ({})",
-                    Checkpoint::DebertaV3ZeroShot.short_name(),
-                    head_paradigm_for(Checkpoint::DebertaV3ZeroShot).complexity_notation()
-                ),
-                format!(
-                    "pred={} | P(billing)={:.3} | conf={:.1}%",
-                    format_prediction(&ans_nli),
-                    ans_nli.probabilities.get("billing").copied().unwrap_or(0.0),
-                    ans_nli.confidence * 100.0
-                ),
-            ),
-            (
-                format!(
-                    "3. {} ({})",
-                    Checkpoint::EuroBert.short_name(),
-                    head_paradigm_for(Checkpoint::EuroBert).complexity_notation()
-                ),
-                format!(
-                    "pred={} | P(billing)={:.3} | conf={:.1}%",
-                    format_prediction(&ans_mlm),
-                    ans_mlm.probabilities.get("billing").copied().unwrap_or(0.0),
-                    ans_mlm.confidence * 100.0
-                ),
-            ),
-            (
-                "Minimal-Pair Counterfactual Flip".to_string(),
-                format!(
-                    "\"API timed out/outage; not billing\" -> {} ({:.0}%) | \"API is fine; billing invoice charged twice\" -> {} ({:.0}%)",
-                    format_prediction(&cf_tech),
-                    cf_tech.confidence * 100.0,
-                    format_prediction(&cf_bill),
-                    cf_bill.confidence * 100.0
-                ),
-            ),
-            (
-                "Rendered NLI Hypothesis".to_string(),
-                format!("\"{}\"", nli_hyp),
-            ),
-            (
-                "Rendered MLM Cloze Prompt".to_string(),
-                format!(
-                    "\"{}\"",
-                    mlm_prompt.chars().take(72).collect::<String>()
-                ),
-            ),
-        ],
-        try_command: "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
-    };
 
     PhaseLesson {
         phase: phase.number(),
@@ -644,145 +701,145 @@ fn build_phase_2() -> PhaseLesson {
 
 fn build_phase_3() -> PhaseLesson {
     let phase = CurriculumPhase::Phase3ScalingContextAndTaxonomies;
+    let live_lab = live_lab_or_notice(
+        &[Checkpoint::DebertaV3ZeroShot],
+        || -> anyhow::Result<LiveLabOutput> {
+            // 1. Long-context Lost-in-the-Tail demonstration (>600 tokens on a 512-token model)
+            let mut long_log = "2026-10-16T00:00:01Z INFO healthcheck nominal; worker pool utilization 18%; routine cache telemetry heartbeat OK. ".repeat(55);
+            long_log.push_str(
+            " 2026-10-16T00:04:59Z CRITICAL SECURITY ALERT: Unauthorized root SSH key injection and MFA bypass detected on production auth-gateway-01!",
+        );
+            let total_tokens = estimate_tokens(&long_log);
 
-    // 1. Long-context Lost-in-the-Tail demonstration (>600 tokens on a 512-token model)
-    let mut long_log = "2026-10-16T00:00:01Z INFO healthcheck nominal; worker pool utilization 18%; routine cache telemetry heartbeat OK. ".repeat(55);
-    long_log.push_str(
-        " 2026-10-16T00:04:59Z CRITICAL SECURITY ALERT: Unauthorized root SSH key injection and MFA bypass detected on production auth-gateway-01!",
-    );
-    let total_tokens = estimate_tokens(&long_log);
+            let q_sec = Question::new_choice(
+                "Classify the log status",
+                vec![
+                    "security: Unauthorized access, breach, or SSH/MFA compromise".to_string(),
+                    "technical: Routine telemetry, healthcheck, or performance log".to_string(),
+                    "billing: Invoice or subscription event".to_string(),
+                ],
+            );
 
-    let q_sec = Question::new_choice(
-        "Classify the log status",
-        vec![
-            "security: Unauthorized access, breach, or SSH/MFA compromise".to_string(),
-            "technical: Routine telemetry, healthcheck, or performance log".to_string(),
-            "billing: Invoice or subscription event".to_string(),
-        ],
-    );
+            let clf_prefix = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot)
+                .with_chunk_strategy(ChunkStrategy::TruncatePrefix);
+            let clf_head_tail = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot)
+                .with_chunk_strategy(ChunkStrategy::HeadTail);
 
-    let clf_prefix = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot)
-        .with_chunk_strategy(ChunkStrategy::TruncatePrefix);
-    let clf_head_tail = LayaClassifier::with_checkpoint(Checkpoint::DebertaV3ZeroShot)
-        .with_chunk_strategy(ChunkStrategy::HeadTail);
+            let ans_prefix = clf_prefix.classify_single(&long_log, &q_sec)?;
+            let ans_head_tail = clf_head_tail.classify_single(&long_log, &q_sec)?;
 
-    let ans_prefix = clf_prefix
-        .classify_single(&long_log, &q_sec)
-        .expect("Phase 3 TruncatePrefix");
-    let ans_head_tail = clf_head_tail
-        .classify_single(&long_log, &q_sec)
-        .expect("Phase 3 HeadTail");
+            let ht_chunks = chunk_text_for_window(&long_log, 512, ChunkStrategy::HeadTail);
+            let ht_chunk_tokens = estimate_tokens(&ht_chunks[0]);
 
-    let ht_chunks = chunk_text_for_window(&long_log, 512, ChunkStrategy::HeadTail);
-    let ht_chunk_tokens = estimate_tokens(&ht_chunks[0]);
+            // 2. High-cardinality shortlisting (K=10 -> shortlist_k=3)
+            let high_card_q = Question::new_choice(
+                "Route ticket across 10 enterprise queues",
+                vec![
+                    "billing_refunds".to_string(),
+                    "billing_tax_vat".to_string(),
+                    "tech_api_gateway".to_string(),
+                    "tech_sdk_python".to_string(),
+                    "security_iam_sso".to_string(),
+                    "security_phishing".to_string(),
+                    "sales_enterprise".to_string(),
+                    "legal_gdpr_dpa".to_string(),
+                    "hr_payroll".to_string(),
+                    "facilities_office".to_string(),
+                ],
+            );
+            let high_card_opts = high_card_q.render_options();
+            let sl_res = shortlist_options(
+                "We need a refund for an overcharge and duplicate VAT on our invoice",
+                &high_card_q,
+                &high_card_opts,
+                3,
+            );
 
-    // 2. High-cardinality shortlisting (K=10 -> shortlist_k=3)
-    let high_card_q = Question::new_choice(
-        "Route ticket across 10 enterprise queues",
-        vec![
-            "billing_refunds".to_string(),
-            "billing_tax_vat".to_string(),
-            "tech_api_gateway".to_string(),
-            "tech_sdk_python".to_string(),
-            "security_iam_sso".to_string(),
-            "security_phishing".to_string(),
-            "sales_enterprise".to_string(),
-            "legal_gdpr_dpa".to_string(),
-            "hr_payroll".to_string(),
-            "facilities_office".to_string(),
-        ],
-    );
-    let high_card_opts = high_card_q.render_options();
-    let sl_res = shortlist_options(
-        "We need a refund for an overcharge and duplicate VAT on our invoice",
-        &high_card_q,
-        &high_card_opts,
-        3,
-    );
+            // 3. Meta-router (`route_auto_best`) across heterogeneous inputs
+            let mut q_map = BTreeMap::new();
+            q_map.insert("dept".to_string(), q_sec.clone());
+            let route_short = route_auto_best("Simple English billing refund request", &q_map);
+            let route_cjk = route_auto_best("請求書の二重課金について返金をお願いします", &q_map);
+            let route_long = route_auto_best(&long_log, &q_map);
 
-    // 3. Meta-router (`route_auto_best`) across heterogeneous inputs
-    let mut q_map = BTreeMap::new();
-    q_map.insert("dept".to_string(), q_sec.clone());
-    let route_short = route_auto_best("Simple English billing refund request", &q_map);
-    let route_cjk = route_auto_best("請求書の二重課金について返金をお願いします", &q_map);
-    let route_long = route_auto_best(&long_log, &q_map);
+            // 4. 0/1 Knapsack Schema Compression (`SchemaKnapsackOptimizer::optimize`)
+            let mut verbose_map = BTreeMap::new();
+            verbose_map.insert(
+            "dept".to_string(),
+            Question {
+                qtype: crate::model::QuestionType::Choice,
+                instructions: "Classify the log status".to_string(),
+                criteria: Some(serde_json::json!({
+                    "security": "Unauthorized root access, SSH key compromise, MFA bypass, or credential phishing alert",
+                    "technical": "Routine telemetry heartbeat, API gateway timeout, SDK crash, or worker pool health log",
+                    "billing": "Duplicate invoice charge, VAT tax receipt, credit card refund, or subscription renewal"
+                })),
+                hypothesis_template: None,
+            },
+        );
+            let knapsack_res =
+                crate::engine::synthesis::SchemaKnapsackOptimizer::optimize(&verbose_map, 24);
 
-    // 4. 0/1 Knapsack Schema Compression (`SchemaKnapsackOptimizer::optimize`)
-    let mut verbose_map = BTreeMap::new();
-    verbose_map.insert(
-        "dept".to_string(),
-        Question {
-            qtype: crate::model::QuestionType::Choice,
-            instructions: "Classify the log status".to_string(),
-            criteria: Some(serde_json::json!({
-                "security": "Unauthorized root access, SSH key compromise, MFA bypass, or credential phishing alert",
-                "technical": "Routine telemetry heartbeat, API gateway timeout, SDK crash, or worker pool health log",
-                "billing": "Duplicate invoice charge, VAT tax receipt, credit card refund, or subscription renewal"
-            })),
-            hypothesis_template: None,
+            Ok(LiveLabOutput {
+            title: "Live Lab 3: Tail-Incident Preservation, O(1) Label Shortlisting & Meta-Routing"
+                .to_string(),
+            explanation: format!(
+                "We generated a {}-token server log where the first 90% is routine telemetry and a CRITICAL security breach occurs in the final 25 words, then tested 512-token DeBERTa-v3 with TruncatePrefix vs HeadTail, plus 0/1 Knapsack schema compression.",
+                total_tokens
+            ),
+            metrics_summary: vec![
+                (
+                    "Long Log (TruncatePrefix @ 512t)".to_string(),
+                    format!(
+                        "pred={} | P(security)={:.3} (Tail incident truncated!)",
+                        format_prediction(&ans_prefix),
+                        ans_prefix.probabilities.get("security").copied().unwrap_or(0.0)
+                    ),
+                ),
+                (
+                    format!("Long Log (HeadTail @ {}t)", ht_chunk_tokens),
+                    format!(
+                        "pred={} | P(security)={:.3} (25% head + 75% tail preserved!)",
+                        format_prediction(&ans_head_tail),
+                        ans_head_tail.probabilities.get("security").copied().unwrap_or(0.0)
+                    ),
+                ),
+                (
+                    "Bi-Encoder Shortlist (K=10 -> k=3)".to_string(),
+                    format!(
+                        "kept={:?} (70% fewer NLI passes)",
+                        sl_res.kept_options
+                    ),
+                ),
+                (
+                    "Knapsack Schema Compression".to_string(),
+                    format!(
+                        "{}t -> {}t (budget={}t, pruned={} low-MI clauses)",
+                        knapsack_res.original_tokens,
+                        knapsack_res.optimized_tokens,
+                        knapsack_res.target_budget,
+                        knapsack_res.pruned_clauses
+                    ),
+                ),
+                (
+                    "auto-best Route (Short English)".to_string(),
+                    format!("{} ({})", route_short.selected.short_name(), route_short.reason),
+                ),
+                (
+                    "auto-best Route (Japanese CJK / Long 600t+)".to_string(),
+                    format!(
+                        "{} ({}) / {} ({})",
+                        route_cjk.selected.short_name(),
+                        route_cjk.reason,
+                        route_long.selected.short_name(),
+                        route_long.reason
+                    ),
+                ),
+            ],
+            try_command: "lemmata classify --model auto-best --chunk-strategy head-tail --shortlist-k 4 --file data/customer_support.jsonl".to_string(),
+        })
         },
     );
-    let knapsack_res =
-        crate::engine::synthesis::SchemaKnapsackOptimizer::optimize(&verbose_map, 24);
-
-    let live_lab = LiveLabOutput {
-        title: "Live Lab 3: Tail-Incident Preservation, O(1) Label Shortlisting & Meta-Routing"
-            .to_string(),
-        explanation: format!(
-            "We generated a {}-token server log where the first 90% is routine telemetry and a CRITICAL security breach occurs in the final 25 words, then tested 512-token DeBERTa-v3 with TruncatePrefix vs HeadTail, plus 0/1 Knapsack schema compression.",
-            total_tokens
-        ),
-        metrics_summary: vec![
-            (
-                "Long Log (TruncatePrefix @ 512t)".to_string(),
-                format!(
-                    "pred={} | P(security)={:.3} (Tail incident truncated!)",
-                    format_prediction(&ans_prefix),
-                    ans_prefix.probabilities.get("security").copied().unwrap_or(0.0)
-                ),
-            ),
-            (
-                format!("Long Log (HeadTail @ {}t)", ht_chunk_tokens),
-                format!(
-                    "pred={} | P(security)={:.3} (25% head + 75% tail preserved!)",
-                    format_prediction(&ans_head_tail),
-                    ans_head_tail.probabilities.get("security").copied().unwrap_or(0.0)
-                ),
-            ),
-            (
-                "Bi-Encoder Shortlist (K=10 -> k=3)".to_string(),
-                format!(
-                    "kept={:?} (70% fewer NLI passes)",
-                    sl_res.kept_options
-                ),
-            ),
-            (
-                "Knapsack Schema Compression".to_string(),
-                format!(
-                    "{}t -> {}t (budget={}t, pruned={} low-MI clauses)",
-                    knapsack_res.original_tokens,
-                    knapsack_res.optimized_tokens,
-                    knapsack_res.target_budget,
-                    knapsack_res.pruned_clauses
-                ),
-            ),
-            (
-                "auto-best Route (Short English)".to_string(),
-                format!("{} ({})", route_short.selected.short_name(), route_short.reason),
-            ),
-            (
-                "auto-best Route (Japanese CJK / Long 600t+)".to_string(),
-                format!(
-                    "{} ({}) / {} ({})",
-                    route_cjk.selected.short_name(),
-                    route_cjk.reason,
-                    route_long.selected.short_name(),
-                    route_long.reason
-                ),
-            ),
-        ],
-        try_command: "lemmata classify --model auto-best --chunk-strategy head-tail --shortlist-k 4 --file data/customer_support.jsonl".to_string(),
-    };
 
     PhaseLesson {
         phase: phase.number(),
@@ -807,7 +864,7 @@ fn build_phase_3() -> PhaseLesson {
             "  [K = 50 Labels] ===(Stage 1: O(1) Bi-Encoder Cosine + Synonym Filter)===> [Top k = 5 Labels]\n",
             "                                                                                   |\n",
             "                                              [Stage 2: Cross-Encoder / Joint Head Scores Top 5]\n\n",
-            "  3. META-ROUTER (--model auto-best, <0.5ms dispatch)\n",
+            "  3. META-ROUTER (--model auto-best, rules, no model call)\n",
             "  Input + Schema ---> Script != Latin?      ---> laya-multilingual / eurobert-210m\n",
             "                 ---> Tokens > 512?         ---> modernbert-zs (8k) / laya-typed (1k)\n",
             "                 ---> K > 8 or Typed Head?  ---> laya-en (O(1) single-pass)\n",
@@ -865,163 +922,167 @@ fn build_phase_3() -> PhaseLesson {
 
 fn build_phase_4() -> PhaseLesson {
     let phase = CurriculumPhase::Phase4CalibrationAndUncertainty;
+    let live_lab = live_lab_or_notice(
+        &[Checkpoint::English],
+        || -> anyhow::Result<LiveLabOutput> {
+            // 1. Temperature scaling demonstration on an ambiguous multi-intent input
+            let raw_logits = [2.10_f64, 1.45, 0.30, -0.40]; // e.g., billing vs account borderline
+            let scale_probs = |temp: f64| -> Vec<f64> {
+                let max_l = raw_logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let exps: Vec<f64> = raw_logits
+                    .iter()
+                    .map(|&z| ((z - max_l) / temp).exp())
+                    .collect();
+                let sum: f64 = exps.iter().sum();
+                exps.into_iter().map(|e| e / sum).collect()
+            };
 
-    // 1. Temperature scaling demonstration on an ambiguous multi-intent input
-    let raw_logits = [2.10_f64, 1.45, 0.30, -0.40]; // e.g., billing vs account borderline
-    let scale_probs = |temp: f64| -> Vec<f64> {
-        let max_l = raw_logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let exps: Vec<f64> = raw_logits
-            .iter()
-            .map(|&z| ((z - max_l) / temp).exp())
-            .collect();
-        let sum: f64 = exps.iter().sum();
-        exps.into_iter().map(|e| e / sum).collect()
-    };
+            let p_sharp = scale_probs(0.5);
+            let p_raw = scale_probs(1.0);
+            let p_cal = scale_probs(1.8);
 
-    let p_sharp = scale_probs(0.5);
-    let p_raw = scale_probs(1.0);
-    let p_cal = scale_probs(1.8);
+            let conf_sharp = confidence_from_probs(&p_sharp);
+            let conf_raw = confidence_from_probs(&p_raw);
+            let conf_cal = confidence_from_probs(&p_cal);
 
-    let conf_sharp = confidence_from_probs(&p_sharp);
-    let conf_raw = confidence_from_probs(&p_raw);
-    let conf_cal = confidence_from_probs(&p_cal);
+            // 2. Helmholtz Free-Energy Translation Invariance Proof (ID tie vs shifted OOD logits)
+            let logits_id = [8.2_f64, 8.1, -2.0, -3.0];
+            let logits_ood = [-9.8_f64, -9.9, -18.0, -19.0]; // shifted by c = -18 on top classes!
+            let raw_helmholtz = |z: &[f64], t: f64| -> (f64, f64) {
+                let m = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let exps: Vec<f64> = z.iter().map(|&v| ((v - m) / t).exp()).collect();
+                let sum: f64 = exps.iter().sum();
+                let top_p = exps[0] / sum;
+                let energy = -t * (m / t + sum.ln());
+                (top_p, energy)
+            };
+            let (id_top_p, id_helmholtz) = raw_helmholtz(&logits_id, 1.0);
+            let (ood_top_p, ood_helmholtz) = raw_helmholtz(&logits_ood, 1.0);
+            // The production energy function on the same logits: it matches the inline computation.
+            let fe_id = crate::engine::ood::compute_free_energy(&logits_id);
+            let fe_ood = crate::engine::ood::compute_free_energy(&logits_ood);
 
-    // 2. Helmholtz Free-Energy Translation Invariance Proof (ID tie vs shifted OOD logits)
-    let logits_id = [8.2_f64, 8.1, -2.0, -3.0];
-    let logits_ood = [-9.8_f64, -9.9, -18.0, -19.0]; // shifted by c = -18 on top classes!
-    let raw_helmholtz = |z: &[f64], t: f64| -> (f64, f64) {
-        let m = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let exps: Vec<f64> = z.iter().map(|&v| ((v - m) / t).exp()).collect();
-        let sum: f64 = exps.iter().sum();
-        let top_p = exps[0] / sum;
-        let energy = -t * (m / t + sum.ln());
-        (top_p, energy)
-    };
-    let (id_top_p, id_helmholtz) = raw_helmholtz(&logits_id, 1.0);
-    let (ood_top_p, ood_helmholtz) = raw_helmholtz(&logits_ood, 1.0);
-    // The production energy function on the same logits: it matches the inline computation.
-    let fe_id = crate::engine::ood::compute_free_energy(&logits_id);
-    let fe_ood = crate::engine::ood::compute_free_energy(&logits_ood);
-
-    // 3. Live Split Conformal Prediction on a 6-item calibration set
-    let clf = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let q_conf = Question::new_choice(
-        "Classify support department",
-        vec![
-            "billing".to_string(),
-            "technical".to_string(),
-            "security".to_string(),
-            "account".to_string(),
-        ],
-    );
-    let cal_samples = vec![
-        (
-            "cal_1",
-            "Duplicate charge on our credit card invoice this month",
-            "billing",
-        ),
-        (
-            "cal_2",
-            "Production API throws 502 Bad Gateway timeout on POST requests",
-            "technical",
-        ),
-        (
-            "cal_3",
-            "Suspicious login from unknown IP bypassed MFA token",
-            "security",
-        ),
-        (
-            "cal_4",
-            "Need to update SSO SAML certificate and user seat permissions",
-            "account",
-        ),
-        (
-            "cal_5",
-            "Requesting a refund for overbilled enterprise seats on invoice",
-            "billing",
-        ),
-        (
-            "cal_6",
-            "SDK crashes with segmentation fault when parsing webhook payload",
-            "technical",
-        ),
-    ];
-    let cal_items: Vec<DataItem> = cal_samples
-        .into_iter()
-        .map(|(id, text, gt)| {
-            let mut gt_map = BTreeMap::new();
-            gt_map.insert(
-                "dept".to_string(),
-                serde_json::Value::String(gt.to_string()),
+            // 3. Live Split Conformal Prediction on a 6-item calibration set
+            let clf = LayaClassifier::with_checkpoint(Checkpoint::English);
+            let q_conf = Question::new_choice(
+                "Classify support department",
+                vec![
+                    "billing".to_string(),
+                    "technical".to_string(),
+                    "security".to_string(),
+                    "account".to_string(),
+                ],
             );
-            DataItem::new(id, serde_json::Value::String(text.to_string()), "live_lab")
-                .with_ground_truth(gt_map)
+            let cal_samples = vec![
+                (
+                    "cal_1",
+                    "Duplicate charge on our credit card invoice this month",
+                    "billing",
+                ),
+                (
+                    "cal_2",
+                    "Production API throws 502 Bad Gateway timeout on POST requests",
+                    "technical",
+                ),
+                (
+                    "cal_3",
+                    "Suspicious login from unknown IP bypassed MFA token",
+                    "security",
+                ),
+                (
+                    "cal_4",
+                    "Need to update SSO SAML certificate and user seat permissions",
+                    "account",
+                ),
+                (
+                    "cal_5",
+                    "Requesting a refund for overbilled enterprise seats on invoice",
+                    "billing",
+                ),
+                (
+                    "cal_6",
+                    "SDK crashes with segmentation fault when parsing webhook payload",
+                    "technical",
+                ),
+            ];
+            let cal_items: Vec<DataItem> = cal_samples
+                .into_iter()
+                .map(|(id, text, gt)| {
+                    let mut gt_map = BTreeMap::new();
+                    gt_map.insert(
+                        "dept".to_string(),
+                        serde_json::Value::String(gt.to_string()),
+                    );
+                    DataItem::new(id, serde_json::Value::String(text.to_string()), "live_lab")
+                        .with_ground_truth(gt_map)
+                })
+                .collect();
+
+            let (conf_report, _) =
+                ConformalEngine::evaluate(&clf, &cal_items, "dept", &q_conf, 0.10)?;
+
+            Ok(LiveLabOutput {
+            title: "Live Lab 4: Temperature Scaling (T=0.5 vs 1.0 vs 1.8) & Split Conformal Coverage"
+                .to_string(),
+            explanation: "First, we inspect how scaling borderline logits [2.10, 1.45, 0.30, -0.40] by Temperature T tames overconfidence. Second, we prove softmax translation invariance vs Helmholtz Free Energy on ID [8.2, 8.1, -2, -3] vs OOD [-9.8, -9.9, -18, -19]. Third, we run ConformalEngine::evaluate at alpha=0.10.".to_string(),
+            metrics_summary: vec![
+                (
+                    "Overconfident (T = 0.50)".to_string(),
+                    format!(
+                        "top_prob={:.1}% | negentropy_conf={:.1}% (Too sharp!)",
+                        p_sharp[0] * 100.0,
+                        conf_sharp * 100.0
+                    ),
+                ),
+                (
+                    "Uncalibrated Raw (T = 1.00)".to_string(),
+                    format!(
+                        "top_prob={:.1}% | negentropy_conf={:.1}%",
+                        p_raw[0] * 100.0,
+                        conf_raw * 100.0
+                    ),
+                ),
+                (
+                    "Calibrated (T = 1.80)".to_string(),
+                    format!(
+                        "top_prob={:.1}% | negentropy_conf={:.1}% (Reflects true ambiguity)",
+                        p_cal[0] * 100.0,
+                        conf_cal * 100.0
+                    ),
+                ),
+                (
+                    "Free-Energy Translation Proof (ID vs OOD)".to_string(),
+                    format!(
+                        "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (computed by lemmata: {:+.2} vs {:+.2})",
+                        id_top_p * 100.0,
+                        ood_top_p * 100.0,
+                        id_helmholtz,
+                        ood_helmholtz,
+                        fe_id,
+                        fe_ood
+                    ),
+                ),
+                (
+                    "Conformal Quantile (alpha=0.10)".to_string(),
+                    format!(
+                        "q_hat={:.4} | target_cov={:.0}% | empirical_cov={:.1}%",
+                        conf_report.quantile_threshold,
+                        conf_report.target_coverage_pct,
+                        conf_report.empirical_coverage_pct
+                    ),
+                ),
+                (
+                    "Conformal Prediction Set Size".to_string(),
+                    format!(
+                        "avg_set_size={:.2} labels | singleton_rate={:.1}%",
+                        conf_report.average_set_size, conf_report.singleton_rate_pct
+                    ),
+                ),
+            ],
+            try_command: "lemmata conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
         })
-        .collect();
-
-    let (conf_report, _) = ConformalEngine::evaluate(&clf, &cal_items, "dept", &q_conf, 0.10)
-        .expect("Phase 4 Conformal evaluation");
-
-    let live_lab = LiveLabOutput {
-        title: "Live Lab 4: Temperature Scaling (T=0.5 vs 1.0 vs 1.8) & Split Conformal Coverage"
-            .to_string(),
-        explanation: "First, we inspect how scaling borderline logits [2.10, 1.45, 0.30, -0.40] by Temperature T tames overconfidence. Second, we prove softmax translation invariance vs Helmholtz Free Energy on ID [8.2, 8.1, -2, -3] vs OOD [-9.8, -9.9, -18, -19]. Third, we run ConformalEngine::evaluate at alpha=0.10.".to_string(),
-        metrics_summary: vec![
-            (
-                "Overconfident (T = 0.50)".to_string(),
-                format!(
-                    "top_prob={:.1}% | negentropy_conf={:.1}% (Too sharp!)",
-                    p_sharp[0] * 100.0,
-                    conf_sharp * 100.0
-                ),
-            ),
-            (
-                "Uncalibrated Raw (T = 1.00)".to_string(),
-                format!(
-                    "top_prob={:.1}% | negentropy_conf={:.1}%",
-                    p_raw[0] * 100.0,
-                    conf_raw * 100.0
-                ),
-            ),
-            (
-                "Calibrated (T = 1.80)".to_string(),
-                format!(
-                    "top_prob={:.1}% | negentropy_conf={:.1}% (Reflects true ambiguity)",
-                    p_cal[0] * 100.0,
-                    conf_cal * 100.0
-                ),
-            ),
-            (
-                "Free-Energy Translation Proof (ID vs OOD)".to_string(),
-                format!(
-                    "softmax_top1={:.1}% vs {:.1}% (identical!) | E(z)={:+.2} vs {:+.2} (computed by lemmata: {:+.2} vs {:+.2})",
-                    id_top_p * 100.0,
-                    ood_top_p * 100.0,
-                    id_helmholtz,
-                    ood_helmholtz,
-                    fe_id,
-                    fe_ood
-                ),
-            ),
-            (
-                "Conformal Quantile (alpha=0.10)".to_string(),
-                format!(
-                    "q_hat={:.4} | target_cov={:.0}% | empirical_cov={:.1}%",
-                    conf_report.quantile_threshold,
-                    conf_report.target_coverage_pct,
-                    conf_report.empirical_coverage_pct
-                ),
-            ),
-            (
-                "Conformal Prediction Set Size".to_string(),
-                format!(
-                    "avg_set_size={:.2} labels | singleton_rate={:.1}%",
-                    conf_report.average_set_size, conf_report.singleton_rate_pct
-                ),
-            ),
-        ],
-        try_command: "lemmata conformal --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --alpha 0.05".to_string(),
-    };
+        },
+    );
 
     PhaseLesson {
         phase: phase.number(),
@@ -1102,98 +1163,104 @@ fn build_phase_4() -> PhaseLesson {
 
 fn build_phase_5() -> PhaseLesson {
     let phase = CurriculumPhase::Phase5ProductionCascadingAndOps;
-
-    // Live Lab: Run a 3-paradigm ConsensusEngine across clear vs ambiguous tickets
-    let engine = ConsensusEngine::new(vec![
-        Checkpoint::English,
-        Checkpoint::DebertaV3ZeroShot,
-        Checkpoint::ModernBertZeroShot,
-    ])
-    .with_threshold(0.12);
-
-    let q_triage = Question::new_choice(
-        "Route ticket to department",
-        vec![
-            "billing: Invoice, charge, or refund".to_string(),
-            "technical: API outage, bug, or SDK crash".to_string(),
-            "security: Unauthorized login, breach, or MFA".to_string(),
-            "account: SSO settings or user permissions".to_string(),
+    let live_lab = live_lab_or_notice(
+        &[
+            Checkpoint::English,
+            Checkpoint::DebertaV3ZeroShot,
+            Checkpoint::ModernBertZeroShot,
         ],
+        || -> anyhow::Result<LiveLabOutput> {
+            // Live Lab: Run a 3-paradigm ConsensusEngine across clear vs ambiguous tickets
+            let engine = ConsensusEngine::new(vec![
+                Checkpoint::English,
+                Checkpoint::DebertaV3ZeroShot,
+                Checkpoint::ModernBertZeroShot,
+            ])
+            .with_threshold(0.12);
+
+            let q_triage = Question::new_choice(
+                "Route ticket to department",
+                vec![
+                    "billing: Invoice, charge, or refund".to_string(),
+                    "technical: API outage, bug, or SDK crash".to_string(),
+                    "security: Unauthorized login, breach, or MFA".to_string(),
+                    "account: SSO settings or user permissions".to_string(),
+                ],
+            );
+            let mut q_map = BTreeMap::new();
+            q_map.insert("dept".to_string(), q_triage);
+
+            let items = vec![
+            DataItem::new(
+                "clear_ticket",
+                serde_json::Value::String(
+                    "Our credit card was billed twice for the April invoice; please issue a refund."
+                        .to_string(),
+                ),
+                "live_lab",
+            ),
+            DataItem::new(
+                "ambiguous_ticket",
+                serde_json::Value::String(
+                    "After our SSO security rotation, the API billing webhook returned an auth error."
+                        .to_string(),
+                ),
+                "live_lab",
+            ),
+        ];
+
+            let results = engine.evaluate_batch(&items, &q_map)?;
+            let clear_q = &results[0].questions["dept"];
+            let ambig_q = &results[1].questions["dept"];
+
+            Ok(LiveLabOutput {
+            title: "Live Lab 5: Multi-Paradigm Mixture-of-Decisions Consensus & Epistemic JSD"
+                .to_string(),
+            explanation: "We ran a 3-checkpoint ensemble (laya-en + deberta-v3-zs + modernbert-zs) on a clear billing ticket vs a cross-cutting SSO/API/billing ticket, decomposing uncertainty into Aleatoric (data noise) and Epistemic (inter-model Jensen-Shannon Divergence), alongside production cascade unit economics.".to_string(),
+            metrics_summary: vec![
+                (
+                    "Clear Ticket Consensus".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}% | status={}",
+                        clear_q.consensus_prediction,
+                        clear_q.consensus_confidence * 100.0,
+                        clear_q.status.badge()
+                    ),
+                ),
+                (
+                    "Clear Ticket Uncertainty".to_string(),
+                    format!(
+                        "epistemic_JSD={:.4} | aleatoric={:.4}",
+                        clear_q.disagreement, clear_q.member_entropy
+                    ),
+                ),
+                (
+                    "Cross-Cutting Ticket Consensus".to_string(),
+                    format!(
+                        "pred={} | conf={:.1}% | status={}",
+                        ambig_q.consensus_prediction,
+                        ambig_q.consensus_confidence * 100.0,
+                        ambig_q.status.badge()
+                    ),
+                ),
+                (
+                    "Cross-Cutting Uncertainty".to_string(),
+                    format!(
+                        "epistemic_JSD={:.4} | aleatoric={:.4} | votes={:?}",
+                        ambig_q.disagreement,
+                        ambig_q.member_entropy,
+                        ambig_q.checkpoint_votes
+                    ),
+                ),
+                (
+                    "Cascade Unit Economics (80% Sys1 Retention)".to_string(),
+                    "$1,016 / 1M reqs vs $5,000 / 1M pure System 2 (79.7% cost savings)".to_string(),
+                ),
+            ],
+            try_command: "lemmata ensemble --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+        })
+        },
     );
-    let mut q_map = BTreeMap::new();
-    q_map.insert("dept".to_string(), q_triage);
-
-    let items = vec![
-        DataItem::new(
-            "clear_ticket",
-            serde_json::Value::String(
-                "Our credit card was billed twice for the April invoice; please issue a refund."
-                    .to_string(),
-            ),
-            "live_lab",
-        ),
-        DataItem::new(
-            "ambiguous_ticket",
-            serde_json::Value::String(
-                "After our SSO security rotation, the API billing webhook returned an auth error."
-                    .to_string(),
-            ),
-            "live_lab",
-        ),
-    ];
-
-    let results = engine
-        .evaluate_batch(&items, &q_map)
-        .expect("Phase 5 Consensus evaluation");
-    let clear_q = &results[0].questions["dept"];
-    let ambig_q = &results[1].questions["dept"];
-
-    let live_lab = LiveLabOutput {
-        title: "Live Lab 5: Multi-Paradigm Mixture-of-Decisions Consensus & Epistemic JSD"
-            .to_string(),
-        explanation: "We ran a 3-checkpoint ensemble (laya-en + deberta-v3-zs + modernbert-zs) on a clear billing ticket vs a cross-cutting SSO/API/billing ticket, decomposing uncertainty into Aleatoric (data noise) and Epistemic (inter-model Jensen-Shannon Divergence), alongside production cascade unit economics.".to_string(),
-        metrics_summary: vec![
-            (
-                "Clear Ticket Consensus".to_string(),
-                format!(
-                    "pred={} | conf={:.1}% | status={}",
-                    clear_q.consensus_prediction,
-                    clear_q.consensus_confidence * 100.0,
-                    clear_q.status.badge()
-                ),
-            ),
-            (
-                "Clear Ticket Uncertainty".to_string(),
-                format!(
-                    "epistemic_JSD={:.4} | aleatoric={:.4}",
-                    clear_q.epistemic_uncertainty, clear_q.aleatoric_uncertainty
-                ),
-            ),
-            (
-                "Cross-Cutting Ticket Consensus".to_string(),
-                format!(
-                    "pred={} | conf={:.1}% | status={}",
-                    ambig_q.consensus_prediction,
-                    ambig_q.consensus_confidence * 100.0,
-                    ambig_q.status.badge()
-                ),
-            ),
-            (
-                "Cross-Cutting Uncertainty".to_string(),
-                format!(
-                    "epistemic_JSD={:.4} | aleatoric={:.4} | votes={:?}",
-                    ambig_q.epistemic_uncertainty,
-                    ambig_q.aleatoric_uncertainty,
-                    ambig_q.checkpoint_votes
-                ),
-            ),
-            (
-                "Cascade Unit Economics (80% Sys1 Retention)".to_string(),
-                "$1,016 / 1M reqs vs $5,000 / 1M pure System 2 (79.7% cost savings)".to_string(),
-            ),
-        ],
-        try_command: "lemmata ensemble --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
-    };
 
     PhaseLesson {
         phase: phase.number(),
@@ -1202,9 +1269,9 @@ fn build_phase_5() -> PhaseLesson {
         subtitle: phase.subtitle().to_string(),
         mental_model: concat!(
             "In production, System 1 and System 2 are not competitors—they form a symbiotic cognitive mesh:\n\n",
-            "1. Pareto Cost/Quality Cascading (lemmata defer): System 1 processes 100% of incoming traffic in <40ms. ",
-            "For the 75-85% of items where calibrated confidence is high and conformal sets are singletons, System 1 auto-executes immediately. ",
-            "Only the 15-25% high-risk tail is escalated to a System 2 LLM—achieving System 2 accuracy at 5x lower latency and 80% lower cloud spend.\n\n",
+            "1. Deferral (lemmata defer): System 1 scores every item. `defer fit` picks the risk threshold whose kept items reach a target accuracy, with a stated confidence, on labelled data. ",
+            "System 1 keeps the items below that threshold, and the rest go to a System 2 LLM or a person. ",
+            "The share that System 1 keeps depends on your data and your model, so measure it with `defer fit` before you plan around it.\n\n",
             "2. Multi-Paradigm Ensembles (lemmata ensemble): Combining models with different inductive biases (e.g. Laya JointSinglePass + DeBERTa-v3 NLI + ModernBERT-ZS) ",
             "lets us separate Aleatoric Uncertainty (the text itself is vague, so all models have flat probabilities) from Epistemic Uncertainty (models strongly disagree with each other, measured via Jensen-Shannon Divergence).\n\n",
             "3. Closed loop (compare --slice-by, then attest): Disaggregated slice matrices reveal where models fail, ",
@@ -1231,7 +1298,7 @@ fn build_phase_5() -> PhaseLesson {
                 "Aleatoric uncertainty is average within-model entropy E_m[H(p_m)] (inherently ambiguous input). Epistemic uncertainty is Jensen-Shannon Divergence H(sum w_m p_m) - sum w_m H(p_m) (models disagree and need teacher data).".to_string(),
             ),
             (
-                "Cascade Risk Score (lemmata defer sweep)".to_string(),
+                "Cascade Risk Score (lemmata defer fit)".to_string(),
                 "Combines normalized entropy, the top-2 margin, and the Laya act probability into one risk score, then sweeps thresholds tau to find the trade-off between accuracy and the share of items deferred to System 2.".to_string(),
             ),
             (
@@ -1241,8 +1308,8 @@ fn build_phase_5() -> PhaseLesson {
         ],
         deep_intuitions: vec![
             (
-                "Production Unit Economics (Eugene Yan / FrugalGPT)".to_string(),
-                "Routing 100% of 1M requests to a System 2 LLM ($0.005/call) costs $5,000 and ~1,200ms p95 latency. A System 1 -> System 2 cascade resolving 80% of traffic locally in <40ms ($0.00002/call = $16) and escalating only the 20% hard tail to System 2 ($1,000) slashes total spend to ~$1,016 per 1M requests (a 79.7% / ~5x cost reduction) while matching System 2 accuracy.".to_string(),
+                "Unit Economics, with Assumed Numbers".to_string(),
+                "Assume a System 2 call costs $0.005 and a System 1 call costs $0.00002. Sending 1M requests to System 2 costs $5,000. If System 1 keeps 80% and defers 20%, the cost is $16 + $1,000 = $1,016, a 79.7% saving. The 80% is an assumption: measure your own share with `defer fit`. For comparison, FrugalGPT reports matching GPT-4 with up to 98% lower cost on its benchmarks (arXiv:2305.05176).".to_string(),
             ),
             (
                 "When to Escalate to User vs. Teacher LLM".to_string(),
@@ -1261,7 +1328,7 @@ fn build_phase_5() -> PhaseLesson {
         quiz: build_phase_5_quiz(),
         further_reading: build_reading_list(Some(5)),
         next_step_commands: vec![
-            "lemmata defer sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+            "lemmata defer fit --val-data data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --target-accuracy 0.80".to_string(),
             "lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --slice-by auto".to_string(),
             "lemmata ensemble --checkpoints english,deberta-v3,modernbert-zeroshot --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
             "lemmata guide".to_string(),
@@ -1277,7 +1344,7 @@ fn build_phase_1_quiz() -> Vec<QuizQuestion> {
             prompt: "Why can a bidirectional encoder (like ModernBERT or DeBERTa-v3) resolve a contrastive sentence like 'Not a technical bug, please refund our invoice' more efficiently than a causal LLM?".to_string(),
             options: vec![
                 "Because causal LLMs cannot process negative words like 'Not' at all.".to_string(),
-                "Because every token attends to both past and future tokens simultaneously in a single non-autoregressive pass (<40ms), binding 'Not' to 'bug' and 'refund' to 'invoice' all at once.".to_string(),
+                "Because every token attends to both past and future tokens simultaneously in a single non-autoregressive pass, binding 'Not' to 'bug' and 'refund' to 'invoice' all at once.".to_string(),
                 "Because bidirectional encoders generate text from right to left instead of left to right.".to_string(),
                 "Because bidirectional encoders do not use self-attention layers.".to_string(),
             ],
@@ -1378,12 +1445,12 @@ fn build_phase_3_quiz() -> Vec<QuizQuestion> {
             prompt: "How does `--model auto-best` decide which checkpoint to run for each incoming item?".to_string(),
             options: vec![
                 "It runs all 10 checkpoints in parallel on every item and picks the slowest one.".to_string(),
-                "It inspects Unicode script, subword token count, label cardinality K, and typed head requirements (Score/Noul) in <0.5ms to route each item to the optimal specialist encoder.".to_string(),
+                "It inspects Unicode script, subword token count, label cardinality K, and typed head requirements (Score/Noul), without a model call, to route each item to a specialist encoder.".to_string(),
                 "It picks a checkpoint at random using a coin flip.".to_string(),
                 "It requires an external OpenAI API call to choose the model.".to_string(),
             ],
             correct_index: 1,
-            explanation: "route_auto_best is a deterministic <0.5ms capability router: non-Latin scripts route to laya-multilingual/eurobert, >512t inputs route to 8k modernbert-zs or 1k laya-typed, high-cardinality K>8 or typed heads route to O(1) laya-en, and short K<=5 choice tasks route to deberta-v3-zs.".to_string(),
+            explanation: "route_auto_best is a deterministic capability router that runs no model: non-Latin scripts route to laya-multilingual/eurobert, >512t inputs route to 8k modernbert-zs or 1k laya-typed, high-cardinality K>8 or typed heads route to O(1) laya-en, and short K<=5 choice tasks route to deberta-v3-zs.".to_string(),
         },
         QuizQuestion {
             id: "P3-Q3".to_string(),
@@ -1479,12 +1546,12 @@ fn build_phase_5_quiz() -> Vec<QuizQuestion> {
             prompt: "Suppose pure System 2 LLM triage costs $5,000 per 1M requests ($0.005/call). If a `lemmata defer` policy at optimal threshold tau* resolves 80% of traffic in System 1 ($0.00002/call) and escalates 20% to System 2, what is the total cost per 1M requests?".to_string(),
             options: vec![
                 "$5,000 per 1M requests (no savings).".to_string(),
-                "~$1,016 per 1M requests ($16 for System 1 + $1,000 for 20% System 2 escalations)—a 79.7% (~5x) cost reduction while matching System 2 SLA accuracy.".to_string(),
+                "~$1,016 per 1M requests ($16 for System 1 + $1,000 for the 20% sent to System 2), a 79.7% cost reduction.".to_string(),
                 "$50,000 per 1M requests.".to_string(),
                 "$0 per 1M requests because System 2 is never called.".to_string(),
             ],
             correct_index: 1,
-            explanation: "By resolving the 80% high-confidence majority in System 1 ($16) and invoking System 2 only on the 20% high-risk tail ($1,000), a FrugalGPT/Eugene Yan cascade cuts spend from $5,000 to $1,016 per 1M calls (79.7% savings).".to_string(),
+            explanation: "System 1 handles the 80% it keeps for $16, and System 2 handles the other 20% for $1,000. With these assumed numbers, spend falls from $5,000 to $1,016 per 1M calls (79.7% savings).".to_string(),
         },
     ]
 }
@@ -1506,7 +1573,7 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
         GlossaryEntry {
             term: "System 1 vs. System 2".to_string(),
             category: "Phase 1: Foundations".to_string(),
-            definition: "System 1 models are fast (<40ms), non-autoregressive bidirectional encoders for structured decisions; System 2 models are slow (500-3000ms) autoregressive LLMs for open-ended generation.".to_string(),
+            definition: "System 1 models are bidirectional encoders that make a structured decision in one forward pass. System 2 models are autoregressive LLMs that generate one token at a time, which is slower and costs more.".to_string(),
             cli_flag_or_cmd: "lemmata classify / lemmata defer".to_string(),
         },
         GlossaryEntry {
@@ -1566,7 +1633,7 @@ pub fn build_glossary() -> Vec<GlossaryEntry> {
         GlossaryEntry {
             term: "Meta-Router (auto-best)".to_string(),
             category: "Phase 3: Scaling".to_string(),
-            definition: "Sub-millisecond (<0.5ms) capability router that selects the optimal encoder per item based on Unicode script, token length, and label count K.".to_string(),
+            definition: "Rule-based capability router (no model call) that selects the optimal encoder per item based on Unicode script, token length, and label count K.".to_string(),
             cli_flag_or_cmd: "--model auto-best".to_string(),
         },
         GlossaryEntry {
@@ -1704,7 +1771,7 @@ pub fn build_workflow_recipes() -> Vec<WorkflowRecipe> {
             steps: vec![
                 (
                     "Sweep the System 1 / System 2 Pareto cost-accuracy frontier".to_string(),
-                    "lemmata defer sweep --file data/customer_support.jsonl --schema schema/questions.json".to_string(),
+                    "lemmata defer fit --val-data data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --target-accuracy 0.80".to_string(),
                 ),
                 (
                     "Pool three diverse models and flag the items where they disagree".to_string(),
@@ -1865,7 +1932,7 @@ pub fn build_reading_list(phase_filter: Option<u8>) -> Vec<ReadingResource> {
             category: "Systems Paper".to_string(),
             title: "FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance".to_string(),
             author_venue: "Chen, Zaharia & Zou, Stanford (TMLR 2024, arXiv:2305.05176)".to_string(),
-            takeaway: "Formalizes System 1 -> System 2 cascades that resolve 80%+ of traffic locally and cut LLM inference spend by 5x–10x (`lemmata defer`).".to_string(),
+            takeaway: "Proposes LLM cascades that learn which models to call for each query. The authors report matching GPT-4 with up to 98% lower cost on their benchmarks. `lemmata defer` covers the System 1 side.".to_string(),
             url: "https://arxiv.org/abs/2305.05176".to_string(),
         },
         ReadingResource {
@@ -2231,6 +2298,60 @@ pub fn print_glossary(filter: Option<&str>) {
 }
 
 /// Print practical workflow recipes (`lemmata guide`), optionally filtered by topic slug or keyword.
+/// The sample data and schemas that the recipes and the README use. They are embedded, so
+/// `lemmata guide --samples <dir>` works after `cargo install`.
+pub const SAMPLE_FILES: &[(&str, &str)] = &[
+    (
+        "data/banking_tickets.jsonl",
+        include_str!("../../data/banking_tickets.jsonl"),
+    ),
+    (
+        "data/customer_support.jsonl",
+        include_str!("../../data/customer_support.jsonl"),
+    ),
+    (
+        "data/feedback_dataset.csv",
+        include_str!("../../data/feedback_dataset.csv"),
+    ),
+    (
+        "data/system1_golden_benchmark.jsonl",
+        include_str!("../../data/system1_golden_benchmark.jsonl"),
+    ),
+    (
+        "schema/banking_hierarchy.json",
+        include_str!("../../schema/banking_hierarchy.json"),
+    ),
+    (
+        "schema/questions.json",
+        include_str!("../../schema/questions.json"),
+    ),
+    (
+        "schema/system1_benchmark_questions.json",
+        include_str!("../../schema/system1_benchmark_questions.json"),
+    ),
+];
+
+/// Write `SAMPLE_FILES` under `dir`. A file that already exists stays as it is. Returns the
+/// written paths and the kept paths.
+pub fn write_sample_files(
+    dir: &std::path::Path,
+) -> Result<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> {
+    let (mut written, mut kept) = (Vec::new(), Vec::new());
+    for (rel, content) in SAMPLE_FILES {
+        let path = dir.join(rel);
+        if path.exists() {
+            kept.push(path);
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, content)?;
+        written.push(path);
+    }
+    Ok((written, kept))
+}
+
 pub fn print_workflow_guide(topic: Option<&str>) {
     let recipes = build_workflow_recipes();
     let q = topic.map(|s| s.trim().to_ascii_lowercase());
@@ -2258,6 +2379,9 @@ pub fn print_workflow_guide(topic: Option<&str>) {
         ))
     );
     println!("══════════════════════════════════════════════════════════════════════════");
+    println!(
+        "The recipes read sample files from data/ and schema/. Run `lemmata guide --samples .` to write them here."
+    );
     println!("Tip: Want to learn the deep ML theory behind these commands? Run `lemmata learn`!\n");
 
     if matched.is_empty() {

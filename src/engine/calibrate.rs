@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::datasource::DataItem;
-use crate::engine::cache::vectorize_text;
 use crate::engine::classifier::LayaClassifier;
+use crate::engine::features::vectorize_text;
 use crate::engine::metrics::calculate_ece;
 use crate::engine::ood::euclidean_distance;
 use crate::model::{Checkpoint, Question, QuestionType};
