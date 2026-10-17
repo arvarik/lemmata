@@ -46,6 +46,11 @@ pub struct Probe {
     /// beats the plain probe on the held-out fifth.
     #[serde(default)]
     pub residual: bool,
+    /// The zero-shot logits are appended to the embedding as extra features, so `mean`, `std`,
+    /// and each weight row have one entry per label after the embedding's. With enough data this
+    /// learns how far to trust the zero-shot head, which a residual probe cannot rescale.
+    #[serde(default)]
+    pub stacked: bool,
 }
 
 impl Probe {
@@ -64,13 +69,37 @@ impl Probe {
         Ok(probe)
     }
 
-    /// One logit per label, in `labels` order. A residual probe adds `zero_shot` (the
-    /// checkpoint's raw logits for the question, rounded to 4 decimals as answers report them).
+    /// Whether scoring needs the checkpoint's zero-shot logits.
+    pub fn uses_zero_shot(&self) -> bool {
+        self.residual || self.stacked
+    }
+
+    /// Length of the embedding the probe expects, without stacked zero-shot features.
+    pub fn embedding_dim(&self) -> usize {
+        self.mean.len() - if self.stacked { self.labels.len() } else { 0 }
+    }
+
+    pub fn mode(&self) -> &'static str {
+        match (self.residual, self.stacked) {
+            (true, _) => "residual",
+            (_, true) => "stacked",
+            _ => "plain",
+        }
+    }
+
+    /// One logit per label, in `labels` order. `zero_shot` holds the checkpoint's raw logits for
+    /// the question, rounded to 4 decimals as answers report them. A residual probe adds them, and
+    /// a stacked probe reads them as features.
     pub fn logits(&self, embedding: &[f32], zero_shot: Option<&[f64]>) -> Vec<f64> {
         let base = zero_shot.filter(|_| self.residual);
         let d = self.mean.len();
+        let stacked: Vec<f32> = zero_shot
+            .filter(|_| self.stacked)
+            .map(|z| z.iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
         let x: Vec<f32> = embedding
             .iter()
+            .chain(&stacked)
             .zip(&self.mean)
             .zip(&self.std)
             .map(|((e, m), s)| (e - m) / s)
@@ -170,10 +199,30 @@ pub fn fit_probe(
     }
 
     let k = labels.len();
-    let plain = fit_features(&xs, &ys, k, None)?;
-    let residual = fit_features(&xs, &ys, k, Some(&zs_logits))?;
-    let use_residual = residual.validation_accuracy >= plain.validation_accuracy;
-    let fit = if use_residual { residual } else { plain };
+    if zs_logits.iter().any(|z| z.len() != k) {
+        bail!("zero-shot scoring of '{qid}' did not return one logit per label");
+    }
+    let stacked_xs: Vec<Vec<f32>> = xs
+        .iter()
+        .zip(&zs_logits)
+        .map(|(x, z)| x.iter().chain(z).copied().collect())
+        .collect();
+    // Keep the best held-out accuracy. On ties, prefer the residual probe, which stays closest
+    // to zero-shot, then the stacked one.
+    let (fit, residual, stacked) = [
+        (fit_features(&xs, &ys, k, Some(&zs_logits))?, true, false),
+        (fit_features(&stacked_xs, &ys, k, None)?, false, true),
+        (fit_features(&xs, &ys, k, None)?, false, false),
+    ]
+    .into_iter()
+    .reduce(|best, c| {
+        if c.0.validation_accuracy > best.0.validation_accuracy {
+            c
+        } else {
+            best
+        }
+    })
+    .expect("three candidates");
 
     let n = ys.len();
     let valid: Vec<usize> = (0..n).filter(|i| i % 5 == 4).collect();
@@ -191,7 +240,8 @@ pub fn fit_probe(
         train_samples: n,
         validation_accuracy: fit.validation_accuracy,
         zero_shot_validation_accuracy: zs_correct as f64 / valid.len().max(1) as f64,
-        residual: use_residual,
+        residual,
+        stacked,
     })
 }
 
@@ -375,6 +425,30 @@ mod tests {
             .filter(|&&i| argmax(&linear(&w, &b, &rows[i], 3)) == ys[i])
             .count();
         assert_eq!(correct, 40);
+    }
+
+    #[test]
+    fn stacked_probe_reads_zero_shot_logits_after_the_embedding() {
+        // One embedding dimension, then one feature per label. Each label's weight picks its own
+        // zero-shot logit, so the probe's logits equal the zero-shot logits.
+        let probe = Probe {
+            kind: PROBE_KIND.to_string(),
+            checkpoint: Checkpoint::English,
+            question_id: "q".to_string(),
+            labels: vec!["a".to_string(), "b".to_string()],
+            mean: vec![0.0; 3],
+            std: vec![1.0; 3],
+            weights: vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            bias: vec![0.0; 2],
+            l2: 0.0,
+            train_samples: 0,
+            validation_accuracy: 0.0,
+            zero_shot_validation_accuracy: 0.0,
+            residual: false,
+            stacked: true,
+        };
+        assert_eq!(probe.embedding_dim(), 1);
+        assert_eq!(probe.logits(&[5.0], Some(&[0.25, -1.0])), [0.25, -1.0]);
     }
 
     #[test]
