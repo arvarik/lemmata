@@ -610,15 +610,12 @@ impl LayaClassifier {
         items: &[DataItem],
         questions: &BTreeMap<String, Question>,
     ) -> Result<Vec<(String, DecisionResult)>> {
-        use rayon::prelude::*;
-
-        items
-            .par_iter()
-            .map(|item| {
-                let res = self.classify(&item.state, questions)?;
-                Ok((item.id.clone(), res))
-            })
-            .collect()
+        crate::model::native::map_items(items, |item| {
+            let res = self.classify(&item.state, questions)?;
+            Ok((item.id.clone(), res))
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Raw (pre-temperature) logit per option for the configured checkpoint.

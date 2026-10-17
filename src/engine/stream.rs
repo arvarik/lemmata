@@ -1,6 +1,5 @@
 use anyhow::Result;
 use comfy_table::{Cell, Color, Table};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -197,9 +196,11 @@ impl StreamPipeline {
             total_ingested += batch.len();
 
             // 1. Process items (leveraging DecisionCache and Rayon parallel evaluation)
-            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> = batch
-                .par_iter()
-                .map(|item| self.process_single_item(item, &schema_hash))
+            let processed_records: Vec<(StreamRecord, Option<DecisionResult>)> =
+                crate::model::native::map_items(&batch, |item| {
+                    self.process_single_item(item, &schema_hash)
+                })
+                .into_iter()
                 .collect::<Result<Vec<_>>>()?;
 
             // 2. Cryptographic Attestation & Cache Insertion on the sequential sink-emission step

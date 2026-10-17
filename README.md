@@ -31,7 +31,7 @@ Latency and accuracy figures above are Convai's own measurements on a Tesla T4, 
 
 ### Inference backends
 
-lemma runs every checkpoint's real weights natively on CPU with [candle](https://github.com/huggingface/candle). On macOS it does the matrix math through Apple's Accelerate framework. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
+lemma runs every checkpoint's real weights natively with [candle](https://github.com/huggingface/candle). On macOS it runs models on the Metal GPU, and does CPU matrix math through Apple's Accelerate framework. Linux and Windows run on the CPU. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
 
 | `--backend` (or `LEMMA_BACKEND`) | Behavior |
 |---|---|
@@ -40,6 +40,20 @@ lemma runs every checkpoint's real weights natively on CPU with [candle](https:/
 | `mock` | Keyword-rule simulator for tests and demos. It runs no model |
 
 Every mock result has a `mock:` model id, so simulated decisions cannot pass for model output.
+
+| `--device` (or `LEMMA_DEVICE`) | Behavior |
+|---|---|
+| `auto` (default) | The Metal GPU when one is present (macOS), otherwise the CPU |
+| `cpu` | The CPU |
+| `metal` | The Metal GPU. Fails when none is present |
+
+On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Median latency for one item with 3 questions (`lemma bench`, Apple M5 Pro):
+
+| Checkpoint | CPU | Metal |
+|---|---|---|
+| `english` | 354 ms | 94 ms |
+| `deberta-v3` | 1299 ms | 231 ms |
+| `eurobert` | 125 ms | 33 ms |
 
 | How lemma scores options | Checkpoints |
 |---|---|
@@ -51,7 +65,7 @@ Every mock result has a `mock:` model id, so simulated decisions cannot pass for
 
 **Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions} Options: {labels}.\nAnswer:` with one mask per label token. An option's score is the mean log-probability of its label tokens, minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
 
-Measured on `data/system1_golden_benchmark.jsonl` (24 items, 3 questions each, so 72 questions) with `lemma compare`, on an Apple Silicon laptop CPU with Accelerate. Latency is per item, all 3 questions:
+Measured on `data/system1_golden_benchmark.jsonl` (24 items, 3 questions each, so 72 questions) with `lemma compare --device cpu`, on an Apple Silicon laptop CPU with Accelerate. Latency is per item, all 3 questions, with items running in parallel. Metal gives the same accuracy:
 
 | Checkpoint | Accuracy | Latency per item |
 |---|---|---|

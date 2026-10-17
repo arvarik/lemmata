@@ -103,9 +103,11 @@ impl ConsensusEngine {
             .collect();
 
         // ckpt_results[c] = Vec<(id, DecisionResult)>
-        let ckpt_results: Vec<Vec<(String, crate::model::DecisionResult)>> = per_ckpt_classifiers
-            .par_iter()
-            .map(|clf| clf.classify_batch(items, questions))
+        let ckpt_results: Vec<Vec<(String, crate::model::DecisionResult)>> =
+            crate::model::native::map_items(&per_ckpt_classifiers, |clf| {
+                clf.classify_batch(items, questions)
+            })
+            .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
         let consensus_results: Vec<ConsensusResult> = (0..items.len())

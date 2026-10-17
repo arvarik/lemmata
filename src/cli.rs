@@ -19,11 +19,21 @@ pub struct Cli {
     )]
     pub backend: Backend,
 
+    /// Device for native models. `auto` uses the Metal GPU when one is present
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        env = "LEMMA_DEVICE",
+        default_value_t = DeviceChoice::Auto
+    )]
+    pub device: DeviceChoice,
+
     #[command(subcommand)]
     pub command: Commands,
 }
 
-pub use crate::model::native::Backend;
+pub use crate::model::native::{Backend, DeviceChoice};
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {

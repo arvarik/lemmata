@@ -39,7 +39,45 @@ pub enum Backend {
     Native = 2,
 }
 
+/// Where native models run.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceChoice {
+    /// The Metal GPU when one is present (macOS), otherwise the CPU
+    Auto,
+    /// The CPU
+    Cpu,
+    /// The Metal GPU. Fails when none is present
+    Metal,
+}
+
 static BACKEND: AtomicU8 = AtomicU8::new(Backend::Mock as u8);
+static DEVICE_CHOICE: OnceLock<DeviceChoice> = OnceLock::new();
+static DEVICE: OnceLock<Device> = OnceLock::new();
+
+/// Choose the device before the first model loads. Later calls have no effect.
+pub fn set_device(choice: DeviceChoice) {
+    let _ = DEVICE_CHOICE.set(choice);
+}
+
+/// The device every native model loads onto.
+pub fn device() -> Result<Device> {
+    if let Some(d) = DEVICE.get() {
+        return Ok(d.clone());
+    }
+    let metal = || Device::new_metal(0).map_err(|e| anyhow!("no Metal GPU: {e}"));
+    // The CLI sets the choice. Library callers can set LEMMA_DEVICE, and otherwise get the CPU.
+    let from_env = || {
+        let value = std::env::var("LEMMA_DEVICE").ok()?;
+        <DeviceChoice as clap::ValueEnum>::from_str(&value, true).ok()
+    };
+    let choice = DEVICE_CHOICE.get().copied().or_else(from_env);
+    let device = match choice.unwrap_or(DeviceChoice::Cpu) {
+        DeviceChoice::Cpu => Device::Cpu,
+        DeviceChoice::Metal => metal()?,
+        DeviceChoice::Auto => metal().unwrap_or(Device::Cpu),
+    };
+    Ok(DEVICE.get_or_init(|| device).clone())
+}
 static MODELS: OnceLock<Mutex<HashMap<PathBuf, Arc<NativeModel>>>> = OnceLock::new();
 
 pub fn set_backend(backend: Backend) {
@@ -107,6 +145,21 @@ pub(crate) fn warn_simulated(ckpt: Checkpoint, dir: &Path) {
         eprintln!(
             "⚠️  {ckpt}: {why}. Its decisions are simulated by the keyword mock (model id mock:{ckpt})."
         );
+    }
+}
+
+/// True when native models run on a GPU, where classify calls from many threads only queue.
+pub fn runs_on_gpu() -> bool {
+    backend() != Backend::Mock && device().is_ok_and(|d| d.is_metal())
+}
+
+/// Map `f` over `items`: in parallel on the CPU, in order on a GPU.
+pub fn map_items<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
+    use rayon::prelude::*;
+    if runs_on_gpu() {
+        items.iter().map(f).collect()
+    } else {
+        items.par_iter().map(f).collect()
     }
 }
 
@@ -381,7 +434,7 @@ impl LayaModel {
         let (_, sep_id) = special("sep_token")?;
         let (mask_token, mask_id) = special("mask_token")?;
 
-        let device = Device::Cpu;
+        let device = device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -643,7 +696,7 @@ impl NliModel {
             .or_else(|| labels.iter().map(|(i, _)| *i).find(|&i| i != entail))
             .ok_or_else(|| anyhow!("id2label needs a second label"))?;
 
-        let device = Device::Cpu;
+        let device = device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemma runs.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
