@@ -92,6 +92,7 @@ fn test_cli_json_stdout_free_of_banner_pollution() {
 
     // 1. `lemma test --json` must emit pure JSON on stdout (banners go to stderr)
     let out_test = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "test",
             "-f",
@@ -109,6 +110,7 @@ fn test_cli_json_stdout_free_of_banner_pollution() {
 
     // 2. `lemma guard --format json` must emit pure JSON array on stdout
     let out_guard = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "guard",
             "-f",
@@ -136,6 +138,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // #1 Head-to-Head Model Arena (`lemma compare --models ... --json`)
     let out_arena = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "compare",
             "--models",
@@ -163,6 +166,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // #2 Pareto Frontier Sweep (`lemma cascade sweep --json`)
     let out_sweep = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "cascade",
             "sweep",
@@ -189,6 +193,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // #3 CI Regression Gate & Baseline Diff (`lemma test --save-baseline` + `--baseline`)
     let out_save = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "test",
             "-f",
@@ -205,6 +210,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
     assert!(baseline_path.exists());
 
     let out_diff = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "test",
             "-f",
@@ -229,6 +235,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // #6 Adversarial Perturbation & Boundary Stress Test (`lemma experiment --adversarial --json`)
     let out_adv = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "experiment",
             "-f",
@@ -248,6 +255,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // #8 Cost-Sensitive / Asymmetric Loss Threshold Optimizer (`lemma calibrate --cost-weights ...`)
     let out_cal = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "calibrate",
             "--file",
@@ -271,6 +279,7 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
 
     // Verify exported calibrated config applies cost_weights seamlessly during `lemma test --config`
     let out_test_cfg = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "test",
             "-f",
@@ -423,6 +432,7 @@ fn test_positional_classify_auto_explain_and_download_all_e2e() {
 
     // 1. Positional `lemma classify "<TEXT>"` (or `lemma run "<TEXT>"`)
     let out_cls = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "run",
             "My credit card invoice was charged twice, please refund immediately",
@@ -445,6 +455,7 @@ fn test_positional_classify_auto_explain_and_download_all_e2e() {
 
     // 2. Ergonomic `lemma explain "<TEXT>"` auto-detects winning & runner-up labels
     let out_exp = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args([
             "why",
             "System error 500 stack trace crash in Kubernetes pod",
@@ -475,6 +486,7 @@ fn test_positional_classify_auto_explain_and_download_all_e2e() {
     .all(|c| c.local_dir().join("model.safetensors").exists());
 
     let out_dl = Command::new(bin)
+        .env("LEMMA_BACKEND", "mock")
         .args(["download", "--all", "--verify-only"])
         .output()
         .expect("Failed to execute lemma download --all --verify-only");
@@ -491,4 +503,31 @@ fn test_positional_classify_auto_explain_and_download_all_e2e() {
     if all_present {
         assert!(out_dl.status.success());
     }
+}
+
+#[test]
+fn test_learn_never_panics_under_real_backends() {
+    let bin = env!("CARGO_BIN_EXE_lemma");
+    // `auto` runs real weights where installed (DeBERTa in phase 2) and the labelled mock
+    // elsewhere (EuroBERT in phase 3).
+    for phase in ["2", "3"] {
+        let out = Command::new(bin)
+            .env("LEMMA_BACKEND", "auto")
+            .args(["learn", phase])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "learn {phase} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // `native` cannot run EuroBERT, so learn stops with an error (exit 1), not a panic (exit 101).
+    let out = Command::new(bin)
+        .env("LEMMA_BACKEND", "native")
+        .args(["learn", "3"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("EuroBERT"));
 }

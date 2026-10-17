@@ -26,15 +26,23 @@ fn test_auto_best_checkpoint_consistency_between_classify_and_option_logits() {
     assert_eq!(resolved, Checkpoint::DebertaV3ZeroShot);
     assert_eq!(reason, "short_nli_disentangled_attn");
 
-    let auto_logits = auto_clf.compute_option_logits(state_text, &q, &options);
-    let deb_logits = deb_clf.compute_option_logits(state_text, &q, &options);
-    let en_logits = en_clf.compute_option_logits(state_text, &q, &options);
-    let explicit_ckpt_logits = auto_clf.compute_option_logits_for_checkpoint(
-        state_text,
-        &q,
-        &options,
-        Checkpoint::DebertaV3ZeroShot,
-    );
+    let auto_logits = auto_clf
+        .compute_option_logits(state_text, &q, &options)
+        .unwrap();
+    let deb_logits = deb_clf
+        .compute_option_logits(state_text, &q, &options)
+        .unwrap();
+    let en_logits = en_clf
+        .compute_option_logits(state_text, &q, &options)
+        .unwrap();
+    let explicit_ckpt_logits = auto_clf
+        .compute_option_logits_for_checkpoint(
+            state_text,
+            &q,
+            &options,
+            Checkpoint::DebertaV3ZeroShot,
+        )
+        .unwrap();
 
     assert_eq!(auto_logits, deb_logits);
     assert_eq!(auto_logits, explicit_ckpt_logits);
@@ -46,7 +54,10 @@ fn test_auto_best_checkpoint_consistency_between_classify_and_option_logits() {
             &questions,
         )
         .unwrap();
-    assert_eq!(res.model, Checkpoint::DebertaV3ZeroShot.repo_id());
+    assert_eq!(
+        res.model,
+        format!("mock:{}", Checkpoint::DebertaV3ZeroShot.repo_id())
+    );
     assert_eq!(res.answers["department"].choice.as_deref(), Some("billing"));
 }
 

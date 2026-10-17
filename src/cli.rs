@@ -9,9 +9,21 @@ use std::path::PathBuf;
     author
 )]
 pub struct Cli {
+    /// Inference backend. `auto` runs real weights for each checkpoint that has them in models/
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        env = "LEMMA_BACKEND",
+        default_value_t = Backend::Auto
+    )]
+    pub backend: Backend,
+
     #[command(subcommand)]
     pub command: Commands,
 }
+
+pub use crate::model::native::Backend;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -74,7 +86,7 @@ pub enum Commands {
     /// Cost-aware System 1 / System 2 cascading hybrid router
     Cascade(CascadeArgs),
 
-    /// Cryptographic decision attestation and Merkle audit chain verification
+    /// Verify signed, hash-chained decision receipts
     Attest(AttestArgs),
 
     /// Hierarchical coarse-to-fine decision trees for high-cardinality routing
@@ -246,6 +258,10 @@ pub struct ClassifyArgs {
     #[arg(long)]
     pub cache: bool,
 
+    /// Also reuse cached decisions for similar text (hashed word features, not the model). Negations can match
+    #[arg(long, requires = "cache")]
+    pub cache_semantic: bool,
+
     /// Similarity threshold for semantic cache match (default: 0.92)
     #[arg(long, default_value_t = 0.92)]
     pub cache_threshold: f64,
@@ -294,7 +310,7 @@ pub struct ClassifyArgs {
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
-    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    /// Keep only the top-k options by lexical match (hashed word features and a synonym table) before model scoring (0 = disabled)
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
 }
@@ -375,7 +391,7 @@ pub struct CompareArgs {
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
-    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    /// Keep only the top-k options by lexical match (hashed word features and a synonym table) before model scoring (0 = disabled)
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
 
@@ -460,7 +476,7 @@ pub struct TestArgs {
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
-    /// Two-stage bi-encoder top-k candidate shortlisting before cross-encoder/joint scoring (0 = disabled)
+    /// Keep only the top-k options by lexical match (hashed word features and a synonym table) before model scoring (0 = disabled)
     #[arg(long, default_value_t = 0)]
     pub shortlist_k: usize,
 }
@@ -780,8 +796,8 @@ pub struct GuardArgs {
     #[arg(long)]
     pub audit_output: Option<PathBuf>,
 
-    /// Secret key to cryptographically sign decision receipts
-    #[arg(long)]
+    /// HMAC-SHA256 key that signs decision receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
     pub attest_key: Option<String>,
 
     /// Path to output cryptographically signed receipts JSONL
@@ -1101,7 +1117,7 @@ pub struct AttestArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AttestCommands {
-    /// Verify cryptographic integrity and Merkle hash chain of receipts log
+    /// Verify receipt digests, HMAC-SHA256 signatures, and hash chain links in a receipts log
     Verify(AttestVerifyArgs),
 }
 
@@ -1116,12 +1132,13 @@ pub struct AttestVerifyArgs {
     )]
     pub receipt_log: PathBuf,
 
-    /// Secret key used to sign the receipts
+    /// HMAC-SHA256 key that signed the receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
     #[arg(
         short,
         long,
         visible_alias = "attest-key",
-        default_value = "lemma_default_enterprise_secret_2026"
+        env = "LEMMA_ATTEST_KEY",
+        hide_env_values = true
     )]
     pub secret_key: String,
 
@@ -1313,6 +1330,10 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = 10)]
     pub bins: usize,
 
+    /// Minimum labeled samples per bucket before lemma fits its temperature
+    #[arg(long, default_value_t = crate::engine::calibrate::DEFAULT_MIN_BUCKET_SAMPLES)]
+    pub min_bucket_samples: usize,
+
     /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
     #[arg(
         short,
@@ -1354,7 +1375,7 @@ pub struct CalibrateArgs {
 
 #[derive(Args, Debug)]
 pub struct StreamArgs {
-    /// Streaming input source URI (e.g. kafka://localhost:9092/inbound_tickets, s3://bucket/data.jsonl, lakehouse://analytics/table, or path/stdin)
+    /// Input: a local path, - for stdin, lakehouse://path?columns=..., or kafka://broker/topic?file=path (replays the local file)
     #[arg(short = 'i', long, alias = "input")]
     pub source: String,
 
@@ -1362,11 +1383,11 @@ pub struct StreamArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Primary egress sink URI or file path (e.g. output/routed.jsonl, kafka://broker:9092/routed, or - for stdout)
+    /// Output file path, - for stdout, or kafka://broker/topic?file=path (writes the local file)
     #[arg(long, default_value = "-")]
     pub sink: String,
 
-    /// Escalation / Dead Letter sink URI or file path (e.g. output/escalations.jsonl or kafka://broker:9092/escalated)
+    /// Escalation output file path, or kafka://broker/topic?file=path (writes the local file)
     #[arg(long)]
     pub escalate_sink: Option<String>,
 
@@ -1404,13 +1425,13 @@ pub struct StreamArgs {
     #[arg(long)]
     pub cache: bool,
 
-    /// Enable cryptographic Merkle-chained decision attestation receipts
+    /// Emit signed, hash-chained decision receipts (needs a signing key)
     #[arg(long)]
     pub attest: bool,
 
-    /// HMAC signing secret for cryptographic attestations
-    #[arg(long, default_value = "lemma_stream_attest_2026")]
-    pub attest_secret: String,
+    /// HMAC-SHA256 key that signs receipts. Prefer the LEMMA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    #[arg(long, env = "LEMMA_ATTEST_KEY", hide_env_values = true)]
+    pub attest_secret: Option<String>,
 
     /// Maximum number of events to process before stopping (default: unlimited)
     #[arg(long)]

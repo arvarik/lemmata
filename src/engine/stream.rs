@@ -46,7 +46,7 @@ impl Default for StreamPipelineConfig {
             escalate_threshold: 0.50,
             enable_cache: false,
             enable_attest: false,
-            attest_secret: "lemma_stream_attest_2026".to_string(),
+            attest_secret: String::new(),
             limit: None,
         }
     }
@@ -154,6 +154,7 @@ impl StreamPipeline {
     pub fn run(&mut self, source: &mut dyn StreamingDataSource) -> Result<StreamMetrics> {
         let start_time = Instant::now();
         let schema_hash = compute_schema_hash(&self.questions);
+        let receipt_schema_digest = crate::engine::attest::schema_digest(&self.questions)?;
 
         let mut total_ingested = 0;
         let mut total_classified = 0;
@@ -242,7 +243,7 @@ impl StreamPipeline {
                         decision,
                         Some("STREAM_COMPLIANCE_2026"),
                         action,
-                        &schema_hash,
+                        &receipt_schema_digest,
                     )?;
                     record.receipt_digest = Some(receipt.receipt_digest);
                     total_attested += 1;

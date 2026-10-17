@@ -215,6 +215,7 @@ impl StatsEngine {
 
         let mut opt_cache = if self.config.enable_cache {
             let cache_cfg = SemanticCacheConfig {
+                semantic: true,
                 max_entries: 10_000,
                 similarity_threshold: self.config.similarity_threshold as f64,
                 min_confidence: 0.0,

@@ -161,8 +161,9 @@ impl Checkpoint {
             }
             Self::Multilingual => [1.0, 1.0, 1.0],
             Self::TypedDecisions => [1.0148024559020996, 1.0374259948730469, 1.0575125217437744],
-            Self::ModernBertZeroShot => [1.35, 1.25, 1.50],
-            Self::DebertaV3ZeroShot => [1.48, 1.35, 1.65],
+            // No fitted temperatures exist for these NLI fine-tunes. T = 1 matches the
+            // transformers zero-shot pipeline.
+            Self::ModernBertZeroShot | Self::DebertaV3ZeroShot => [1.0, 1.0, 1.0],
             Self::EuroBert => [1.18, 1.15, 1.30],
             Self::NeoBert => [1.22, 1.18, 1.35],
             Self::Jev => [1.45, 1.35, 1.65],

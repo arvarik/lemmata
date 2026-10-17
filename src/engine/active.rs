@@ -243,14 +243,12 @@ impl ActiveLearningEngine {
                         multi_conformal_count += 1;
                     }
 
-                    let free_energy = compute_free_energy(&ans.probabilities, 1.0);
-                    let is_ood = if let Some(ood) = ood_detector {
+                    let free_energy = ans.logits.as_deref().map_or(0.0, compute_free_energy);
+                    // Energy has no fixed OOD threshold: only a fitted profile can flag OOD items.
+                    let is_ood = ood_detector.is_some_and(|ood| {
                         ood.evaluate_with_decision(&item.id, &item_text, &decision)
-                            .map(|res| res.is_ood)
-                            .unwrap_or(false)
-                    } else {
-                        free_energy > 1.2
-                    };
+                            .is_ok_and(|res| res.is_ood)
+                    });
 
                     if is_ood {
                         ood_count += 1;
