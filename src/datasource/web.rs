@@ -387,8 +387,8 @@ impl HtmlExtractor {
 /// Rate limits (429) and server errors (5xx) are retried with exponential backoff. Any other
 /// non-2xx status is an error that shows the status and the start of the body.
 pub(crate) fn curl_fetch(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<String> {
-    const RETRIES: u32 = 4;
-    // ponytail: fixed 2-4-8-16 s backoff. Read Retry-After if a server needs longer waits.
+    const RETRIES: u32 = 5;
+    // ponytail: fixed 2-4-8-16-32 s backoff. Read Retry-After if a server needs longer waits.
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..=RETRIES {
         let mut cmd = Command::new("curl");
