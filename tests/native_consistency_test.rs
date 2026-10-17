@@ -1,6 +1,6 @@
 //! Native answers stay the same when the computation changes but the question does not.
 //!
-//! Needs weights in `models/`, so each checkpoint that is not installed is skipped (all on CI).
+//! Runs on every installed native checkpoint. Needs weights in `models/`, so it skips on CI.
 
 use std::collections::BTreeMap;
 
@@ -48,15 +48,15 @@ fn classify(clf: &LayaClassifier, text: &str, q: &BTreeMap<String, Question>) ->
 fn native_answers_do_not_depend_on_how_they_are_computed() {
     set_backend(Backend::Native);
     let questions = schema();
-    for ckpt in [
-        Checkpoint::English,
-        Checkpoint::DebertaV3ZeroShot,
-        Checkpoint::NeoBert,
-    ] {
-        if !native_available(ckpt) {
-            eprintln!("skipping {ckpt}: not installed");
-            continue;
-        }
+    let checkpoints: Vec<Checkpoint> = Checkpoint::all()
+        .iter()
+        .copied()
+        .filter(|&c| native_available(c))
+        .collect();
+    if checkpoints.is_empty() {
+        eprintln!("skipping: no native weights installed");
+    }
+    for ckpt in checkpoints {
         let name = ckpt.short_name();
         let clf = LayaClassifier::with_checkpoint(ckpt);
 
@@ -111,7 +111,12 @@ fn native_answers_do_not_depend_on_how_they_are_computed() {
         }
 
         // 5. NLI scores each hypothesis on its own, so option order cannot matter.
-        if ckpt == Checkpoint::DebertaV3ZeroShot {
+        if matches!(
+            ckpt,
+            Checkpoint::DebertaV3ZeroShot
+                | Checkpoint::ModernBertZeroShot
+                | Checkpoint::ModernBertNli
+        ) {
             let mut reordered = questions.clone();
             reordered.retain(|k, _| k == "department");
             reordered.insert(
