@@ -61,32 +61,49 @@ On the GPU, batch commands classify items in order, because calls from many thre
 | NLI zero-shot cross-encoder | `modernbert-zeroshot`, `modernbert-nli`, `deberta-v3` |
 | Masked-LM label words | `eurobert`, `neobert` |
 
+**Laya checkpoints with many options:** the decision head fits all option texts into 192 (English) or 256 tokens. Upstream shrinks every option evenly when they overflow, which cuts Banking77's 77 labels to 2 tokens each. lemma instead scores groups of options that fit, then scores the leading options together in a final round. Eliminated options rank below every finalist.
+
 **NLI checkpoints** score each option as the hypothesis "This text is about {label}." (with the option's description in parentheses when it has one), paired with the text and cut to 512 tokens. All of a question's hypotheses run as one padded batch. Choice and score options use the entailment logit, which the zero-shot pipeline softmaxes across labels. A `noul` question uses its statement as the hypothesis.
 
 **Masked-LM checkpoints** are pretrained encoders without a classification head, so lemma uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions}\nAnswer:` with one mask per label token. An option's score is the log-probability of its label tokens (their sum), minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. The prompt does not list the options, because the model then copies whichever option has the right number of tokens. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
 
-Zero-shot accuracy, measured with `lemma test`. AG News, SST-2, and Banking77 are 200 public items each (`lemma fetch`, with a seeded random sample for Banking77). Golden is `data/system1_golden_benchmark.jsonl` (72 questions), and support is `data/customer_support.jsonl` (18 questions):
+Zero-shot accuracy, measured with `lemma test` on public data from `lemma fetch`: 1,000 seeded random items from the AG News and Banking77 test splits, the full SST-2 validation split (872), and 900 tweets from `cardiffnlp/tweet_sentiment_multilingual` (300 each in German, Spanish, and Arabic, 3 classes). Brackets give the 95% Wilson interval:
 
-| Checkpoint | AG News (4 topics) | SST-2 (sentiment) | Banking77 (77 intents) | Golden | Support |
-|---|---|---|---|---|---|
-| `english` | 95.0% | 86.5% | 36.0% | 62.5% | 83.3% |
-| `multilingual` | 93.5% | 79.0% | 32.0% | 68.1% | 66.7% |
-| `typed-decisions` | 95.5% | 86.0% | 37.0% | 79.2% | 94.4% |
-| `route` | 88.0% | 93.0% | 73.0% | 76.4% | 94.4% |
-| `modernbert-zeroshot` | 83.5% | 95.5% | 70.5% | 52.8% | 83.3% |
-| `modernbert-nli` | 88.0% | 96.5% | 73.0% | 59.7% | 77.8% |
-| `deberta-v3` | 88.0% | 93.0% | 68.5% | 73.6% | 83.3% |
-| `eurobert` | 69.5% | 78.5% | 34.5% | 52.8% | 55.6% |
-| `neobert` | 62.5% | 77.5% | 44.5% | 66.7% | 44.4% |
+| Checkpoint | AG News, 1,000 | SST-2, 872 | Banking77, 1,000 | Multilingual sentiment, 900 |
+|---|---|---|---|---|
+| `english` | 92.3% (90–94) | 88.9% (87–91) | 58.3% (55–61) | 47.6% (44–51) |
+| `multilingual` | 92.6% (91–94) | 82.2% (80–85) | 54.0% (51–57) | 49.9% (47–53) |
+| `typed-decisions` | 92.5% (91–94) | 88.9% (87–91) | 57.1% (54–60) | 48.9% (46–52) |
+| `route` | 89.3% (87–91) | 95.1% (93–96) | 71.0% (68–74) | 57.8% (55–61) |
+| `modernbert-zeroshot` | 87.4% (85–89) | 94.7% (93–96) | 70.5% (68–73) | 47.6% (44–51) |
+| `modernbert-nli` | 89.8% (88–92) | 96.0% (94–97) | 71.0% (68–74) | 48.4% (45–52) |
+| `deberta-v3` | 89.3% (87–91) | 95.2% (94–96) | 67.8% (65–71) | 61.2% (58–64) |
+| `eurobert` | 65.8% (63–69) | 78.7% (76–81) | 34.3% (31–37) | 46.4% (43–50) |
+| `neobert` | 62.1% (59–65) | 78.9% (76–81) | 42.8% (40–46) | 37.9% (35–41) |
+
+The repo's own sets are small, so treat these as smoke checks:
+
+| Checkpoint | Golden (72 questions) | Support (18 questions) |
+|---|---|---|
+| `english` | 62.5% | 83.3% |
+| `multilingual` | 68.1% | 66.7% |
+| `typed-decisions` | 79.2% | 94.4% |
+| `route` | 76.4% | 94.4% |
+| `modernbert-zeroshot` | 52.8% | 83.3% |
+| `modernbert-nli` | 59.7% | 77.8% |
+| `deberta-v3` | 73.6% | 83.3% |
+| `eurobert` | 52.8% | 55.6% |
+| `neobert` | 66.7% | 44.4% |
 
 What the table shows:
 - Laya leads on topic classification and on the typed-decision benchmarks. Convai lists topic classification as an in-task family for Laya.
-- The NLI models lead on sentiment and on many labels. Laya drops to 32-37% at 77 labels, which matches Convai's own Banking77 result (0.425).
+- The NLI models lead on sentiment and on many labels. Laya reaches 54-58% at 77 labels with lemma's tournament (36-38% with upstream's even shrink, against Convai's own 0.425).
+- Multilingual tweet sentiment is hard for every model (chance is 33%). `deberta-v3` does best at 61%.
 - EuroBERT and NeoBERT are pretrained encoders without a classifier, so label-word scoring is their ceiling.
 
 Choice options keep the order the schema lists them in, as Laya was trained. For more than 20 options, `route` picks an NLI model (`modernbert-nli`, then `deberta-v3`, then `modernbert-zeroshot`, whichever is installed). Calibrate on your own labelled data with `lemma calibrate`.
 
-`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy table below).
+`route` uses the meta-router's pick when that checkpoint is installed. Otherwise it falls back to the script route across the installed Laya checkpoints. It does not follow the meta-router's long-context rules natively: the `modernbert-zeroshot` fine-tune was trained at 512 tokens, and EuroBERT is capped at 2048 tokens and has no classifier. For more than 20 options it picks an NLI model (see the accuracy tables).
 
 `--chunk-strategy` works on real tokenizer tokens with native inference. `head-tail` keeps the first quarter of the token budget and the last three quarters (about 128 + 382 tokens of 510, as in Sun et al. 2019). `sliding-window` uses windows that overlap by a third and pools their logits. `input_tokens` reports the tokens the model read, and `latency_ms` excludes the one-time model load, which lemma prints to stderr.
 
