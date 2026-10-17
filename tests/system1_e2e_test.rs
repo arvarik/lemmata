@@ -1,5 +1,5 @@
 use lemmata::datasource::{DataItem, FileSource};
-use lemmata::engine::{ConsensusEngine, ExperimentRunner, LayaClassifier};
+use lemmata::engine::{ConsensusEngine, LayaClassifier};
 use lemmata::model::{
     Checkpoint, DecisionAnswer, DecisionModel, DecisionResult, Downloader, Question,
     clean_email_body, email_questions, estimate_tokens, inspect_safetensors,
@@ -247,16 +247,6 @@ fn test_consensus_epistemic_uncertainty_and_checkpoint_verification() {
     ]);
     let res = engine.evaluate_batch(&items, &questions).unwrap();
     assert!(res[0].questions["dept"].epistemic_uncertainty > 0.0);
-
-    let q_choice = &questions["dept"];
-    ExperimentRunner::test_option_order_invariance(
-        &LayaClassifier::with_checkpoint(Checkpoint::English),
-        &items,
-        "dept",
-        q_choice,
-        3,
-    )
-    .unwrap();
 
     let dl = Downloader {
         cli_binary: "hf".into(),

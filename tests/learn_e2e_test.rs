@@ -82,8 +82,8 @@ fn test_curriculum_phase_parsing_and_metadata() {
         "production",
         "cascade",
         "consensus",
-        "drift",
-        "active",
+        "ensemble",
+        "defer",
     ];
     for alias in phase5_aliases {
         let p = CurriculumPhase::from_str(alias).expect("should parse phase 5 alias");
