@@ -383,22 +383,54 @@ impl HtmlExtractor {
 }
 
 /// Execute an HTTP GET via system `curl` with headers and timeout, verifying exit status.
+///
+/// Rate limits (429) and server errors (5xx) are retried with exponential backoff. Any other
+/// non-2xx status is an error that shows the status and the start of the body.
 pub(crate) fn curl_fetch(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<String> {
-    let mut cmd = Command::new("curl");
-    cmd.args(["-sSL", "--max-time", &timeout_secs.to_string()]);
-    for (k, v) in headers {
-        cmd.args(["-H", &format!("{}: {}", k, v)]);
-    }
-    cmd.arg(url);
+    const RETRIES: u32 = 4;
+    // ponytail: fixed 2-4-8-16 s backoff. Read Retry-After if a server needs longer waits.
+    let mut delay = std::time::Duration::from_secs(2);
+    for attempt in 0..=RETRIES {
+        let mut cmd = Command::new("curl");
+        cmd.args(["-sSL", "--max-time", &timeout_secs.to_string()]);
+        // Append the status code on its own last line.
+        cmd.args(["-w", "\n%{http_code}"]);
+        for (k, v) in headers {
+            cmd.args(["-H", &format!("{}: {}", k, v)]);
+        }
+        cmd.arg(url);
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to execute curl request for {}", url))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        bail!("HTTP request failed for {}: {}", url, err.trim());
+        let output = cmd
+            .output()
+            .with_context(|| format!("Failed to execute curl request for {}", url))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            bail!("HTTP request failed for {}: {}", url, err.trim());
+        }
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let (body, code) = match text.rsplit_once('\n') {
+            Some((body, code)) => (body.to_string(), code.trim().parse::<u16>().unwrap_or(0)),
+            None => (String::new(), text.trim().parse::<u16>().unwrap_or(0)),
+        };
+        match code {
+            // 0 means curl saw no HTTP status, for example a file:// URL.
+            0 | 200..=299 => return Ok(body),
+            429 | 500..=599 if attempt < RETRIES => {
+                eprintln!(
+                    "⏳ HTTP {code} from {url}. Retrying in {} s ({}/{RETRIES}).",
+                    delay.as_secs(),
+                    attempt + 1
+                );
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            _ => {
+                let snippet: String = body.chars().take(300).collect();
+                bail!("HTTP {code} from {url}: {}", snippet.trim());
+            }
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    unreachable!("the last attempt returns or fails")
 }
 
 /// Jina Reader API client (`https://r.jina.ai/<url>`) for dynamic SPA rendering.
