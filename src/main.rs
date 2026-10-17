@@ -2485,7 +2485,31 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
         tuner = tuner.with_cost_weights(parse_cost_weights(cw_spec)?);
     }
 
-    let (report, calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
+    let (report, mut calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
+
+    if args.fit_label_bias {
+        // `route` picks a different model per input, so one bias vector cannot fit them all. On
+        // multilingual sentiment it lowered route's accuracy from 57.8% to 54.0%.
+        if checkpoint == Checkpoint::AutoRoute {
+            bail!(
+                "--fit-label-bias needs a fixed checkpoint. `route` picks a different model per input, and one label bias does not fit them all."
+            );
+        }
+        // Fit on top of the calibrated temperatures, which classify applies first.
+        let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+        lemma::engine::apply_persisted_calibration(&mut cfg, &calibrated_config);
+        let fit = lemma::engine::fit_label_bias(&LayaClassifier::new(cfg), &items, &questions)?;
+        for (qid, (n, before, after)) in &fit.questions {
+            eprintln!(
+                "🎯 Label bias for '{qid}': accuracy on these {n} samples {:.1}% -> {:.1}%",
+                before * 100.0,
+                after * 100.0
+            );
+        }
+        for (label, w) in fit.weights {
+            *calibrated_config.cost_weights.entry(label).or_insert(1.0) *= w;
+        }
+    }
 
     if args.persist_to_model {
         let saved = lemma::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?;

@@ -1344,6 +1344,11 @@ pub struct CalibrateArgs {
     #[arg(long, default_value_t = crate::engine::calibrate::DEFAULT_MIN_BUCKET_SAMPLES)]
     pub min_bucket_samples: usize,
 
+    /// Also fit a bias per choice label on the labelled data and export it as cost weights.
+    /// It removes a model's preference for some labels. Fit on data you will not test on
+    #[arg(long)]
+    pub fit_label_bias: bool,
+
     /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
     #[arg(
         short,

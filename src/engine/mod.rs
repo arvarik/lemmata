@@ -36,7 +36,8 @@ pub use cache::{
 };
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
-    CalibrationReport, CalibrationTuner, QatsProfile, parse_cost_weights,
+    CalibrationReport, CalibrationTuner, LabelBiasFit, QatsProfile, fit_label_bias,
+    parse_cost_weights,
 };
 pub use cascade::{
     CascadeConfig, CascadeDecision, CascadePolicy, CascadeRouter, CascadeSweepPoint, SystemTier,

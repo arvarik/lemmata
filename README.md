@@ -31,7 +31,7 @@ Latency and accuracy figures above are Convai's own measurements on a Tesla T4, 
 
 ### Inference backends
 
-lemma runs every checkpoint's real weights natively with [candle](https://github.com/huggingface/candle). On macOS it runs models on the Metal GPU, and does CPU matrix math through Apple's Accelerate framework. Linux and Windows run on the CPU. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
+lemma runs every checkpoint's real weights natively with [candle](https://github.com/huggingface/candle). On macOS it runs models on the Metal GPU, and does CPU matrix math through Apple's Accelerate framework. Linux and Windows run on the CPU. `tests/native_robustness_test.rs` checks every installed model's answers on hostile inputs (empty, mask tokens, control characters, mixed scripts, very long text). `tests/native_consistency_test.rs` checks that answers do not change across repeated calls, batch and single calls, a question asked alone or with others, chunk strategies on short text, and (for NLI) option order. Parity tests compare each port with its Python reference: `tests/native_parity_test.rs` (Laya against the upstream code, NLI models against `transformers`), `tests/eurobert_parity_test.rs`, and `tests/neobert_parity_test.rs` (against the models' own `trust_remote_code` files).
 
 | `--backend` (or `LEMMA_BACKEND`) | Behavior |
 |---|---|
@@ -473,7 +473,33 @@ lemma calibrate \
   --adaptive \
   --adaptive-gamma 0.30 \
   --export-config config/laya_qats.json
+
+# 3. Also correct the model's preference for some labels (needs labelled data you will not test on)
+lemma calibrate \
+  -c eurobert \
+  --val-data data/train_sample.jsonl \
+  --schema schema/questions.json \
+  --fit-label-bias \
+  --export-config config/eurobert_bias.json
+lemma test -c eurobert --file data/test.jsonl --schema schema/questions.json --config config/eurobert_bias.json
 ```
+
+Zero-shot accuracy, then accuracy with `--fit-label-bias` fitted on 500 separate training items (600 for multilingual sentiment) and tested on the same sets as the accuracy table above:
+
+| Checkpoint | AG News | SST-2 | Banking77 | Multilingual sentiment |
+|---|---|---|---|---|
+| `english` | 92.3% → 92.4% | 88.9% → 91.3% | 58.3% → 60.1% | 47.6% → 51.6% |
+| `multilingual` | 92.6% → 92.6% | 82.2% → 84.3% | 54.0% → 55.2% | 49.9% → 55.0% |
+| `typed-decisions` | 92.5% → 93.0% | 88.9% → 92.1% | 57.1% → 60.2% | 48.9% → 49.3% |
+| `modernbert-zeroshot` | 87.4% → 88.0% | 94.7% → 95.0% | 70.5% → 73.6% | 47.6% → 49.9% |
+| `modernbert-nli` | 89.8% → 89.9% | 96.0% → 96.2% | 71.0% → 74.3% | 48.4% → 55.1% |
+| `deberta-v3` | 89.3% → 90.1% | 95.2% → 95.3% | 67.8% → 72.5% | 61.2% → 61.3% |
+| `eurobert` | 65.8% → 71.3% | 78.7% → 78.7% | 34.3% → 39.8% | 46.4% → 41.9% |
+| `neobert` | 62.1% → 76.5% | 78.9% → 85.3% | 42.8% → 47.7% | 37.9% → 40.9% |
+
+The bias helps most where a model prefers some label words (NeoBERT on AG News: +14 points) and with many labels (Banking77: +1 to +6). It hurt EuroBERT on multilingual sentiment (-4.5). It is refused for `route`, which picks a different model per input. On multilingual sentiment a single bias lowered route from 57.8% to 54.0%.
+
+`--fit-label-bias` fits one bias per choice label that maximizes the likelihood of the labelled answers (vector scaling with a bias term, Guo et al. 2017), and exports it as `cost_weights`. Zero-shot models favor some label words regardless of the text, and the bias removes that prior. Temperatures do not change which option wins, but the bias does.
 
 ### 23. Micro-Batch Streaming (`lemma stream`)
 Classifies a stream of records in micro-batches, with optional caching and signed receipts. lemma has no Kafka, S3, or Iceberg client. A `kafka://` source replays the local file in `?file=` with Kafka-style offsets, a `kafka://` sink writes the local file in `?file=`, and `lakehouse://` projects columns from a local file. `s3://`, `gcs://`, and `blob://` URIs return an error:
