@@ -954,7 +954,7 @@ fn checkpoint_domain_summary(ckpt: Checkpoint) -> &'static str {
         }
         Checkpoint::Multilingual => "100+ languages, 2.2x faster forward pass (~32.8ms)",
         Checkpoint::TypedDecisions => {
-            "Specialized enterprise workflows (0.766 acc, beats Jev teacher)"
+            "Specialized enterprise workflows (0.766 acc after fine-tuning)"
         }
         Checkpoint::AutoRoute => "<0.5ms Unicode script router between English & Multilingual",
         Checkpoint::ModernBertZeroShot => {
@@ -969,7 +969,6 @@ fn checkpoint_domain_summary(ckpt: Checkpoint) -> &'static str {
         Checkpoint::NeoBert => {
             "Compact 250M English representation encoder (4k context, RoPE + SwiGLU)"
         }
-        Checkpoint::Jev => "TypeSafe AI Jev 1.13.0 System 1 baseline comparison profile",
         Checkpoint::ModernBertNli => "Zero-shot NLI encoder baseline comparison profile",
     }
 }
@@ -3054,12 +3053,27 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
         return Ok(());
     }
 
-    // The lesson demos call classify with `.expect`, so a checkpoint that cannot run natively
-    // would panic. Phase 3 always compares EuroBERT, which lemma can only simulate.
+    // The lesson demos call classify with `.expect`, so under `native` a missing checkpoint would
+    // panic. Check every checkpoint the lessons use before any lesson runs.
     if lemma::model::native::backend() == Backend::Native {
-        bail!(
-            "lemma learn compares EuroBERT, which has no native inference in lemma. Run it with --backend auto (real weights where installed, labelled simulation elsewhere) or --backend mock."
-        );
+        let missing: Vec<String> = [
+            Checkpoint::English,
+            Checkpoint::Multilingual,
+            Checkpoint::TypedDecisions,
+            Checkpoint::DebertaV3ZeroShot,
+            Checkpoint::ModernBertZeroShot,
+            Checkpoint::EuroBert,
+        ]
+        .into_iter()
+        .filter(|&c| !lemma::model::native::native_available(c))
+        .map(|c| c.repo_id().to_string())
+        .collect();
+        if !missing.is_empty() {
+            bail!(
+                "lemma learn needs weights for {}. Download them with `lemma download`, or run with --backend auto to simulate the missing ones.",
+                missing.join(", ")
+            );
+        }
     }
 
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {

@@ -582,7 +582,7 @@ fn build_phase_2() -> PhaseLesson {
             "An encoder backbone turns text into contextual token embeddings H in R^{T x d}. ",
             "But how do we extract a zero-shot classification decision across K candidate labels without fine-tuning a new linear layer for every task?\n\n",
             "Modern System 1 models use THREE distinct zero-shot head paradigms—each with radically different scaling laws and failure modes:\n",
-            "1. JointSinglePass (Laya / Jev / GLiClass): Packs the state AND all K option tokens into one prompt and scores all K options simultaneously in O(1) forward passes using dedicated mask_scorer + act_head projections.\n",
+            "1. JointSinglePass (Laya / GLiClass): Packs the state AND all K option tokens into one prompt and scores all K options simultaneously in O(1) forward passes using dedicated mask_scorer + act_head projections.\n",
             "2. PairwiseNliCrossEncoder (DeBERTa-v3-ZS / ModernBERT-ZS): Formats each option k as a Natural Language Inference (NLI) hypothesis ('This text is about {label}') and runs K separate forward passes (O(K) complexity) to score entailment vs contradiction.\n",
             "3. GenerativeMlmVerbalizer (EuroBERT / NeoBERT): Appends a cloze template ('The primary issue is [MASK].') and reads the pretrained language modeling head (lm_head) logits for verbalizer tokens at the [MASK] position."
         )

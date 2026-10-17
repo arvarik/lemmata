@@ -67,6 +67,7 @@ fn native_nli_matches_transformers() {
         serde_json::from_str(include_str!("fixtures/native_golden.json")).unwrap();
     for (name, ckpt) in [
         ("modernbert-zeroshot", Checkpoint::ModernBertZeroShot),
+        ("modernbert-nli", Checkpoint::ModernBertNli),
         ("deberta-v3", Checkpoint::DebertaV3ZeroShot),
     ] {
         let dir = ckpt.local_dir();
@@ -76,6 +77,7 @@ fn native_nli_matches_transformers() {
         }
         let model = NliModel::load(&dir).unwrap();
         let mut max_diff = 0.0f64;
+        let mut batch = Vec::new();
         for case in golden[name].as_array().unwrap() {
             let case_name = case["name"].as_str().unwrap();
             let ids = model
@@ -86,6 +88,7 @@ fn native_nli_matches_transformers() {
                 .unwrap();
             let expected_ids: Vec<u32> = serde_json::from_value(case["input_ids"].clone()).unwrap();
             assert_eq!(ids, expected_ids, "{name}/{case_name}: input ids");
+            batch.push(ids.clone());
 
             let logits = model.forward(&ids).unwrap();
             let expected: Vec<f64> = serde_json::from_value(case["logits"].clone()).unwrap();
@@ -99,6 +102,22 @@ fn native_nli_matches_transformers() {
                 assert!(
                     (got - want).abs() < 1e-3,
                     "{name}/{case_name}: logits {logits:?} != {expected:?}"
+                );
+            }
+        }
+        // One padded batch of every pair must give each pair's unpadded result.
+        for (row, case) in model
+            .forward_batch(&batch)
+            .unwrap()
+            .iter()
+            .zip(golden[name].as_array().unwrap())
+        {
+            let expected: Vec<f64> = serde_json::from_value(case["logits"].clone()).unwrap();
+            for (got, want) in row.iter().zip(&expected) {
+                max_diff = max_diff.max((got - want).abs());
+                assert!(
+                    (got - want).abs() < 1e-3,
+                    "{name}: batched {row:?} != {expected:?}"
                 );
             }
         }

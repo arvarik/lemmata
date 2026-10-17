@@ -54,8 +54,7 @@ pub fn backend() -> Backend {
     }
 }
 
-/// Checkpoints lemma can run natively. `Jev` and `ModernBertNli` share another model's
-/// directory, so loading that directory would mislabel the result.
+/// Checkpoints lemma can run natively.
 pub fn has_native_impl(ckpt: Checkpoint) -> bool {
     matches!(
         ckpt,
@@ -63,7 +62,10 @@ pub fn has_native_impl(ckpt: Checkpoint) -> bool {
             | Checkpoint::Multilingual
             | Checkpoint::TypedDecisions
             | Checkpoint::ModernBertZeroShot
+            | Checkpoint::ModernBertNli
             | Checkpoint::DebertaV3ZeroShot
+            | Checkpoint::EuroBert
+            | Checkpoint::NeoBert
     )
 }
 
@@ -147,10 +149,14 @@ pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
         return Ok(m.clone());
     }
     let started = Instant::now();
-    let model = if Checkpoint::laya_checkpoints().contains(&ckpt) {
-        LayaModel::load(dir).map(|m| NativeModel::Laya(Box::new(m)))
-    } else {
-        NliModel::load(dir).map(|m| NativeModel::Nli(Box::new(m)))
+    let model = match ckpt {
+        Checkpoint::English | Checkpoint::Multilingual | Checkpoint::TypedDecisions => {
+            LayaModel::load(dir).map(|m| NativeModel::Laya(Box::new(m)))
+        }
+        Checkpoint::EuroBert | Checkpoint::NeoBert => {
+            MlmModel::load(ckpt, dir).map(|m| NativeModel::Mlm(Box::new(m)))
+        }
+        _ => NliModel::load(dir).map(|m| NativeModel::Nli(Box::new(m))),
     }
     .with_context(|| {
         format!(
@@ -188,6 +194,7 @@ pub struct Scored {
 pub enum NativeModel {
     Laya(Box<LayaModel>),
     Nli(Box<NliModel>),
+    Mlm(Box<MlmModel>),
 }
 
 impl NativeModel {
@@ -195,6 +202,7 @@ impl NativeModel {
         match self {
             Self::Laya(m) => m.score(req),
             Self::Nli(m) => m.score(req),
+            Self::Mlm(m) => m.score(req),
         }
     }
 }
@@ -309,6 +317,15 @@ pub struct LayaModel {
     device: Device,
 }
 
+/// Load a tokenizer with its padding and truncation turned off. lemma builds and cuts every
+/// sequence itself, and some tokenizer.json files pad each encoding to a fixed length.
+pub fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
+    let mut tokenizer = Tokenizer::from_file(path).map_err(|e| anyhow!(e))?;
+    tokenizer.with_padding(None);
+    tokenizer.with_truncation(None).map_err(|e| anyhow!(e))?;
+    Ok(tokenizer)
+}
+
 fn read_json(path: &Path) -> Result<serde_json::Value> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -349,8 +366,7 @@ impl LayaModel {
         let enc_cfg = encoder_config(&enc_raw)?;
         let d = enc_cfg.hidden_size;
 
-        let tokenizer =
-            Tokenizer::from_file(dir.join("tokenizer/tokenizer.json")).map_err(|e| anyhow!(e))?;
+        let tokenizer = load_tokenizer(&dir.join("tokenizer/tokenizer.json"))?;
         let special = |key: &str| -> Result<(String, u32)> {
             let tok = tok_cfg
                 .get(key)
@@ -591,6 +607,7 @@ pub struct NliModel {
     not_entail: usize,
     cls_id: u32,
     sep_id: u32,
+    pad_id: u32,
     max_len: usize,
     device: Device,
 }
@@ -600,7 +617,7 @@ impl NliModel {
     pub fn load(dir: &Path) -> Result<Self> {
         let cfg = read_json(&dir.join("config.json"))?;
         let tok_cfg = read_json(&dir.join("tokenizer_config.json"))?;
-        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!(e))?;
+        let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
         let special = |key: &str| -> Result<u32> {
             let tok = tok_cfg
                 .get(key)
@@ -666,6 +683,7 @@ impl NliModel {
             not_entail,
             cls_id: special("cls_token")?,
             sep_id: special("sep_token")?,
+            pad_id: special("pad_token")?,
             max_len: tok_cfg
                 .get("model_max_length")
                 .and_then(|v| v.as_u64())
@@ -705,9 +723,25 @@ impl NliModel {
     }
 
     /// Raw classifier logits for one encoded pair, in `id2label` order.
-    // ponytail: one pair per forward pass. Batch the K hypotheses with a padding mask if throughput matters.
     pub fn forward(&self, ids: &[u32]) -> Result<Vec<f64>> {
-        let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+        let mut rows = self.forward_batch(&[ids.to_vec()])?;
+        Ok(rows.remove(0))
+    }
+
+    /// Raw classifier logits for several encoded pairs in one forward pass. Shorter pairs are
+    /// padded, and the attention mask and the pooling ignore the padding.
+    pub fn forward_batch(&self, seqs: &[Vec<u32>]) -> Result<Vec<Vec<f64>>> {
+        let len = seqs.iter().map(Vec::len).max().unwrap_or(0);
+        let mut ids = Vec::with_capacity(seqs.len() * len);
+        let mut mask = Vec::with_capacity(seqs.len() * len);
+        for seq in seqs {
+            ids.extend_from_slice(seq);
+            ids.extend(std::iter::repeat_n(self.pad_id, len - seq.len()));
+            mask.extend((0..len).map(|i| u8::from(i < seq.len())));
+        }
+        let shape = (seqs.len(), len);
+        let input = Tensor::from_vec(ids, shape, &self.device)?;
+        let mask = Tensor::from_vec(mask, shape, &self.device)?;
         let logits = match &self.backbone {
             NliBackbone::ModernBert {
                 encoder,
@@ -716,11 +750,11 @@ impl NliModel {
                 classifier,
                 mean_pool,
             } => {
-                let mask = Tensor::ones((1, ids.len()), DType::F32, &self.device)?;
+                let mask = mask.to_dtype(DType::F32)?;
                 let h = encoder.forward(&input, &mask)?;
-                // One unpadded sequence, so the masked mean is the plain mean.
                 let pooled = if *mean_pool {
-                    h.mean(1)?
+                    let m = mask.unsqueeze(2)?;
+                    h.broadcast_mul(&m)?.sum(1)?.broadcast_div(&m.sum(1)?)?
                 } else {
                     h.get_on_dim(1, 0)?
                 };
@@ -730,13 +764,14 @@ impl NliModel {
                     .apply(norm)?
                     .apply(classifier)?
             }
-            NliBackbone::Deberta(model) => model.forward(&input, None, None)?,
+            NliBackbone::Deberta(model) => {
+                model.forward(&input, None, Some(mask.to_dtype(DType::I64)?))?
+            }
         };
         Ok(logits
-            .squeeze(0)?
-            .to_vec1::<f32>()?
+            .to_vec2::<f32>()?
             .into_iter()
-            .map(f64::from)
+            .map(|row| row.into_iter().map(f64::from).collect())
             .collect())
     }
 
@@ -765,11 +800,10 @@ impl NliModel {
         let mut per_window = Vec::new();
         let room = self.max_len.saturating_sub(longest + 3);
         for window in state_windows(&text, room, req.strategy) {
+            let pairs: Vec<Vec<u32>> = hyp_ids.iter().map(|h| self.join(&window, h)).collect();
+            input_tokens += pairs.iter().map(Vec::len).sum::<usize>();
             let mut scores = Vec::with_capacity(req.options.len());
-            for hyp in &hyp_ids {
-                let ids = self.join(&window, hyp);
-                input_tokens += ids.len();
-                let z = self.forward(&ids)?;
+            for z in self.forward_batch(&pairs)? {
                 let (ent, not) = (z[self.entail], z[self.not_entail]);
                 if q.qtype == QuestionType::Noul {
                     scores.extend([not, ent]);
@@ -786,6 +820,233 @@ impl NliModel {
             input_tokens,
         })
     }
+}
+
+/// Longest label, in tokens, that the masked-LM scorer fills in.
+const MAX_LABEL_TOKENS: usize = 8;
+/// Masked-LM context cap. candle builds the full attention matrix, which needs gigabytes at 8k.
+const MLM_MAX_LEN: usize = 2048;
+
+enum MlmEncoder {
+    EuroBert(super::eurobert::EuroBertMlm),
+    NeoBert(super::neobert::NeoBertMlm),
+}
+
+impl MlmEncoder {
+    fn logits_at(&self, ids: &[u32], positions: &[usize]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::EuroBert(m) => m.mlm_logits_at(ids, positions),
+            Self::NeoBert(m) => m.mlm_logits_at(ids, positions),
+        }
+    }
+}
+
+/// A pretrained masked-LM encoder used as a zero-shot classifier through label words (PET cloze
+/// scoring, Schick & Schütze 2021): the label's tokens fill masks after the question.
+pub struct MlmModel {
+    tokenizer: Tokenizer,
+    encoder: MlmEncoder,
+    mask_id: u32,
+    /// Special tokens the tokenizer puts around a single sequence, e.g. [CLS] ... [SEP].
+    prefix: Vec<u32>,
+    suffix: Vec<u32>,
+    max_len: usize,
+    /// Content-free label scores per (question, labels), for contextual calibration.
+    priors: Mutex<HashMap<String, Vec<f64>>>,
+}
+
+impl MlmModel {
+    pub fn load(ckpt: Checkpoint, dir: &Path) -> Result<Self> {
+        let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
+        let cfg = read_json(&dir.join("config.json"))?;
+        let mask_token = read_json(&dir.join("tokenizer_config.json"))?
+            .get("mask_token")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.get("content")?.as_str().map(str::to_string))
+            })
+            .ok_or_else(|| anyhow!("tokenizer_config.json has no mask_token"))?;
+        let mask_id = tokenizer
+            .token_to_id(&mask_token)
+            .ok_or_else(|| anyhow!("mask token '{mask_token}' is not in the vocabulary"))?;
+
+        // Find the special tokens around one sequence by encoding a probe with and without them.
+        let with = tokenizer.encode("probe", true).map_err(|e| anyhow!(e))?;
+        let bare = tokenizer.encode("probe", false).map_err(|e| anyhow!(e))?;
+        let (with, bare) = (with.get_ids(), bare.get_ids());
+        let start = with
+            .windows(bare.len())
+            .position(|w| w == bare)
+            .ok_or_else(|| anyhow!("cannot locate the text inside a special-token encoding"))?;
+
+        let encoder = match ckpt {
+            Checkpoint::EuroBert => MlmEncoder::EuroBert(super::eurobert::EuroBertMlm::load(dir)?),
+            Checkpoint::NeoBert => MlmEncoder::NeoBert(super::neobert::NeoBertMlm::load(dir)?),
+            other => bail!("{other} is not a masked-LM checkpoint"),
+        };
+        let positions = ["max_position_embeddings", "max_length"]
+            .iter()
+            .find_map(|k| cfg.get(*k).and_then(|v| v.as_u64()))
+            .unwrap_or(512) as usize;
+        Ok(Self {
+            prefix: with[..start].to_vec(),
+            suffix: with[start + bare.len()..].to_vec(),
+            max_len: positions.min(MLM_MAX_LEN),
+            priors: Mutex::default(),
+            tokenizer,
+            encoder,
+            mask_id,
+        })
+    }
+
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(self
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| anyhow!(e))?
+            .get_ids()
+            .to_vec())
+    }
+
+    /// The words that stand for each option: the choice label, the score level's description,
+    /// or "no" / "yes" for a `noul` statement.
+    fn label_words(q: &Question, options: &[String]) -> Vec<String> {
+        use super::render_nli_hypothesis as render;
+        if q.qtype == QuestionType::Noul {
+            return vec!["no".into(), "yes".into()];
+        }
+        options
+            .iter()
+            .map(|o| {
+                let label = render(q, o, Some("{label}"));
+                let desc = render(q, o, Some("{description}"));
+                let described = desc != label && desc != q.instructions.trim();
+                if q.qtype == QuestionType::Score && described {
+                    desc
+                } else {
+                    label
+                }
+            })
+            .collect()
+    }
+
+    /// Mean log-probability of each label's tokens, with one mask per token after `question`.
+    /// Returns the scores and the number of tokens the model read.
+    fn label_log_probs(
+        &self,
+        context: &[u32],
+        question: &[u32],
+        labels: &[Vec<u32>],
+    ) -> Result<(Vec<f64>, usize)> {
+        let end = self.encode(".")?;
+        let mut scores = vec![0.0; labels.len()];
+        let mut tokens = 0;
+        // One forward pass per distinct label length, with that many masks.
+        let mut lengths: Vec<usize> = labels.iter().map(Vec::len).collect();
+        lengths.sort_unstable();
+        lengths.dedup();
+        for n in lengths {
+            let mut ids = self.prefix.clone();
+            ids.extend_from_slice(context);
+            ids.extend_from_slice(question);
+            let first_mask = ids.len();
+            ids.extend(std::iter::repeat_n(self.mask_id, n));
+            ids.extend_from_slice(&end);
+            ids.extend_from_slice(&self.suffix);
+            tokens += ids.len();
+            let positions: Vec<usize> = (first_mask..first_mask + n).collect();
+            let log_probs: Vec<Vec<f64>> = self
+                .encoder
+                .logits_at(&ids, &positions)?
+                .iter()
+                .map(|row| log_softmax(row))
+                .collect();
+            for (score, label) in scores.iter_mut().zip(labels) {
+                if label.len() == n {
+                    *score = label
+                        .iter()
+                        .zip(&log_probs)
+                        .map(|(&t, row)| row[t as usize])
+                        .sum::<f64>()
+                        / n as f64;
+                }
+            }
+        }
+        Ok((scores, tokens))
+    }
+
+    /// Each option's score is the mean log-probability of its label tokens after the question,
+    /// minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al.
+    /// 2021). The subtraction removes the label words' prior, which otherwise makes common words
+    /// such as "other" win. A positive score means the text raises the label's probability.
+    fn score(&self, req: &ScoreRequest) -> Result<Scored> {
+        let q = req.question;
+        let words = Self::label_words(q, req.options);
+        let question = if q.qtype == QuestionType::Noul {
+            format!(
+                "\nStatement: {}\nIs the statement true? Answer:",
+                q.instructions.trim()
+            )
+        } else {
+            format!(
+                "\nQuestion: {} Options: {}.\nAnswer:",
+                q.instructions.trim(),
+                words.join(", ")
+            )
+        };
+        let question = self.encode(&question)?;
+        let labels = words
+            .iter()
+            .map(|w| {
+                let mut ids = self.encode(&format!(" {w}"))?;
+                ids.truncate(MAX_LABEL_TOKENS);
+                if ids.is_empty() {
+                    bail!("option label '{w}' has no tokens");
+                }
+                Ok(ids)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let key = format!("{question:?}{labels:?}");
+        let cached = self.priors.lock().ok().and_then(|p| p.get(&key).cloned());
+        let prior = match cached {
+            Some(prior) => prior,
+            None => {
+                let (prior, _) = self.label_log_probs(&self.encode("N/A")?, &question, &labels)?;
+                if let Ok(mut priors) = self.priors.lock() {
+                    priors.insert(key, prior.clone());
+                }
+                prior
+            }
+        };
+
+        let longest = labels.iter().map(Vec::len).max().unwrap_or(1);
+        let overhead = self.prefix.len() + question.len() + longest + 1 + self.suffix.len();
+        let state = self.encode(req.state)?;
+        let mut input_tokens = 0;
+        let mut per_window = Vec::new();
+        for window in state_windows(&state, self.max_len.saturating_sub(overhead), req.strategy) {
+            let (lp, tokens) = self.label_log_probs(&window, &question, &labels)?;
+            input_tokens += tokens;
+            per_window.push(lp.iter().zip(&prior).map(|(l, p)| l - p).collect());
+        }
+        Ok(Scored {
+            logits: pool(per_window),
+            input_tokens,
+        })
+    }
+}
+
+fn log_softmax(row: &[f32]) -> Vec<f64> {
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let lse = max
+        + row
+            .iter()
+            .map(|&z| (z as f64 - max).exp())
+            .sum::<f64>()
+            .ln();
+    row.iter().map(|&z| z as f64 - lse).collect()
 }
 
 /// The question's or the caller's template when one is set. Otherwise "This text is about
