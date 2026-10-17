@@ -1,4 +1,13 @@
-# paste is a compile-time proc macro that gemm (candle's CPU matmul backend) depends on.
-# It is unmaintained, with no known vulnerability. Remove this when gemm drops paste.
 [advisories]
-ignore = ["RUSTSEC-2024-0436"]
+ignore = [
+    # paste is a compile-time proc macro that gemm (candle's CPU matmul backend) depends on.
+    # It is unmaintained, with no known vulnerability. Remove this when gemm drops paste.
+    "RUSTSEC-2024-0436",
+    # zip 8.x: ZipArchive::extract() mishandles symlinks, permissions, and SUID/SGID bits.
+    # The fix is zip >= 9, but candle-core 0.11.0 (the newest release) requires zip 8.
+    # lemma cannot reach extract(): candle only reads entries from .npz/.pth archives, and
+    # lemma loads safetensors only. Remove these when candle moves to zip 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]
