@@ -11,7 +11,6 @@ use crate::engine::classifier::LayaClassifier;
 use crate::engine::metrics::{
     calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
 };
-use crate::engine::{CacheLookupResult, DecisionCache, SemanticCacheConfig, compute_schema_hash};
 use crate::model::{Question, QuestionType};
 
 /// Speed and latency statistics for single-item decisions and batches.
@@ -36,21 +35,6 @@ pub struct PerformanceStats {
     pub total_items_processed: usize,
     pub total_decisions_evaluated: usize,
     pub avg_head_token_utilization_pct: f64,
-    pub cache_summary: Option<CacheStatsSummary>,
-}
-
-/// Sub-millisecond decision cache efficiency and latency savings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheStatsSummary {
-    pub enabled: bool,
-    pub total_lookups: u64,
-    pub exact_hits: u64,
-    pub semantic_hits: u64,
-    pub misses: u64,
-    pub hit_rate_pct: f64,
-    pub cached_avg_latency_ms: f64,
-    pub uncached_avg_latency_ms: f64,
-    pub speedup_ratio: f64,
 }
 
 /// Accuracy, calibration quality, and strictly proper scoring rules.
@@ -61,6 +45,36 @@ pub struct AccuracyStats {
     pub soft_accuracy: f64,
     pub expected_calibration_error: f64,
     pub brier_score: f64,
+    /// Area under the risk-coverage curve over all labelled decisions (lower is better).
+    pub aurc: f64,
+}
+
+/// Precision, recall, and F1 for one label of a choice question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelStats {
+    pub label: String,
+    /// Items whose true label is this label.
+    pub support: usize,
+    /// Items that the model gave this label.
+    pub predicted: usize,
+    pub precision: f64,
+    pub recall: f64,
+    pub f1: f64,
+}
+
+/// A true label that the model gave another label, and how often.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfusedPair {
+    pub truth: String,
+    pub predicted: String,
+    pub count: usize,
+}
+
+/// Accuracy over the most confident `coverage` share of the labelled items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoveragePoint {
+    pub coverage: f64,
+    pub accuracy: f64,
 }
 
 /// Epistemic and aleatoric uncertainty distributions.
@@ -88,6 +102,21 @@ pub struct QuestionStats {
     pub mean_top2_margin: f64,
     pub mean_entropy: f64,
     pub act_escalate_rate: f64,
+    /// Per-label precision, recall, and F1 (choice questions with labels only).
+    #[serde(default)]
+    pub labels: Vec<LabelStats>,
+    /// F1 averaged over the labels that occur in the data.
+    pub macro_f1: Option<f64>,
+    /// F1 averaged over the labels, weighted by support.
+    pub weighted_f1: Option<f64>,
+    /// The most frequent mistakes, most frequent first.
+    #[serde(default)]
+    pub confused_pairs: Vec<ConfusedPair>,
+    /// Area under the risk-coverage curve (lower is better).
+    pub aurc: Option<f64>,
+    /// Accuracy at 10%, 20%, ..., 100% coverage, most confident items first.
+    #[serde(default)]
+    pub risk_coverage: Vec<CoveragePoint>,
 }
 
 /// Comprehensive, unified system statistics report.
@@ -110,8 +139,6 @@ pub struct SystemStatsReport {
 pub struct StatsEngineConfig {
     pub iterations: usize,
     pub warmup_runs: usize,
-    pub enable_cache: bool,
-    pub similarity_threshold: f32,
     pub escalate_threshold: f64,
     pub ece_bins: usize,
 }
@@ -121,8 +148,6 @@ impl Default for StatsEngineConfig {
         Self {
             iterations: 3,
             warmup_runs: 2,
-            enable_cache: false,
-            similarity_threshold: 0.92,
             escalate_threshold: 0.50,
             ece_bins: 10,
         }
@@ -155,12 +180,6 @@ impl StatsEngine {
 
     pub fn with_warmup(mut self, warmup: usize) -> Self {
         self.config.warmup_runs = warmup;
-        self
-    }
-
-    pub fn with_cache(mut self, enable_cache: bool, similarity_threshold: f32) -> Self {
-        self.config.enable_cache = enable_cache;
-        self.config.similarity_threshold = similarity_threshold;
         self
     }
 
@@ -210,24 +229,6 @@ impl StatsEngine {
 
         // 3. Speed & Performance benchmarking phase
         let mut latencies_ms = Vec::with_capacity(total_items * self.config.iterations);
-        let mut cached_latencies_ms = Vec::new();
-        let mut uncached_latencies_ms = Vec::new();
-
-        let mut opt_cache = if self.config.enable_cache {
-            let cache_cfg = SemanticCacheConfig {
-                semantic: true,
-                max_entries: 10_000,
-                similarity_threshold: self.config.similarity_threshold as f64,
-                min_confidence: 0.0,
-                ttl_seconds: 86_400,
-                max_escalate_probability: 1.0,
-            };
-            Some(DecisionCache::new(cache_cfg))
-        } else {
-            None
-        };
-
-        let schema_hash = compute_schema_hash(questions);
         let start_total = Instant::now();
         let mut last_decisions = Vec::with_capacity(total_items);
 
@@ -235,39 +236,8 @@ impl StatsEngine {
             let is_last = iter_idx + 1 == self.config.iterations;
             for item in items {
                 let t0 = Instant::now();
-
-                let (decision, was_cached, pure_inf_ms) = if let Some(cache) = &mut opt_cache {
-                    let item_text = match &item.state {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
-                    };
-                    match cache.lookup(&item_text, &schema_hash) {
-                        CacheLookupResult::ExactHit(cached_res) => (cached_res, true, None),
-                        CacheLookupResult::SemanticHit { result, .. } => (result, true, None),
-                        CacheLookupResult::Miss => {
-                            let t_inf = Instant::now();
-                            let res = self.classifier.classify(&item.state, questions)?;
-                            let inf_ms = t_inf.elapsed().as_secs_f64() * 1000.0;
-                            cache.insert(&item_text, &schema_hash, &res);
-                            (res, false, Some(inf_ms))
-                        }
-                    }
-                } else {
-                    let t_inf = Instant::now();
-                    let res = self.classifier.classify(&item.state, questions)?;
-                    let inf_ms = t_inf.elapsed().as_secs_f64() * 1000.0;
-                    (res, false, Some(inf_ms))
-                };
-
-                let elapsed_item_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                latencies_ms.push(elapsed_item_ms);
-
-                if was_cached {
-                    cached_latencies_ms.push(elapsed_item_ms);
-                } else {
-                    uncached_latencies_ms.push(pure_inf_ms.unwrap_or(elapsed_item_ms));
-                }
-
+                let decision = self.classifier.classify(&item.state, questions)?;
+                latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
                 if is_last {
                     last_decisions.push(decision);
                 }
@@ -300,35 +270,6 @@ impl StatsEngine {
         let throughput_decisions_per_sec =
             total_decisions_evaluated as f64 / total_measured_elapsed_secs.max(1e-9);
 
-        let cache_summary = opt_cache.as_ref().map(|c| {
-            let stats = c.stats();
-            let cached_avg = if !cached_latencies_ms.is_empty() {
-                cached_latencies_ms.iter().sum::<f64>() / cached_latencies_ms.len() as f64
-            } else {
-                0.0
-            };
-            let uncached_avg = if !uncached_latencies_ms.is_empty() {
-                uncached_latencies_ms.iter().sum::<f64>() / uncached_latencies_ms.len() as f64
-            } else {
-                latency_avg_ms
-            };
-            CacheStatsSummary {
-                enabled: true,
-                total_lookups: stats.total_lookups(),
-                exact_hits: stats.exact_hits,
-                semantic_hits: stats.semantic_hits,
-                misses: stats.misses,
-                hit_rate_pct: stats.hit_rate() * 100.0,
-                cached_avg_latency_ms: cached_avg,
-                uncached_avg_latency_ms: uncached_avg,
-                speedup_ratio: if cached_avg > 1e-6 {
-                    uncached_avg / cached_avg
-                } else {
-                    1.0
-                },
-            }
-        });
-
         // 4. Accuracy, Calibration, and Per-Question Quality Evaluation (Reusing last iteration decisions)
         let mut overall_correct = 0;
         let mut overall_evaluated = 0;
@@ -355,6 +296,8 @@ impl StatsEngine {
             margin_sum: f64,
             entropy_sum: f64,
             escalate_count: usize,
+            confidence_correct: Vec<(f64, bool)>,
+            truth_predicted: Vec<(String, String)>,
         }
 
         let mut q_accumulators: BTreeMap<String, QuestionAccumulator> = questions
@@ -416,6 +359,12 @@ impl StatsEngine {
                                 QuestionType::Choice => {
                                     let pred_str = ans.choice.as_deref().unwrap_or("");
                                     let target_str = target_val.as_str().unwrap_or("");
+                                    if !target_str.is_empty() {
+                                        acc.truth_predicted.push((
+                                            target_str.to_lowercase(),
+                                            pred_str.to_lowercase(),
+                                        ));
+                                    }
                                     let correct = !target_str.is_empty()
                                         && (pred_str.eq_ignore_ascii_case(target_str)
                                             || ans.selected_labels.as_ref().is_some_and(|v| {
@@ -489,6 +438,7 @@ impl StatsEngine {
                                 acc.correct_count += 1;
                             }
                             correctness_all.push(is_correct);
+                            acc.confidence_correct.push((ans.confidence, is_correct));
                             overall_soft_acc_sum += soft_acc;
                             acc.soft_acc_sum += soft_acc;
                         }
@@ -507,6 +457,9 @@ impl StatsEngine {
             let acc = q_accumulators.get(qid).unwrap();
             let count = acc.sample_count.max(1);
             let gt_count = acc.gt_count;
+            let labels = label_stats(&acc.truth_predicted);
+            let (macro_f1, weighted_f1) = f1_averages(&labels);
+            let (aurc, risk_coverage) = risk_coverage(&acc.confidence_correct);
 
             questions_stats.insert(
                 qid.clone(),
@@ -529,6 +482,12 @@ impl StatsEngine {
                     mean_top2_margin: acc.margin_sum / count as f64,
                     mean_entropy: acc.entropy_sum / count as f64,
                     act_escalate_rate: acc.escalate_count as f64 / count as f64,
+                    labels,
+                    macro_f1,
+                    weighted_f1,
+                    confused_pairs: confused_pairs(&acc.truth_predicted, 5),
+                    aurc,
+                    risk_coverage,
                 },
             );
         }
@@ -543,6 +502,15 @@ impl StatsEngine {
                 self.config.ece_bins,
             ),
             brier_score: calculate_brier_score(&probs_all, &targets_all),
+            aurc: risk_coverage(
+                &confidences_all
+                    .iter()
+                    .copied()
+                    .zip(correctness_all.iter().copied())
+                    .collect::<Vec<_>>(),
+            )
+            .0
+            .unwrap_or(0.0),
         });
 
         let denom = total_question_answers.max(1) as f64;
@@ -569,7 +537,6 @@ impl StatsEngine {
                 total_items_processed,
                 total_decisions_evaluated,
                 avg_head_token_utilization_pct,
-                cache_summary,
             },
             accuracy: accuracy_stats,
             uncertainty: UncertaintyStats {
@@ -587,7 +554,7 @@ impl StatsEngine {
     /// Renders the statistics report as a formatted ANSI table.
     pub fn format_table(report: &SystemStatsReport) -> String {
         let mut out = format!(
-            "\n📊 Lemmata System 1 Diagnostics & Performance Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nModel Checkpoint : {} (Head Budget: {} tokens)\nDataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n⚡ Speed & Latency Distribution\n",
+            "\n📊 lemmata Evaluation Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nModel Checkpoint : {} (Head Budget: {} tokens)\nDataset Workload : {} items, {} questions (Iterations: {}, Warmup: {})\n\n⚡ Speed & Latency Distribution\n",
             report.checkpoint,
             report.head_budget,
             report.dataset_items,
@@ -618,22 +585,22 @@ impl StatsEngine {
             (
                 "P50 (Median Response)",
                 format!("{:.3} ms", report.speed.latency_p50_ms),
-                "Sub-35ms non-autoregressive target".to_string(),
+                "Median latency per item".to_string(),
             ),
             (
                 "P90 Latency",
                 format!("{:.3} ms", report.speed.latency_p90_ms),
-                "High-load tail latency boundary".to_string(),
+                "90th percentile".to_string(),
             ),
             (
                 "P95 Latency",
                 format!("{:.3} ms", report.speed.latency_p95_ms),
-                "95th percentile SLA threshold".to_string(),
+                "95th percentile".to_string(),
             ),
             (
                 "P99 Latency",
                 format!("{:.3} ms", report.speed.latency_p99_ms),
-                "Extreme tail latency".to_string(),
+                "99th percentile".to_string(),
             ),
             (
                 "Average (Mean)",
@@ -646,7 +613,7 @@ impl StatsEngine {
                     "{:.3} / {:.3} ms",
                     report.speed.latency_min_ms, report.speed.latency_max_ms
                 ),
-                "Observed execution envelope".to_string(),
+                "Fastest and slowest item".to_string(),
             ),
         ] {
             speed_table.add_row(vec![Cell::new(label), Cell::new(val), Cell::new(note)]);
@@ -694,24 +661,6 @@ impl StatsEngine {
                 report.head_budget
             )),
         ]);
-        if let Some(c) = &report.performance.cache_summary {
-            perf_table.add_row(vec![
-                Cell::new("Semantic Cache Hit Rate"),
-                Cell::new(format!("{:.1}%", c.hit_rate_pct)),
-                Cell::new(format!(
-                    "Exact: {}, Semantic: {}, Misses: {}",
-                    c.exact_hits, c.semantic_hits, c.misses
-                )),
-            ]);
-            perf_table.add_row(vec![
-                Cell::new("Cache Latency Speedup"),
-                Cell::new(format!(
-                    "{:.2}x ({:.3} ms vs {:.3} ms)",
-                    c.speedup_ratio, c.cached_avg_latency_ms, c.uncached_avg_latency_ms
-                )),
-                Cell::new("Cached sub-millisecond retrieval boost"),
-            ]);
-        }
         out.push_str(&perf_table.to_string());
         out.push_str("\n\n🎯 Decision Accuracy, Calibration & Safety\n");
 
@@ -738,12 +687,18 @@ impl StatsEngine {
                 (
                     "Expected Calibration Error (ECE)",
                     format!("{:.4}", acc.expected_calibration_error),
-                    "Lower is better (ECE < 0.10 indicates strong calibration)".to_string(),
+                    "Lower is better. 0 means confidence matches accuracy".to_string(),
                 ),
                 (
                     "Brier Score",
                     format!("{:.4}", acc.brier_score),
                     "Strictly proper mean squared error (lower is better)".to_string(),
+                ),
+                (
+                    "AURC (Risk-Coverage Area)",
+                    format!("{:.4}", acc.aurc),
+                    "Mean error rate when the most confident items go first (lower is better)"
+                        .to_string(),
                 ),
             ] {
                 acc_table.add_row(vec![Cell::new(m), Cell::new(v), Cell::new(note)]);
@@ -814,7 +769,148 @@ impl StatsEngine {
         }
         out.push_str(&q_table.to_string());
         out.push('\n');
+
+        for (qid, q) in &report.questions {
+            if q.labels.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n🏷️  Per-Label Metrics: {qid}\n"));
+            let mut label_table = new_utf8_table(&[
+                ("Label", Color::Cyan),
+                ("Support", Color::White),
+                ("Predicted", Color::White),
+                ("Precision", Color::Green),
+                ("Recall", Color::Green),
+                ("F1", Color::Green),
+            ]);
+            for l in &q.labels {
+                label_table.add_row(vec![
+                    Cell::new(&l.label),
+                    Cell::new(l.support),
+                    Cell::new(l.predicted),
+                    Cell::new(format!("{:.3}", l.precision)),
+                    Cell::new(format!("{:.3}", l.recall)),
+                    Cell::new(format!("{:.3}", l.f1)),
+                ]);
+            }
+            out.push_str(&label_table.to_string());
+            out.push('\n');
+            if let (Some(m), Some(w)) = (q.macro_f1, q.weighted_f1) {
+                out.push_str(&format!("Macro-F1: {m:.3} | Weighted F1: {w:.3}\n"));
+            }
+            if !q.confused_pairs.is_empty() {
+                let pairs: Vec<String> = q
+                    .confused_pairs
+                    .iter()
+                    .map(|c| format!("{} -> {} ({})", c.truth, c.predicted, c.count))
+                    .collect();
+                out.push_str(&format!("Most confused: {}\n", pairs.join(", ")));
+            }
+            if let Some(aurc) = q.aurc {
+                let at = |c: f64| {
+                    q.risk_coverage
+                        .iter()
+                        .find(|p| (p.coverage - c).abs() < 1e-9)
+                        .map_or(0.0, |p| p.accuracy * 100.0)
+                };
+                out.push_str(&format!(
+                    "Accuracy at 50% / 80% / 100% coverage: {:.1}% / {:.1}% / {:.1}% | AURC: {aurc:.4}\n",
+                    at(0.5),
+                    at(0.8),
+                    at(1.0)
+                ));
+            }
+        }
         out
+    }
+
+    /// Renders the report as Markdown, for a PR description or a model card.
+    pub fn format_markdown(report: &SystemStatsReport) -> String {
+        let cell = |s: &str| s.replace('|', "\\|");
+        let mut md = format!(
+            "# lemmata report: {}\n\n{} items and {} questions, timed over {} passes after {} warmup passes.\n\n## Summary\n\n| Metric | Value |\n|---|---|\n",
+            report.checkpoint,
+            report.dataset_items,
+            report.questions.len(),
+            report.benchmark_iterations,
+            report.warmup_runs
+        );
+        if let Some(acc) = &report.accuracy {
+            md.push_str(&format!(
+                "| Accuracy | {:.2}% ({} labelled decisions) |\n| Soft accuracy | {:.2}% |\n| ECE | {:.4} |\n| Brier score | {:.4} |\n| AURC | {:.4} |\n",
+                acc.overall_accuracy * 100.0,
+                acc.labeled_sample_count,
+                acc.soft_accuracy * 100.0,
+                acc.expected_calibration_error,
+                acc.brier_score,
+                acc.aurc
+            ));
+        }
+        md.push_str(&format!(
+            "| Latency p50 / p95 / p99 | {:.2} / {:.2} / {:.2} ms |\n| Throughput | {:.1} items/s |\n| Escalation rate | {:.1}% |\n\n## Questions\n\n| Question | Type | Accuracy | Macro-F1 | AURC | Escalate |\n|---|---|---|---|---|---|\n",
+            report.speed.latency_p50_ms,
+            report.speed.latency_p95_ms,
+            report.speed.latency_p99_ms,
+            report.performance.throughput_items_per_sec,
+            report.uncertainty.act_escalate_rate * 100.0
+        ));
+        let opt = |v: Option<f64>, pct: bool| match v {
+            Some(x) if pct => format!("{:.1}%", x * 100.0),
+            Some(x) => format!("{x:.3}"),
+            None => "n/a".to_string(),
+        };
+        for (qid, q) in &report.questions {
+            md.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} | {:.1}% |\n",
+                cell(qid),
+                q.question_type,
+                opt(q.accuracy, true),
+                opt(q.macro_f1, false),
+                opt(q.aurc, false),
+                q.act_escalate_rate * 100.0
+            ));
+        }
+        for (qid, q) in &report.questions {
+            if q.labels.is_empty() {
+                continue;
+            }
+            md.push_str(&format!(
+                "\n### `{}`\n\n| Label | Support | Precision | Recall | F1 |\n|---|---|---|---|---|\n",
+                cell(qid)
+            ));
+            for l in &q.labels {
+                md.push_str(&format!(
+                    "| {} | {} | {:.3} | {:.3} | {:.3} |\n",
+                    cell(&l.label),
+                    l.support,
+                    l.precision,
+                    l.recall,
+                    l.f1
+                ));
+            }
+            if !q.confused_pairs.is_empty() {
+                md.push_str("\nMost confused (true label -> predicted):\n\n");
+                for c in &q.confused_pairs {
+                    md.push_str(&format!(
+                        "- {} -> {}: {}\n",
+                        cell(&c.truth),
+                        cell(&c.predicted),
+                        c.count
+                    ));
+                }
+            }
+            if !q.risk_coverage.is_empty() {
+                md.push_str("\n| Coverage | Accuracy |\n|---|---|\n");
+                for p in &q.risk_coverage {
+                    md.push_str(&format!(
+                        "| {:.0}% | {:.1}% |\n",
+                        p.coverage * 100.0,
+                        p.accuracy * 100.0
+                    ));
+                }
+            }
+        }
+        md
     }
 
     /// Renders the statistics report as formatted JSON string.
@@ -826,11 +922,12 @@ impl StatsEngine {
     pub fn format_compact(report: &SystemStatsReport) -> String {
         let acc_str = if let Some(acc) = &report.accuracy {
             format!(
-                "ACC: {:.1}% (Soft: {:.1}%, ECE: {:.3}, Brier: {:.3})",
+                "ACC: {:.1}% (Soft: {:.1}%, ECE: {:.3}, Brier: {:.3}, AURC: {:.3})",
                 acc.overall_accuracy * 100.0,
                 acc.soft_accuracy * 100.0,
                 acc.expected_calibration_error,
-                acc.brier_score
+                acc.brier_score,
+                acc.aurc
             )
         } else {
             "ACC: N/A (unlabeled)".into()
@@ -924,20 +1021,6 @@ impl StatsEngine {
             ),
         ];
 
-        if let Some(c) = &report.performance.cache_summary {
-            rows.push((
-                "performance",
-                "cache_hit_rate",
-                format!("{:.2}", c.hit_rate_pct),
-                "%",
-            ));
-            rows.push((
-                "performance",
-                "cache_speedup",
-                format!("{:.2}", c.speedup_ratio),
-                "x",
-            ));
-        }
         if let Some(acc) = &report.accuracy {
             rows.extend([
                 (
@@ -964,6 +1047,7 @@ impl StatsEngine {
                     format!("{:.4}", acc.brier_score),
                     "score",
                 ),
+                ("accuracy", "aurc", format!("{:.4}", acc.aurc), "area"),
             ]);
         }
         rows.extend([
@@ -996,6 +1080,19 @@ impl StatsEngine {
         for (cat, met, val, unit) in rows {
             let _ = wtr.write_record([cat, met, &val, unit]);
         }
+        for (qid, q) in &report.questions {
+            let category = format!("question:{qid}");
+            for (metric, value) in [
+                ("macro_f1", q.macro_f1),
+                ("weighted_f1", q.weighted_f1),
+                ("aurc", q.aurc),
+            ] {
+                if let Some(v) = value {
+                    let _ =
+                        wtr.write_record([category.as_str(), metric, &format!("{v:.4}"), "ratio"]);
+                }
+            }
+        }
         String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
     }
 
@@ -1007,16 +1104,14 @@ impl StatsEngine {
             std::fs::create_dir_all(parent)?;
         }
 
-        let is_csv = destination
+        let extension = destination
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|s| s.eq_ignore_ascii_case("csv"))
-            .unwrap_or(false);
-
-        let content = if is_csv {
-            Self::format_csv(report)
-        } else {
-            Self::format_json(report)?
+            .map(str::to_ascii_lowercase);
+        let content = match extension.as_deref() {
+            Some("csv") => Self::format_csv(report),
+            Some("md") => Self::format_markdown(report),
+            _ => Self::format_json(report)?,
         };
 
         std::fs::write(destination, content).with_context(|| {
@@ -1041,6 +1136,105 @@ fn interpolated_percentile(sorted: &[f64], pct: f64) -> f64 {
     let upper = rank.ceil() as usize;
     let weight = rank - lower as f64;
     sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+}
+
+/// Precision, recall, and F1 for every label that occurs as a true or a predicted label.
+fn label_stats(truth_predicted: &[(String, String)]) -> Vec<LabelStats> {
+    // (support, predicted, true positives) per label.
+    let mut counts: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
+    for (truth, predicted) in truth_predicted {
+        counts.entry(truth).or_default().0 += 1;
+        counts.entry(predicted).or_default().1 += 1;
+        if truth == predicted {
+            counts.entry(truth).or_default().2 += 1;
+        }
+    }
+    let ratio = |n: usize, d: usize| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+    counts
+        .into_iter()
+        .map(|(label, (support, predicted, tp))| {
+            let precision = ratio(tp, predicted);
+            let recall = ratio(tp, support);
+            let f1 = if precision + recall > 0.0 {
+                2.0 * precision * recall / (precision + recall)
+            } else {
+                0.0
+            };
+            LabelStats {
+                label: label.to_string(),
+                support,
+                predicted,
+                precision,
+                recall,
+                f1,
+            }
+        })
+        .collect()
+}
+
+/// Macro F1 over the labels that occur as true labels, and F1 weighted by their support.
+fn f1_averages(labels: &[LabelStats]) -> (Option<f64>, Option<f64>) {
+    let present: Vec<&LabelStats> = labels.iter().filter(|l| l.support > 0).collect();
+    if present.is_empty() {
+        return (None, None);
+    }
+    let total: usize = present.iter().map(|l| l.support).sum();
+    let macro_f1 = present.iter().map(|l| l.f1).sum::<f64>() / present.len() as f64;
+    let weighted = present.iter().map(|l| l.f1 * l.support as f64).sum::<f64>() / total as f64;
+    (Some(macro_f1), Some(weighted))
+}
+
+/// The `k` most frequent mistakes, as (true label, predicted label) counts.
+fn confused_pairs(truth_predicted: &[(String, String)], k: usize) -> Vec<ConfusedPair> {
+    let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (truth, predicted) in truth_predicted {
+        if truth != predicted {
+            *counts.entry((truth, predicted)).or_default() += 1;
+        }
+    }
+    let mut pairs: Vec<ConfusedPair> = counts
+        .into_iter()
+        .map(|((truth, predicted), count)| ConfusedPair {
+            truth: truth.to_string(),
+            predicted: predicted.to_string(),
+            count,
+        })
+        .collect();
+    pairs.sort_by_key(|p| std::cmp::Reverse(p.count));
+    pairs.truncate(k);
+    pairs
+}
+
+/// Rank items by confidence, most confident first. Returns the area under the risk-coverage
+/// curve (the mean error rate over every coverage level from 1 item to all items, so 0 is
+/// perfect) and the accuracy at 10%, 20%, ..., 100% coverage.
+fn risk_coverage(confidence_correct: &[(f64, bool)]) -> (Option<f64>, Vec<CoveragePoint>) {
+    if confidence_correct.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut ranked = confidence_correct.to_vec();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let n = ranked.len();
+    let mut correct = 0;
+    let mut risk_sum = 0.0;
+    let mut accuracy_at = Vec::with_capacity(n);
+    for (k, &(_, is_correct)) in ranked.iter().enumerate() {
+        correct += usize::from(is_correct);
+        let accuracy = correct as f64 / (k + 1) as f64;
+        risk_sum += 1.0 - accuracy;
+        accuracy_at.push(accuracy);
+    }
+    let points = (1..=10)
+        .map(|tenth| {
+            let coverage = tenth as f64 / 10.0;
+            let k = ((coverage * n as f64).ceil() as usize).clamp(1, n);
+            CoveragePoint {
+                coverage,
+                accuracy: accuracy_at[k - 1],
+            }
+        })
+        .collect();
+    (Some(risk_sum / n as f64), points)
 }
 
 /// Compute sample standard deviation.
@@ -1112,8 +1306,7 @@ mod tests {
         let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
         let engine = StatsEngine::new(classifier)
             .with_iterations(2)
-            .with_warmup(1)
-            .with_cache(true, 0.92);
+            .with_warmup(1);
 
         let report = engine.evaluate(&items, &questions).unwrap();
 
@@ -1146,5 +1339,52 @@ mod tests {
 
         let csv = StatsEngine::format_csv(&report);
         assert!(csv.contains("latency_p50"));
+
+        let md = StatsEngine::format_markdown(&report);
+        assert!(md.contains("## Summary"));
+        assert!(md.contains("| Label | Support | Precision | Recall | F1 |"));
+        assert!(report.questions["dept"].macro_f1.is_some());
+        assert!(report.questions["dept"].aurc.is_some());
+    }
+
+    #[test]
+    fn per_label_metrics_match_hand_counts() {
+        let pairs: Vec<(String, String)> = [("a", "a"), ("a", "b"), ("b", "b"), ("b", "b")]
+            .iter()
+            .map(|(t, p)| (t.to_string(), p.to_string()))
+            .collect();
+        let labels = label_stats(&pairs);
+        // a: support 2, predicted 1, 1 correct. b: support 2, predicted 3, 2 correct.
+        assert_eq!((labels[0].support, labels[0].predicted), (2, 1));
+        assert!((labels[0].f1 - 2.0 / 3.0).abs() < 1e-9);
+        assert!((labels[1].f1 - 0.8).abs() < 1e-9);
+        let (macro_f1, weighted) = f1_averages(&labels);
+        assert!((macro_f1.unwrap() - (2.0 / 3.0 + 0.8) / 2.0).abs() < 1e-9);
+        assert!((weighted.unwrap() - macro_f1.unwrap()).abs() < 1e-9);
+        let confused = confused_pairs(&pairs, 5);
+        assert_eq!(confused.len(), 1);
+        assert_eq!(
+            (confused[0].truth.as_str(), confused[0].predicted.as_str()),
+            ("a", "b")
+        );
+    }
+
+    #[test]
+    fn risk_coverage_ranks_by_confidence() {
+        // Ranked: correct, wrong, correct, correct. Accuracy at k = 1, 1/2, 2/3, 3/4.
+        let (aurc, points) = risk_coverage(&[(0.7, true), (0.9, true), (0.6, true), (0.8, false)]);
+        let expected = (0.0 + 0.5 + 1.0 / 3.0 + 0.25) / 4.0;
+        assert!((aurc.unwrap() - expected).abs() < 1e-9);
+        assert_eq!(points.len(), 10);
+        assert!(
+            (points[0].accuracy - 1.0).abs() < 1e-9,
+            "10% coverage is the top item"
+        );
+        assert!(
+            (points[4].accuracy - 0.5).abs() < 1e-9,
+            "50% coverage is the top 2"
+        );
+        assert!((points[9].accuracy - 0.75).abs() < 1e-9);
+        assert_eq!(risk_coverage(&[]).0, None);
     }
 }

@@ -18,7 +18,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes))
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

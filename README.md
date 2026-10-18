@@ -281,16 +281,18 @@ lemmata info --checkpoint english
 ```
 
 ### 10. Ensembles (`lemmata ensemble`)
-Runs several checkpoints on the same inputs and averages their probabilities with weights (a linear pool). Each model's saved calibration applies first. The disagreement score is the mutual information between the members, so a high score flags an item where the models disagree:
+Runs several checkpoints on the same inputs and averages their probabilities with weights (a linear pool). Each model's saved calibration applies first, and lemmata warns about a member without one. The disagreement score is the mutual information between the members (in nats), so a high score flags an item where the models disagree. Without `--checkpoints`, the ensemble uses the installed ones of `english`, `deberta-v3`, and `modernbert-zeroshot`: one per model family, because similar members disagree less.
 
 ```bash
-# Pool three checkpoints and flag the items where they disagree
+# Pool the default members and flag the items where they disagree
+lemmata ensemble --file data/customer_support.jsonl --schema schema/questions.json
+
+# Fit the member weights on labelled data (lowest log loss of the true label), then use them
 lemmata ensemble \
   --file data/customer_support.jsonl \
   --schema schema/questions.json \
-  --checkpoints english,multilingual,typed-decisions \
-  --disagreement-threshold 0.15 \
-  --format table
+  --checkpoints english,deberta-v3,modernbert-zeroshot \
+  --fit-weights data/system1_golden_benchmark.jsonl
 ```
 
 ### 11. Automated Schema Induction & Criteria Synthesis (`lemmata schema infer`)
@@ -317,36 +319,32 @@ lemmata classify \
 ```
 
 ### 13. Decision Cache (`lemmata cache`)
-An in-memory cache for one run. The exact tier reuses a decision when the input text and schema repeat. The semantic tier (`--cache-semantic`, off by default) also reuses a decision for similar text, using cosine similarity over hashed 128-d word features. Those features do not come from the model, so a negated sentence can match the original. An admission guard caches only high-confidence, non-escalated decisions:
+`--cache` on `classify` or `taxonomy run` saves each decision on disk (`~/.cache/lemmata`, or `$LEMMATA_CACHE_DIR`) and reuses it in later runs. A decision is reused only for the exact same input text, the same questions, and the same model fingerprint. The fingerprint covers the lemmata version, the backend and device, the model settings (saved calibration included), the probe, and the weights file, so a change to any of them starts a fresh cache. Text is not normalized, because the models are case-sensitive.
 
 ```bash
-# Display cache statistics and hit ratios
+# Second and later runs reuse the saved decisions
+lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --cache --cache-stats
+
+# Show the cache files, or delete them
 lemmata cache stats
-
-# Benchmark exact vs semantic cache lookup latency and speedups
-lemmata cache bench --file data/customer_support.jsonl --schema schema/questions.json
-
-# The cache is not persisted, so this only confirms there is nothing to clear
 lemmata cache clear
 ```
 
 ### 14. Deferral to System 2 (`lemmata defer`)
-Decides which items System 1 keeps and which it defers to System 2 (a larger model or a person). lemmata does not call System 2 itself: `defer run` marks each item as kept or deferred, and your pipeline sends the deferred items on.
+Decides which items System 1 keeps and which it defers to System 2 (a larger model or a person). lemmata does not call System 2 itself: `defer run` marks each item as kept or deferred, and your pipeline sends the deferred items on. An item's risk is 1 minus its least certain top probability.
+
+`defer fit` tests 20 fixed risk thresholds on labelled data. For each one, it computes a one-sided Clopper-Pearson lower bound on the accuracy of the kept items, with a Bonferroni correction across the thresholds. It chooses the loosest threshold whose bound reaches the target. With the default 95% confidence, the kept items reach the target accuracy on new data from the same source with at least that probability ([Learn then Test](https://arxiv.org/abs/2110.01052)). Small files cannot show a high target: 95% accuracy needs at least 117 kept items, all correct, and `fit` says so.
 
 ```bash
-# 1. Tune the risk threshold tau* for a target accuracy on labelled data
-lemmata defer tune \
-  --val-data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --target-accuracy 0.95 \
-  --system2-cost 0.01
+# 1. Fit the threshold on labelled data that you will not test on
+lemmata defer fit \
+  --val-data data/system1_golden_benchmark.jsonl \
+  --schema schema/system1_benchmark_questions.json \
+  --target-accuracy 0.80 \
+  --export-policy policy.json
 
 # 2. Mark each item as kept or deferred
-lemmata defer run \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --risk-threshold 0.45 \
-  --system2-cost 0.01
+lemmata defer run --file data/customer_support.jsonl --schema schema/questions.json --policy policy.json
 ```
 
 ### 15. Signed Decision Receipts & Hash Chain (`lemmata attest`)
@@ -379,7 +377,7 @@ lemmata schema optimize \
 ```
 
 ### 17. Label Taxonomies (`lemmata taxonomy`)
-Solves high-cardinality classification (>20 labels, e.g. Banking77) via a two-stage coarse-to-fine hierarchy:
+Classifies against a label taxonomy: a coarse question first, then a finer question inside the chosen branch, down to 10 levels. At each level the router follows the top `--beam` options (default 2) and scores each path as the product of its probabilities, so a near miss at the coarse level can still reach the right leaf. The best path wins, and the item escalates when that path's probability is below `--path-threshold` (default 0.5).
 
 ```bash
 # 1. Print the taxonomy as a tree with its token budgets
@@ -388,14 +386,15 @@ lemmata taxonomy show --schema schema/banking_hierarchy.json
 # 2. Validate token budgets across all coarse and fine nodes
 lemmata taxonomy validate --schema schema/banking_hierarchy.json
 
-# 3. Classify inputs through the coarse-to-fine taxonomy (also via `lemmata taxonomy run`)
+# 3. Classify inputs through the taxonomy (also via `lemmata taxonomy run`)
 lemmata classify \
   --file data/banking_tickets.jsonl \
   --taxonomy schema/banking_hierarchy.json \
-  --coarse-threshold 0.50 \
+  --beam 2 \
+  --path-threshold 0.50 \
   --format table
 
-# 4. Benchmark coarse vs fine latency, escalation rates, and throughput
+# 4. Benchmark latency, escalation rate, and throughput
 lemmata taxonomy bench --schema schema/banking_hierarchy.json --file data/banking_tickets.jsonl
 ```
 
@@ -473,12 +472,13 @@ lemmata classify -c eurobert --text "Stocks fell after the earnings report" --sc
 ```
 
 ### 20. Evaluation Report (`lemmata report`)
-Evaluates end-to-end system telemetry across **Speed & Latency Distributions**, **Throughput & Cache Efficiency**, and **Decision Accuracy & Calibration Quality**:
+A full evaluation of one checkpoint on one labelled file: accuracy, ECE, Brier score, latency percentiles, and throughput. For each choice question it adds per-label precision, recall, and F1, macro-F1 and weighted F1, the most confused label pairs, and the risk-coverage curve with its area (AURC, lower is better). `lemmata test` stays the quick accuracy check, and `lemmata bench` the speed check.
 
 ```bash
-# Full diagnostic report or compact one-line summary
-lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format table
+# Full report, a one-line summary, or Markdown for a PR or model card
+lemmata report --file data/customer_support.jsonl --schema schema/questions.json
 lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format compact
+lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format md --output report.md
 ```
 
 ## 📄 License

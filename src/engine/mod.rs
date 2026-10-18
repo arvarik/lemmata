@@ -8,6 +8,7 @@ pub mod consensus;
 pub mod evaluator;
 pub mod experiment;
 pub mod explain;
+pub mod features;
 pub mod guardrail;
 pub mod hierarchical;
 pub mod learn;
@@ -26,7 +27,8 @@ pub use attest::{
     schema_digest,
 };
 pub use cache::{
-    CacheLookupResult, CacheStats, DecisionCache, SemanticCacheConfig, compute_schema_hash,
+    CacheFileSummary, CacheStats, DecisionCache, cache_dir, cache_summary, clear_cache,
+    compute_schema_hash, fingerprint,
 };
 pub use calibrate::{
     BucketCalibrationReport, CalibratedAgentConfig, CalibrationLoss, CalibrationMetadata,
@@ -34,7 +36,8 @@ pub use calibrate::{
     parse_cost_weights,
 };
 pub use cascade::{
-    CascadeConfig, CascadeDecision, CascadePolicy, CascadeRouter, CascadeSweepPoint, SystemTier,
+    CascadeConfig, CascadeDecision, CascadeRouter, DeferFit, DeferPoint, DeferPolicy, RISK_GRID,
+    SystemTier, binomial_lower_bound,
 };
 pub use classifier::{ClassifierConfig, LayaClassifier};
 pub use conformal::{ConformalEngine, ConformalReport};
@@ -48,10 +51,11 @@ pub use hierarchical::{
 };
 pub use learn::{
     CurriculumPhase, GlossaryEntry, LiveLabOutput, PhaseLesson, QuizQuestion, ReadingResource,
-    WorkflowRecipe, build_all_quiz_questions, build_glossary, build_phase_lesson,
+    SAMPLE_FILES, WorkflowRecipe, build_all_quiz_questions, build_glossary, build_phase_lesson,
     build_reading_list, build_workflow_recipes, print_all_phases, print_curriculum_overview,
     print_glossary, print_phase_lesson, print_reading_list, print_workflow_guide,
     run_interactive_session, run_interactive_session_with_reader, run_quiz_non_interactive,
+    write_sample_files,
 };
 pub use learn_visuals::{
     c_blue, c_bold, c_cyan, c_dim, c_green, c_magenta, c_red, c_strike_red, c_yellow,
@@ -75,8 +79,8 @@ pub use slicing::{
     extract_item_slice, print_arena_slice_matrix, print_slice_report,
 };
 pub use stats::{
-    AccuracyStats, CacheStatsSummary, PerformanceStats, QuestionStats, SpeedStats, StatsEngine,
-    StatsEngineConfig, SystemStatsReport, UncertaintyStats,
+    AccuracyStats, ConfusedPair, CoveragePoint, LabelStats, PerformanceStats, QuestionStats,
+    SpeedStats, StatsEngine, StatsEngineConfig, SystemStatsReport, UncertaintyStats,
 };
 pub use synthesis::{
     InferredSchemaResult, SchemaKnapsackOptimizer, SchemaOptimizationResult, SchemaSynthesizer,

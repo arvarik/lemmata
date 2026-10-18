@@ -8,10 +8,10 @@ use std::str::FromStr;
 
 use lemmata::benchmark::BenchmarkRunner;
 use lemmata::cli::{
-    AttestArgs, AttestCommands, Backend, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, Cli,
-    Commands, CompareArgs, CompletionsArgs, ConformalArgs, DeferArgs, DeferCommands, DownloadArgs,
+    AttestArgs, AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, Cli, Commands,
+    CompareArgs, CompletionsArgs, ConformalArgs, DeferArgs, DeferCommands, DownloadArgs,
     EnsembleArgs, ExplainArgs, GuideArgs, InfoArgs, InspectArgs, LearnArgs, OutputFormat,
-    ReportArgs, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
+    ReportArgs, ReportFormat, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
     SchemaValidateArgs, TaxonomyCommands, TestArgs,
 };
 use lemmata::datasource::{DataItem, DataSource};
@@ -19,7 +19,7 @@ use lemmata::engine::{
     AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner, CascadeConfig,
     CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine, DecisionCache, Evaluator,
     ExperimentRunner, HierarchicalRouter, LayaClassifier, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, compute_schema_hash, parse_cost_weights,
+    SchemaSynthesizer, StatsEngine, compute_schema_hash, parse_cost_weights,
 };
 use lemmata::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
 use lemmata::{
@@ -345,8 +345,8 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
             hier_path,
             source,
             checkpoint,
-            args.coarse_threshold,
-            args.escalate_threshold,
+            args.beam,
+            args.path_threshold,
             args.cache,
             args.escalate_only,
             args.format,
@@ -399,29 +399,20 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
     }
     let classifier = LayaClassifier::new(config);
 
-    let mut cache = args.cache.then(|| {
-        DecisionCache::new(SemanticCacheConfig {
-            semantic: args.cache_semantic,
-            similarity_threshold: args.cache_threshold,
-            ttl_seconds: args.cache_ttl,
-            ..Default::default()
-        })
-    });
+    let mut cache = if args.cache {
+        Some(DecisionCache::open(&classifier)?)
+    } else {
+        None
+    };
 
     let schema_hash = compute_schema_hash(&questions);
     let mut raw_results = Vec::new();
 
     for item in &items {
         let text = item_text(item)?;
-        if let Some(c) = &mut cache {
-            match c.lookup(&text, &schema_hash) {
-                lemmata::engine::CacheLookupResult::ExactHit(res)
-                | lemmata::engine::CacheLookupResult::SemanticHit { result: res, .. } => {
-                    raw_results.push((item.id.clone(), res));
-                    continue;
-                }
-                lemmata::engine::CacheLookupResult::Miss => {}
-            }
+        if let Some(res) = cache.as_mut().and_then(|c| c.lookup(&text, &schema_hash)) {
+            raw_results.push((item.id.clone(), res));
+            continue;
         }
 
         let res = classifier.classify(&item.state, &questions)?;
@@ -432,19 +423,18 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
         raw_results.push((item.id.clone(), res));
     }
 
-    if args.cache_stats
-        && let Some(c) = &cache
-    {
-        let stats = c.stats();
-        eprintln!(
-            "\n📊 Semantic Decision Cache Statistics:\n   Total Lookups : {}\n   Exact Hits    : {}\n   Semantic Hits : {}\n   Misses        : {}\n   Hit Rate      : {:.2}%\n   Cached Items  : {}",
-            stats.total_lookups(),
-            stats.exact_hits,
-            stats.semantic_hits,
-            stats.misses,
-            stats.hit_rate() * 100.0,
-            c.len()
-        );
+    if let Some(c) = &cache {
+        c.save()?;
+        if args.cache_stats {
+            let stats = c.stats();
+            eprintln!(
+                "\n📊 Decision cache: {} hits, {} misses ({:.1}% hit rate), {} decisions saved",
+                stats.hits,
+                stats.misses,
+                stats.hit_rate() * 100.0,
+                c.len()
+            );
+        }
     }
 
     if let Some(path) = &args.receipts {
@@ -1458,20 +1448,52 @@ fn handle_schema_optimize(args: SchemaOptimizeArgs) -> Result<()> {
 }
 
 fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
-    let ckpt_names: Vec<&str> = args
-        .checkpoints
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if ckpt_names.is_empty() {
-        bail!("At least one checkpoint must be specified for consensus");
+    use lemmata::model::native::{Backend, backend, native_available};
+    let checkpoints: Vec<Checkpoint> = match &args.checkpoints {
+        Some(list) => list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_checkpoint)
+            .collect::<Result<_>>()?,
+        None => {
+            let families = [
+                Checkpoint::English,
+                Checkpoint::DebertaV3ZeroShot,
+                Checkpoint::ModernBertZeroShot,
+            ];
+            let installed: Vec<Checkpoint> = families
+                .into_iter()
+                .filter(|&c| backend() == Backend::Mock || native_available(c))
+                .collect();
+            if installed.len() < 2 {
+                bail!(
+                    "An ensemble needs 2 or more checkpoints, and {} of english, deberta-v3, and modernbert-zeroshot are installed. Download one with `lemmata download --checkpoint deberta-v3`, or pass --checkpoints.",
+                    installed.len()
+                );
+            }
+            installed
+        }
+    };
+    if checkpoints.is_empty() {
+        bail!("At least one checkpoint must be specified for the ensemble");
     }
+    if backend() != Backend::Mock {
+        for &c in &checkpoints {
+            if lemmata::engine::load_checkpoint_calibration(c).is_none() {
+                eprintln!(
+                    "⚠️  {c} has no saved calibration, so its probabilities may be over-confident. Run `lemmata calibrate -c {} --persist-to-model` on labelled data.",
+                    c.repo_id()
+                );
+            }
+        }
+    }
+    let ckpt_list = checkpoints
+        .iter()
+        .map(|c| c.repo_id())
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    let checkpoints: Vec<Checkpoint> = ckpt_names
-        .into_iter()
-        .map(parse_checkpoint)
-        .collect::<Result<_>>()?;
     let questions = load_questions_or_inline(args.schema.as_deref(), "Classify topic")?;
     let items = resolve_data_source(
         &args.data_dir,
@@ -1482,7 +1504,7 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
     .read_items()?;
 
     if items.is_empty() {
-        eprintln!("⚠️  No data items found for consensus evaluation.");
+        eprintln!("⚠️  No data items found for the ensemble.");
         return Ok(());
     }
 
@@ -1494,15 +1516,34 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
             .collect();
         engine = engine.with_weights(weights)?;
     }
+    if let Some(path) = &args.fit_weights {
+        let labelled = lemmata::datasource::FileSource::new(path).read_items()?;
+        let members = engine.member_results(&labelled, &questions)?;
+        let fit = engine.fit_weights(&labelled, &questions, &members)?;
+        eprintln!(
+            "⚖️  Fitted weights on {} labelled decisions: {} (log loss {:.4}, equal weights {:.4}). Reuse them with -w {}",
+            fit.labelled_decisions,
+            fit.checkpoints
+                .iter()
+                .zip(&fit.weights)
+                .map(|(c, w)| format!("{c}={w:.2}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            fit.log_loss,
+            fit.equal_weights_log_loss,
+            fit.weights
+                .iter()
+                .map(|w| format!("{w:.2}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        engine = engine.with_weights(fit.weights)?;
+    }
 
     let quiet_stdout = args.json || is_machine_format(args.format);
     log_status(
         quiet_stdout,
-        format!(
-            "🏛️  Evaluating {} items across {} checkpoints with consensus engine...",
-            items.len(),
-            args.checkpoints
-        ),
+        format!("🏛️  Pooling {} items across {}...", items.len(), ckpt_list),
     );
 
     let results = engine.evaluate_batch(&items, &questions)?;
@@ -1511,7 +1552,7 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
         write_json_file(out_path, &results)?;
         log_status(
             quiet_stdout,
-            format!("🏛️  Saved consensus results to: {}", out_path.display()),
+            format!("🏛️  Saved ensemble results to: {}", out_path.display()),
         );
     }
 
@@ -1531,7 +1572,7 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
                     "question_id",
                     "prediction",
                     "confidence",
-                    "epistemic_jsd",
+                    "disagreement",
                     "status",
                 ])?;
                 for r in &results {
@@ -1541,7 +1582,7 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
                             qid.as_str(),
                             qc.consensus_prediction.as_str(),
                             &format!("{:.4}", qc.consensus_confidence),
-                            &format!("{:.4}", qc.epistemic_uncertainty),
+                            &format!("{:.4}", qc.disagreement),
                             qc.status.badge(),
                         ])?;
                     }
@@ -1565,186 +1606,127 @@ fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
 }
 
 fn handle_cache(args: CacheArgs) -> Result<()> {
+    let dir = lemmata::engine::cache_dir();
     match args.action {
-        CacheCommands::Stats => {
-            println!(
-                "\n📊 Decision Cache Defaults:\n   Scope              : In memory, for one lemmata run (nothing is persisted)\n   Exact tier         : Always on with --cache\n   Semantic tier      : Off unless --cache-semantic (cosine over hashed 128-d word features, threshold 0.92)\n   Capacity Limit     : 10,000 entries\n   Default TTL        : 86,400s (24 hours)\n   Admission Filter   : confidence >= 0.70, act_probability <= 0.50"
-            );
-        }
-        CacheCommands::Bench(bench_args) => {
-            let schema =
-                load_questions_or_inline(bench_args.schema.as_deref(), "Department triage")?;
-            let items = lemmata::datasource::FileSource::new(&bench_args.file).read_items()?;
-            if items.is_empty() {
-                bail!("File contains no items: {}", bench_args.file.display());
+        CacheCommands::Stats { json } => {
+            let files = lemmata::engine::cache_summary(&dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&files)?);
+                return Ok(());
             }
-
-            let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-            let mut cache = DecisionCache::new(SemanticCacheConfig {
-                semantic: true,
-                similarity_threshold: bench_args.threshold,
-                ..Default::default()
-            });
-
-            println!(
-                "\n⚡ Benchmarking Semantic Decision Cache on {} items...",
-                items.len()
-            );
-            let schema_hash = compute_schema_hash(&schema);
-
-            let start_cold = std::time::Instant::now();
-            for item in &items {
-                let text = item_text(item)?;
-                let res = classifier.classify(&item.state, &schema)?;
-                cache.insert(&text, &schema_hash, &res);
+            println!("📦 Decision cache: {}", dir.display());
+            if files.is_empty() {
+                println!("   Empty. `classify --cache` and `taxonomy run --cache` fill it.");
+                return Ok(());
             }
-            let cold_time = start_cold.elapsed();
-
-            let start_warm = std::time::Instant::now();
-            let mut hits = 0;
-            for item in &items {
-                let text = item_text(item)?;
-                if matches!(
-                    cache.lookup(&text, &schema_hash),
-                    lemmata::engine::CacheLookupResult::ExactHit(_)
-                        | lemmata::engine::CacheLookupResult::SemanticHit { .. }
-                ) {
-                    hits += 1;
-                }
-            }
-            let warm_time = start_warm.elapsed();
-
-            let cold_per_item = cold_time.as_secs_f64() * 1000.0 / items.len() as f64;
-            let warm_per_item = warm_time.as_secs_f64() * 1000.0 / items.len() as f64;
-            let speedup = cold_per_item / warm_per_item.max(0.001);
-
             let mut table = Table::new();
-            table.set_header(vec![
-                Cell::new("Cache State").fg(Color::Cyan),
-                Cell::new("Total Latency").fg(Color::White),
-                Cell::new("Per-Item Latency").fg(Color::Yellow),
-                Cell::new("Hit Rate").fg(Color::Green),
-                Cell::new("Speedup").fg(Color::Magenta),
-            ]);
-            table.add_row(vec![
-                Cell::new("Cold (Model Forward Pass)"),
-                Cell::new(format!("{:.2} ms", cold_time.as_secs_f64() * 1000.0)),
-                Cell::new(format!("{:.2} ms", cold_per_item)),
-                Cell::new("0.0%"),
-                Cell::new("1.0x (Baseline)"),
-            ]);
-            table.add_row(vec![
-                Cell::new("Warm (Semantic Decision Cache)"),
-                Cell::new(format!("{:.2} ms", warm_time.as_secs_f64() * 1000.0)),
-                Cell::new(format!("{:.4} ms", warm_per_item)),
-                Cell::new(format!(
-                    "{:.1}%",
-                    (hits as f64 / items.len() as f64) * 100.0
-                )),
-                Cell::new(format!("{:.1}x Faster", speedup)),
-            ]);
+            table.set_header(vec!["Model fingerprint", "Decisions", "Size"]);
+            for f in &files {
+                table.add_row(vec![
+                    f.fingerprint[..16].to_string(),
+                    f.entries.to_string(),
+                    format!("{:.1} KB", f.bytes as f64 / 1024.0),
+                ]);
+            }
             println!("{table}");
+            println!(
+                "   {} files. A model, setting, or calibration change starts a new file.",
+                files.len()
+            );
         }
-        CacheCommands::Clear => println!(
-            "🧹 Nothing to clear: the decision cache lives in memory and ends with each lemmata run."
-        ),
+        CacheCommands::Clear => {
+            let removed = lemmata::engine::clear_cache(&dir)?;
+            println!("🧹 Deleted {removed} cache files from {}", dir.display());
+        }
     }
     Ok(())
 }
 
-fn handle_defer_tune(tune_args: lemmata::cli::DeferTuneArgs, force_sweep: bool) -> Result<()> {
-    let checkpoint = parse_checkpoint(&tune_args.checkpoint)?;
-    let questions = load_questions_from_file(&tune_args.schema)?;
-    let items = lemmata::datasource::FileSource::new(&tune_args.val_data).read_items()?;
+fn handle_defer_fit(args: lemmata::cli::DeferFitArgs) -> Result<()> {
+    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let questions = load_questions_from_file(&args.schema)?;
+    let items = lemmata::datasource::FileSource::new(&args.val_data).read_items()?;
     let classifier = LayaClassifier::with_checkpoint(checkpoint);
-
-    if force_sweep || tune_args.sweep {
-        log_status(
-            tune_args.json,
-            format!(
-                "📈 Sweeping System 1 / System 2 Pareto frontier on {} samples (SLA >= {:.1}%)...",
-                items.len(),
-                tune_args.target_accuracy * 100.0
-            ),
-        );
-        let points = CascadeRouter::sweep_pareto(
-            &items,
-            &questions,
-            &classifier,
-            tune_args.target_accuracy,
-            tune_args.system2_cost,
-        )?;
-        if tune_args.json {
-            println!("{}", serde_json::to_string_pretty(&points)?);
-        } else {
-            let mut table = Table::new();
-            table.set_header(vec![
-                Cell::new("Risk τ").fg(Color::Cyan),
-                Cell::new("S1 Coverage").fg(Color::Green),
-                Cell::new("S2 Escalate").fg(Color::Yellow),
-                Cell::new("Expected Acc").fg(Color::White),
-                Cell::new("Cost / 1k").fg(Color::Blue),
-                Cell::new("LLM Savings").fg(Color::Magenta),
-                Cell::new("SLA Status").fg(Color::Green),
-            ]);
-            for p in &points {
-                let status = if p.is_optimal {
-                    "⭐ Optimal SLA"
-                } else if p.meets_sla {
-                    "✅ Meets SLA"
-                } else {
-                    "Below SLA"
-                };
-                table.add_row(vec![
-                    Cell::new(format!("{:.2}", p.threshold)),
-                    Cell::new(format!("{:.1}%", p.system1_coverage_rate * 100.0)),
-                    Cell::new(format!("{:.1}%", p.system2_escalation_rate * 100.0)),
-                    Cell::new(format!("{:.2}%", p.expected_accuracy * 100.0)),
-                    Cell::new(format!("${:.2}", p.estimated_cost_per_1000)),
-                    Cell::new(format!("-{:.1}%", p.cost_savings_percent)),
-                    Cell::new(status),
-                ]);
-            }
-            println!("\n⚖️  System 1 / System 2 Pareto Frontier Sweep:\n{table}\n");
-        }
-        return Ok(());
-    }
-
     log_status(
-        tune_args.json,
+        args.json,
         format!(
-            "📈 Tuning Pareto-optimal System 1 / System 2 cascade on {} samples...",
-            items.len()
+            "📈 Fitting a deferral threshold on {} items (target {:.1}% accuracy at {:.0}% confidence)...",
+            items.len(),
+            args.target_accuracy * 100.0,
+            args.confidence * 100.0
         ),
     );
-    let policy = CascadeRouter::tune_pareto(
+    let fit = CascadeRouter::fit(
         &items,
         &questions,
         &classifier,
-        tune_args.target_accuracy,
-        tune_args.system2_cost,
+        args.target_accuracy,
+        args.confidence,
+        args.system2_cost,
     )?;
 
-    if let Some(export_path) = &tune_args.export_policy {
-        write_json_file(export_path, &policy)?;
+    if let (Some(path), Some(policy)) = (&args.export_policy, &fit.policy) {
+        write_json_file(path, policy)?;
         log_status(
-            tune_args.json,
-            format!("💾 Exported cascade policy to: {}", export_path.display()),
+            args.json,
+            format!("💾 Policy written to: {}", path.display()),
         );
     }
 
-    if tune_args.json {
-        println!("{}", serde_json::to_string_pretty(&policy)?);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&fit)?);
     } else {
+        let mut table = Table::new();
+        table.set_header(vec![
+            Cell::new("Risk τ").fg(Color::Cyan),
+            Cell::new("Kept").fg(Color::White),
+            Cell::new("Coverage").fg(Color::Green),
+            Cell::new("Kept Accuracy").fg(Color::White),
+            Cell::new("Lower Bound").fg(Color::Yellow),
+            Cell::new("Cost / 1k").fg(Color::Blue),
+            Cell::new("Status").fg(Color::Green),
+        ]);
+        let chosen = fit.policy.as_ref().map(|p| p.threshold);
+        for p in &fit.points {
+            let status = if chosen == Some(p.threshold) {
+                "⭐ Chosen"
+            } else if p.certified {
+                "✅ Reaches target"
+            } else {
+                ""
+            };
+            table.add_row(vec![
+                Cell::new(format!("{:.3}", p.threshold)),
+                Cell::new(p.kept),
+                Cell::new(format!("{:.1}%", p.coverage * 100.0)),
+                Cell::new(format!("{:.1}%", p.kept_accuracy * 100.0)),
+                Cell::new(format!("{:.1}%", p.accuracy_lower_bound * 100.0)),
+                Cell::new(format!("${:.2}", p.deferral_cost_per_1000)),
+                Cell::new(status),
+            ]);
+        }
         println!(
-            "\n⚖️  Pareto Frontier Optimization Results:\n   Target Accuracy SLA   : {:.1}%\n   Expected Hybrid Acc   : {:.2}%\n   Optimal Threshold τ*  : {:.2}\n   System 1 Fast Coverage: {:.1}%\n   System 2 Escalation   : {:.1}%\n   Cost Savings vs LLM   : -{:.1}%\n   Estimated Cost / 1k   : ${:.2}",
-            policy.target_accuracy * 100.0,
-            policy.expected_accuracy * 100.0,
-            policy.optimal_threshold,
-            policy.system1_coverage_rate * 100.0,
-            policy.system2_escalation_rate * 100.0,
-            policy.cost_savings_percent,
-            policy.estimated_cost_per_1000
+            "\n⚖️  Deferral thresholds on {} labelled items:\n{table}",
+            fit.labelled_items
+        );
+        if let Some(p) = &fit.policy {
+            println!(
+                "\nChosen τ = {:.3}: System 1 keeps {:.1}% of items. With {:.0}% confidence, their accuracy is at least {:.1}%. {:.1}% go to System 2.",
+                p.threshold,
+                p.coverage * 100.0,
+                p.confidence * 100.0,
+                p.accuracy_lower_bound * 100.0,
+                p.deferral_rate * 100.0
+            );
+        }
+    }
+    if fit.policy.is_none() {
+        bail!(
+            "No threshold reaches {:.1}% accuracy at {:.0}% confidence on {} labelled items. Even with every kept item correct, that needs at least {} kept items. Add labelled data, or lower --target-accuracy or --confidence.",
+            args.target_accuracy * 100.0,
+            args.confidence * 100.0,
+            fit.labelled_items,
+            fit.min_items_needed
         );
     }
     Ok(())
@@ -1752,10 +1734,27 @@ fn handle_defer_tune(tune_args: lemmata::cli::DeferTuneArgs, force_sweep: bool) 
 
 fn handle_defer(args: DeferArgs) -> Result<()> {
     match args.action {
-        DeferCommands::Tune(tune_args) => handle_defer_tune(tune_args, false)?,
-        DeferCommands::Sweep(tune_args) => handle_defer_tune(tune_args, true)?,
+        DeferCommands::Fit(fit_args) => handle_defer_fit(fit_args)?,
         DeferCommands::Run(run_args) => {
             let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
+            let risk_threshold = match (&run_args.policy, run_args.risk_threshold) {
+                (Some(path), _) => {
+                    let policy: lemmata::engine::DeferPolicy =
+                        serde_json::from_reader(std::fs::File::open(path)?)?;
+                    if policy.checkpoint != checkpoint.repo_id() {
+                        eprintln!(
+                            "⚠️  The policy was fitted for {}, not {}. Its accuracy bound does not carry over.",
+                            policy.checkpoint,
+                            checkpoint.repo_id()
+                        );
+                    }
+                    policy.threshold
+                }
+                (None, Some(t)) => t,
+                (None, None) => bail!(
+                    "Pass --policy (from `lemmata defer fit --export-policy`) or --risk-threshold."
+                ),
+            };
             let questions =
                 load_questions_or_inline(run_args.schema.as_deref(), "Department triage")?;
             let items = resolve_data_source(
@@ -1771,11 +1770,9 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
 
             let classifier = LayaClassifier::with_checkpoint(checkpoint);
             let router = CascadeRouter::new(CascadeConfig {
-                risk_threshold: run_args.risk_threshold,
+                risk_threshold,
                 system2_cost_per_call: run_args.system2_cost,
-                ..Default::default()
             });
-
             let decisions: Vec<_> = items
                 .iter()
                 .map(|item| router.route(item, &questions, &classifier))
@@ -1793,21 +1790,12 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
                     }
                     OutputFormat::Csv => {
                         let mut wtr = csv::Writer::from_writer(std::io::stdout());
-                        wtr.write_record([
-                            "item_id",
-                            "tier",
-                            "composite_risk",
-                            "entropy",
-                            "margin_gap",
-                            "cost_usd",
-                        ])?;
+                        wtr.write_record(["item_id", "tier", "risk", "cost_usd"])?;
                         for dec in &decisions {
                             wtr.write_record([
                                 dec.item_id.as_str(),
                                 dec.tier.badge(),
-                                &format!("{:.4}", dec.composite_risk),
-                                &format!("{:.4}", dec.normalized_entropy),
-                                &format!("{:.4}", 1.0 - dec.top2_margin),
+                                &format!("{:.4}", dec.risk),
                                 &format!("{:.4}", dec.cost_usd),
                             ])?;
                         }
@@ -1819,7 +1807,7 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
                                 "{} => {} (risk={:.3}, cost=${:.4})",
                                 dec.item_id,
                                 dec.tier.badge(),
-                                dec.composite_risk,
+                                dec.risk,
                                 dec.cost_usd
                             );
                         }
@@ -1828,23 +1816,20 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
                         let mut table = Table::new();
                         table.set_header(vec![
                             Cell::new("Item ID").fg(Color::Cyan),
-                            Cell::new("Execution Tier").fg(Color::Green),
-                            Cell::new("Composite Risk").fg(Color::Yellow),
-                            Cell::new("Entropy").fg(Color::White),
-                            Cell::new("Margin Gap").fg(Color::White),
+                            Cell::new("Decision").fg(Color::Green),
+                            Cell::new("Risk").fg(Color::Yellow),
                             Cell::new("Cost ($)").fg(Color::Magenta),
                         ]);
                         for dec in &decisions {
                             table.add_row(vec![
                                 Cell::new(&dec.item_id),
                                 Cell::new(dec.tier.badge()),
-                                Cell::new(format!("{:.4}", dec.composite_risk)),
-                                Cell::new(format!("{:.4}", dec.normalized_entropy)),
-                                Cell::new(format!("{:.4}", 1.0 - dec.top2_margin)),
+                                Cell::new(format!("{:.4}", dec.risk)),
                                 Cell::new(format!("${:.4}", dec.cost_usd)),
                             ]);
                         }
                         println!("{table}");
+                        println!("Risk threshold τ = {risk_threshold:.3}");
                     }
                 }
             }
@@ -1913,8 +1898,8 @@ fn run_taxonomy_classification(
     schema_path: &std::path::Path,
     source: Box<dyn DataSource>,
     checkpoint: Checkpoint,
-    coarse_threshold: f64,
-    escalate_threshold: f64,
+    beam: usize,
+    path_threshold: f64,
     cache_enabled: bool,
     escalate_only: bool,
     format: OutputFormat,
@@ -1931,22 +1916,27 @@ fn run_taxonomy_classification(
         return Ok(());
     }
 
-    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
-    cfg.escalate_threshold = escalate_threshold;
-    let classifier = LayaClassifier::new(cfg);
-
+    let classifier = LayaClassifier::new(ClassifierConfig::with_checkpoint(checkpoint));
+    let cache = if cache_enabled {
+        Some(std::sync::Arc::new(std::sync::Mutex::new(
+            DecisionCache::open(&classifier)?,
+        )))
+    } else {
+        None
+    };
     let mut router = HierarchicalRouter::new(schema, classifier)
-        .with_coarse_threshold(coarse_threshold)
-        .with_escalate_threshold(escalate_threshold);
-
-    if cache_enabled {
-        let cache = std::sync::Arc::new(std::sync::Mutex::new(DecisionCache::new(
-            SemanticCacheConfig::default(),
-        )));
-        router = router.with_cache(cache);
+        .with_beam(beam)
+        .with_path_threshold(path_threshold);
+    if let Some(cache) = &cache {
+        router = router.with_cache(cache.clone());
     }
 
     let mut results = router.classify_items(&items)?;
+    if let Some(cache) = &cache
+        && let Ok(c) = cache.lock()
+    {
+        c.save()?;
+    }
     if escalate_only {
         results.retain(|r| r.escalated);
     }
@@ -1986,8 +1976,8 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
                 &run_args.schema,
                 source,
                 checkpoint,
-                run_args.coarse_threshold,
-                run_args.escalate_threshold,
+                run_args.beam,
+                run_args.path_threshold,
                 run_args.cache,
                 run_args.escalate_only,
                 run_args.format,
@@ -2063,11 +2053,12 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
                 schema,
                 LayaClassifier::new(ClassifierConfig::with_checkpoint(checkpoint)),
             )
-            .with_coarse_threshold(bench_args.coarse_threshold);
+            .with_beam(bench_args.beam)
+            .with_path_threshold(bench_args.path_threshold);
 
             if !bench_args.json {
                 println!(
-                    "\n⚡ Benchmarking Hierarchical Coarse-to-Fine Router...\n   Checkpoint: {} | Samples: {} | Iterations: {}\n{}\n",
+                    "\n⚡ Benchmarking Taxonomy Router...\n   Checkpoint: {} | Samples: {} | Iterations: {}\n{}\n",
                     checkpoint.repo_id(),
                     items.len(),
                     bench_args.iterations,
@@ -2075,7 +2066,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
                 );
             } else {
                 eprintln!(
-                    "⚡ Benchmarking Hierarchical Coarse-to-Fine Router ({}, {} samples)...",
+                    "⚡ Benchmarking Taxonomy Router ({}, {} samples)...",
                     checkpoint.repo_id(),
                     items.len()
                 );
@@ -2086,12 +2077,12 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&bench_res)?);
             } else {
                 println!(
-                    "📊 Benchmark Results:\n   • Total Evaluated:       {} decisions\n   • Avg Coarse Latency:    {:.2} ms\n   • Avg Fine Latency:      {:.2} ms\n   • Avg Total Latency:     {:.2} ms\n   • Coarse Escalation Rate: {:.1}%\n   • Completion Rate:       {:.1}%\n   • Avg Compound Conf:     {:.3}\n   • Throughput:            {:.1} requests/sec",
+                    "📊 Benchmark Results:\n   • Total Evaluated:       {} decisions\n   • Avg Coarse Latency:    {:.2} ms\n   • Avg Fine Latency:      {:.2} ms\n   • Avg Total Latency:     {:.2} ms\n   • Escalation Rate:        {:.1}%\n   • Completion Rate:       {:.1}%\n   • Avg Compound Conf:     {:.3}\n   • Throughput:            {:.1} requests/sec",
                     bench_res.total_samples,
                     bench_res.avg_coarse_latency_ms,
                     bench_res.avg_fine_latency_ms,
                     bench_res.avg_total_latency_ms,
-                    bench_res.coarse_escalation_rate * 100.0,
+                    bench_res.escalation_rate * 100.0,
                     bench_res.completion_rate * 100.0,
                     bench_res.avg_compound_confidence,
                     bench_res.throughput_qps
@@ -2275,18 +2266,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
 
 fn handle_report(args: ReportArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = if args.schema.exists() {
-        load_questions_from_file(&args.schema)?
-    } else if args.schema.to_string_lossy() != "schema/questions.json" {
-        bail!("Schema file not found: {}", args.schema.display());
-    } else {
-        create_inline_question(
-            "choice",
-            "Classify topic and sentiment",
-            "billing,technical,sales,other",
-        )?
-    };
-
+    let questions = load_questions_from_file(&args.schema)?;
     let items = resolve_data_source_filtered(
         &args.data_dir,
         args.file.as_deref(),
@@ -2297,7 +2277,7 @@ fn handle_report(args: ReportArgs) -> Result<()> {
     )?
     .read_items()?;
     if items.is_empty() {
-        eprintln!("⚠️  No data items found for stats evaluation.");
+        eprintln!("⚠️  No data items found for the report.");
         return Ok(());
     }
 
@@ -2308,26 +2288,23 @@ fn handle_report(args: ReportArgs) -> Result<()> {
     let report = StatsEngine::new(classifier)
         .with_iterations(args.iterations)
         .with_warmup(args.warmup)
-        .with_cache(args.cache, args.similarity_threshold)
         .with_escalate_threshold(args.escalate_threshold)
         .evaluate(&items, &questions)?;
 
     if let Some(dest) = &args.output {
         StatsEngine::export_report(&report, dest)?;
         log_status(
-            is_machine_format(args.format),
-            format!("💾 Statistics report exported to: {}", dest.display()),
+            args.format != ReportFormat::Table,
+            format!("💾 Report written to: {}", dest.display()),
         );
     }
 
     match args.format {
-        OutputFormat::Table | OutputFormat::Pretty => {
-            println!("{}", StatsEngine::format_table(&report))
-        }
-        OutputFormat::Json => println!("{}", StatsEngine::format_json(&report)?),
-        OutputFormat::Jsonl => println!("{}", serde_json::to_string(&report)?),
-        OutputFormat::Compact => println!("{}", StatsEngine::format_compact(&report)),
-        OutputFormat::Csv => print!("{}", StatsEngine::format_csv(&report)),
+        ReportFormat::Table => println!("{}", StatsEngine::format_table(&report)),
+        ReportFormat::Json => println!("{}", StatsEngine::format_json(&report)?),
+        ReportFormat::Compact => println!("{}", StatsEngine::format_compact(&report)),
+        ReportFormat::Csv => print!("{}", StatsEngine::format_csv(&report)),
+        ReportFormat::Md => print!("{}", StatsEngine::format_markdown(&report)),
     }
     Ok(())
 }
@@ -2401,29 +2378,6 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             lemmata::engine::learn::print_reading_list(phase_num_filter);
         }
         return Ok(());
-    }
-
-    // The lesson demos call classify with `.expect`, so under `native` a missing checkpoint would
-    // panic. Check every checkpoint the lessons use before any lesson runs.
-    if lemmata::model::native::backend() == Backend::Native {
-        let missing: Vec<String> = [
-            Checkpoint::English,
-            Checkpoint::Multilingual,
-            Checkpoint::TypedDecisions,
-            Checkpoint::DebertaV3ZeroShot,
-            Checkpoint::ModernBertZeroShot,
-            Checkpoint::EuroBert,
-        ]
-        .into_iter()
-        .filter(|&c| !lemmata::model::native::native_available(c))
-        .map(|c| c.repo_id().to_string())
-        .collect();
-        if !missing.is_empty() {
-            bail!(
-                "lemmata learn needs weights for {}. Download them with `lemmata download`, or run with --backend auto to simulate the missing ones.",
-                missing.join(", ")
-            );
-        }
     }
 
     if args.all || raw_target.is_some_and(|t| t.eq_ignore_ascii_case("all")) {
@@ -2500,6 +2454,20 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
 }
 
 fn handle_guide(args: GuideArgs) -> Result<()> {
+    if let Some(dir) = &args.samples {
+        let (written, kept) = lemmata::engine::write_sample_files(dir)?;
+        for path in &written {
+            println!("✅ Wrote {}", path.display());
+        }
+        for path in &kept {
+            println!("⏭️  Kept existing {}", path.display());
+        }
+        println!(
+            "Run the recipes from {}: `lemmata guide quickstart`",
+            dir.display()
+        );
+        return Ok(());
+    }
     if args.json {
         let recipes = lemmata::engine::build_workflow_recipes();
         let filtered: Vec<_> = match args.topic.as_deref() {

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::datasource::DataItem;
-use crate::engine::cache::vectorize_text;
 use crate::engine::classifier::LayaClassifier;
+use crate::engine::features::vectorize_text;
 use crate::engine::guardrail::GuardAction;
 use crate::engine::metrics::resolve_ground_truth_for_question;
 use crate::model::{DecisionResult, Question};

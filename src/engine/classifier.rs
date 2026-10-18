@@ -480,7 +480,7 @@ impl LayaClassifier {
                 && qats.std_distance > 1e-6
                 && !qats.class_centroids.is_empty()
             {
-                let feat = crate::engine::cache::vectorize_text(&state_text);
+                let feat = crate::engine::features::vectorize_text(&state_text);
                 let mut min_dist = f64::INFINITY;
                 for centroid in qats.class_centroids.values() {
                     let dist = crate::engine::ood::euclidean_distance(&feat, centroid);

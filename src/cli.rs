@@ -6,7 +6,8 @@ use std::path::PathBuf;
     name = "lemmata",
     about = "High-performance System 1 decision platform for bidirectional encoders (Laya, ModernBERT, DeBERTa-v3, EuroBERT, NeoBERT)",
     version,
-    author
+    author,
+    after_help = "Get started: `lemmata guide quickstart`. Sample data and schemas: `lemmata guide --samples .`"
 )]
 pub struct Cli {
     /// Inference backend. `native` runs real weights and fails when a checkpoint has none
@@ -42,11 +43,19 @@ pub enum Commands {
     Download(DownloadArgs),
 
     /// Classify data ingested from data/ folder, files, stdin, or inline text
-    #[command(visible_alias = "run", alias = "predict", alias = "infer")]
+    #[command(
+        visible_alias = "run",
+        alias = "predict",
+        alias = "infer",
+        after_help = "Examples:\n  lemmata classify \"I was charged twice\" --labels billing,technical,sales\n  lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --format jsonl\n  lemmata classify -c deberta-v3 --file data/customer_support.jsonl --schema schema/questions.json --cache"
+    )]
     Classify(ClassifyArgs),
 
     /// Evaluate classification accuracy and calibration against ground-truth labels
-    #[command(visible_alias = "eval")]
+    #[command(
+        visible_alias = "eval",
+        after_help = "Examples:\n  lemmata test --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json\n  lemmata test -c deberta-v3 --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --json"
+    )]
     Test(TestArgs),
 
     /// Benchmark classification throughput and latency percentiles
@@ -70,32 +79,59 @@ pub enum Commands {
     Schema(SchemaArgs),
 
     /// Pool several checkpoints into one ensemble and show where they disagree
+    #[command(
+        after_help = "Examples:\n  lemmata ensemble --file data/customer_support.jsonl --schema schema/questions.json\n  lemmata ensemble --checkpoints english,deberta-v3 --file data/customer_support.jsonl --schema schema/questions.json --fit-weights data/system1_golden_benchmark.jsonl"
+    )]
     Ensemble(EnsembleArgs),
 
-    /// Manage sub-millisecond semantic and exact decision cache
+    /// Show or clear the saved decision cache that `--cache` reads and writes
+    #[command(
+        after_help = "Examples:\n  lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --cache\n  lemmata cache stats\n  lemmata cache clear"
+    )]
     Cache(CacheArgs),
 
     /// Decide which items to defer to a larger model or a person (a System 1 / System 2 cascade)
+    #[command(
+        after_help = "Examples:\n  lemmata defer fit --val-data data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --target-accuracy 0.80 --export-policy policy.json\n  lemmata defer run --file data/customer_support.jsonl --schema schema/questions.json --policy policy.json"
+    )]
     Defer(DeferArgs),
 
     /// Verify signed, hash-chained decision receipts
+    #[command(
+        after_help = "Examples:\n  lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --receipts logs/receipts.jsonl\n  lemmata attest verify --receipts logs/receipts.jsonl"
+    )]
     Attest(AttestArgs),
 
     /// Classify against a label taxonomy: a coarse label first, then a fine label
+    #[command(
+        after_help = "Examples:\n  lemmata taxonomy show --schema schema/banking_hierarchy.json\n  lemmata taxonomy run --schema schema/banking_hierarchy.json --file data/banking_tickets.jsonl --beam 2"
+    )]
     Taxonomy(TaxonomyArgs),
 
     /// Automatically tune and calibrate temperature parameters per question bucket
-    #[command(visible_alias = "tune")]
+    #[command(
+        visible_alias = "tune",
+        after_help = "Examples:\n  lemmata calibrate -c deberta-v3 --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --persist-to-model"
+    )]
     Calibrate(CalibrateArgs),
 
     /// Fit supervised linear probes on labelled data
+    #[command(
+        after_help = "Examples:\n  lemmata probe fit -c eurobert --data data/train.jsonl --schema schema/topics.json --output probes/eurobert-topics.json\n  lemmata classify -c eurobert --probe probes/eurobert-topics.json --file data/test.jsonl --schema schema/topics.json"
+    )]
     Probe(ProbeArgs),
 
     /// Full evaluation report for one checkpoint: accuracy, calibration, speed, and escalation
+    #[command(
+        after_help = "Examples:\n  lemmata report --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json\n  lemmata report --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json --format md --output report.md"
+    )]
     Report(ReportArgs),
 
     /// Head-to-head System 1 model arena comparing accuracy, agreement, Cohen's kappa, McNemar's chi2, and speedup
-    #[command(visible_alias = "arena")]
+    #[command(
+        visible_alias = "arena",
+        after_help = "Examples:\n  lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json"
+    )]
     Compare(CompareArgs),
 
     /// Interactive 5-phase System 1 mastery curriculum, live concept labs, glossary, and Socratic quizzes
@@ -242,24 +278,12 @@ pub struct ClassifyArgs {
     #[arg(long, default_value_t = 0.50)]
     pub escalate_threshold: f64,
 
-    /// Enable sub-millisecond semantic decision cache
+    /// Reuse saved decisions for inputs seen before with the same model and settings (see `lemmata cache`)
     #[arg(long)]
     pub cache: bool,
 
-    /// Also reuse cached decisions for similar text (hashed word features, not the model). Negations can match
+    /// Print the cache hit and miss counts for this run
     #[arg(long, requires = "cache")]
-    pub cache_semantic: bool,
-
-    /// Similarity threshold for semantic cache match (default: 0.92)
-    #[arg(long, default_value_t = 0.92)]
-    pub cache_threshold: f64,
-
-    /// Cache TTL in seconds (default: 86400)
-    #[arg(long, default_value_t = 86400)]
-    pub cache_ttl: u64,
-
-    /// Print semantic cache hit/miss statistics summary
-    #[arg(long)]
     pub cache_stats: bool,
 
     /// Append one signed, hash-chained receipt per decision to this JSONL file. Check it with `lemmata attest verify`
@@ -282,9 +306,13 @@ pub struct ClassifyArgs {
     #[arg(long)]
     pub taxonomy: Option<PathBuf>,
 
-    /// Coarse router confidence threshold to proceed to fine sub-classifier (default: 0.50)
-    #[arg(long, default_value_t = 0.50)]
-    pub coarse_threshold: f64,
+    /// With --taxonomy: escalate an item when its best path probability is below this value
+    #[arg(long, default_value_t = 0.50, requires = "taxonomy")]
+    pub path_threshold: f64,
+
+    /// With --taxonomy: how many top options to follow at each level (1 is greedy top-down)
+    #[arg(long, default_value_t = 2, requires = "taxonomy")]
+    pub beam: usize,
 
     /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
     #[arg(long)]
@@ -674,22 +702,25 @@ pub struct SchemaInferArgs {
 
 #[derive(Args, Debug)]
 pub struct EnsembleArgs {
-    /// Comma-separated list of checkpoints (default: "english,multilingual,typed-decisions")
+    /// Comma-separated checkpoints. Default: the installed ones of english, deberta-v3, and modernbert-zeroshot, one per model family
     #[arg(
         short,
         long,
         short_alias = 'm',
         visible_alias = "models",
-        visible_alias = "model",
-        default_value = "english,multilingual,typed-decisions"
+        visible_alias = "model"
     )]
-    pub checkpoints: String,
+    pub checkpoints: Option<String>,
 
-    /// Optional comma-separated reliability weights (e.g. "0.4,0.3,0.3")
-    #[arg(short, long)]
+    /// Comma-separated member weights (e.g. "0.4,0.3,0.3"). Default: equal weights
+    #[arg(short, long, conflicts_with = "fit_weights")]
     pub weights: Option<String>,
 
-    /// Epistemic uncertainty disagreement threshold (triggers escalation when exceeded)
+    /// Fit the member weights on this labelled file (lowest log loss of the true label), print them, and use them
+    #[arg(long, value_name = "LABELLED_FILE")]
+    pub fit_weights: Option<PathBuf>,
+
+    /// Flag a question as disputed when the members' disagreement (mutual information, in nats) exceeds this value
     #[arg(long, default_value_t = 0.15)]
     pub disagreement_threshold: f64,
 
@@ -734,29 +765,15 @@ pub struct CacheArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum CacheCommands {
-    /// Benchmark latency with and without semantic cache
-    Bench(CacheBenchArgs),
+    /// Show the saved cache files: one per model fingerprint, with decision counts and sizes
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
-    /// Inspect cache performance metrics
-    Stats,
-
-    /// Clear in-memory / persisted cache
+    /// Delete every saved cache file
     Clear,
-}
-
-#[derive(Args, Debug)]
-pub struct CacheBenchArgs {
-    /// Specific file to benchmark
-    #[arg(short, long)]
-    pub file: PathBuf,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Semantic similarity threshold
-    #[arg(long, default_value_t = 0.92)]
-    pub threshold: f64,
 }
 
 #[derive(Args, Debug)]
@@ -767,37 +784,32 @@ pub struct DeferArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum DeferCommands {
-    /// Tune Pareto-optimal threshold given target accuracy SLA
-    Tune(DeferTuneArgs),
+    /// Choose the loosest risk threshold whose kept items reach a target accuracy with a stated confidence
+    Fit(DeferFitArgs),
 
-    /// Sweep thresholds across [0.05, 0.95] and display full Cost / Coverage / Accuracy Pareto table
-    Sweep(DeferTuneArgs),
-
-    /// Run cost-aware cascading router on inputs
+    /// Keep or defer each item, with a threshold from `defer fit`
     Run(DeferRunArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct DeferTuneArgs {
-    /// Labeled validation dataset
-    #[arg(
-        short,
-        long,
-        visible_alias = "eval-data",
-        visible_alias = "file",
-        default_value = "data/customer_support.jsonl"
-    )]
+pub struct DeferFitArgs {
+    /// Labelled validation data (JSON, JSONL, or CSV with ground truth), not the data you test on
+    #[arg(short, long, visible_alias = "eval-data", visible_alias = "file")]
     pub val_data: PathBuf,
 
     /// Path to questions schema JSON file
-    #[arg(short, long, default_value = "schema/questions.json")]
+    #[arg(short, long)]
     pub schema: PathBuf,
 
-    /// Target accuracy SLA (e.g. 0.95 for 95%)
+    /// Accuracy that the kept items must reach (e.g. 0.95 for 95%)
     #[arg(long, visible_alias = "target-acc", default_value_t = 0.95)]
     pub target_accuracy: f64,
 
-    /// Estimated System 2 cost per invocation in USD
+    /// Probability that the kept items reach the target accuracy on new data from the same source
+    #[arg(long, default_value_t = 0.95)]
+    pub confidence: f64,
+
+    /// System 2 cost per deferred item in USD, for the cost column
     #[arg(long, default_value_t = 0.005)]
     pub system2_cost: f64,
 
@@ -811,15 +823,11 @@ pub struct DeferTuneArgs {
     )]
     pub checkpoint: String,
 
-    /// Sweep all candidate risk thresholds in [0.05, 0.95] and print the Pareto frontier table
-    #[arg(long)]
-    pub sweep: bool,
-
-    /// Optional path to export tuned cascade policy JSON
+    /// Write the chosen threshold to this JSON file, for `defer run --policy`
     #[arg(long)]
     pub export_policy: Option<PathBuf>,
 
-    /// Output tuned policy as JSON
+    /// Output the fit as JSON
     #[arg(long)]
     pub json: bool,
 }
@@ -848,11 +856,15 @@ pub struct DeferRunArgs {
     )]
     pub checkpoint: String,
 
-    /// Risk threshold tau (items with risk > tau cascade to System 2)
-    #[arg(short, long, visible_alias = "threshold", default_value_t = 0.45)]
-    pub risk_threshold: f64,
+    /// Keep an item when its risk (1 minus its least certain top probability) is at or below this value
+    #[arg(short, long, visible_alias = "threshold", conflicts_with = "policy")]
+    pub risk_threshold: Option<f64>,
 
-    /// Estimated System 2 cost per invocation in USD
+    /// A policy file from `defer fit --export-policy`, instead of --risk-threshold
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
+
+    /// System 2 cost per deferred item in USD
     #[arg(long, default_value_t = 0.005)]
     pub system2_cost: f64,
 
@@ -942,7 +954,7 @@ pub enum TaxonomyCommands {
 
 #[derive(Args, Debug)]
 pub struct TaxonomyRunArgs {
-    /// Path to hierarchical question schema JSON file
+    /// Path to the taxonomy schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
 
@@ -958,13 +970,13 @@ pub struct TaxonomyRunArgs {
     #[arg(short, long)]
     pub text: Option<String>,
 
-    /// Coarse router confidence threshold to proceed to fine sub-classifier (default: 0.50)
+    /// Escalate an item when its best path probability is below this value
     #[arg(long, default_value_t = 0.50)]
-    pub coarse_threshold: f64,
+    pub path_threshold: f64,
 
-    /// Supervisor escalation probability threshold (default: 0.50)
-    #[arg(long, default_value_t = 0.50)]
-    pub escalate_threshold: f64,
+    /// How many top options to follow at each level (1 is greedy top-down)
+    #[arg(long, default_value_t = 2)]
+    pub beam: usize,
 
     /// Output presentation format (table, json, csv, jsonl)
     #[arg(long, default_value = "table")]
@@ -974,7 +986,7 @@ pub struct TaxonomyRunArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Enable sub-millisecond semantic decision cache
+    /// Reuse saved decisions for inputs seen before with the same model and settings (see `lemmata cache`)
     #[arg(long)]
     pub cache: bool,
 
@@ -995,7 +1007,7 @@ pub struct TaxonomyRunArgs {
 
 #[derive(Args, Debug)]
 pub struct TaxonomyShowArgs {
-    /// Path to hierarchical question schema JSON file
+    /// Path to the taxonomy schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
 
@@ -1012,7 +1024,7 @@ pub struct TaxonomyShowArgs {
 
 #[derive(Args, Debug)]
 pub struct TaxonomyValidateArgs {
-    /// Path to hierarchical question schema JSON file
+    /// Path to the taxonomy schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
 
@@ -1029,7 +1041,7 @@ pub struct TaxonomyValidateArgs {
 
 #[derive(Args, Debug)]
 pub struct TaxonomyBenchArgs {
-    /// Path to hierarchical question schema JSON file
+    /// Path to the taxonomy schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
 
@@ -1045,9 +1057,13 @@ pub struct TaxonomyBenchArgs {
     #[arg(short, long, default_value_t = 20)]
     pub iterations: usize,
 
-    /// Coarse router confidence threshold (default: 0.50)
+    /// Escalate an item when its best path probability is below this value
     #[arg(long, default_value_t = 0.50)]
-    pub coarse_threshold: f64,
+    pub path_threshold: f64,
+
+    /// How many top options to follow at each level (1 is greedy top-down)
+    #[arg(long, default_value_t = 2)]
+    pub beam: usize,
 
     /// Output results as JSON
     #[arg(long)]
@@ -1153,7 +1169,7 @@ pub struct ReportArgs {
     pub text: Option<String>,
 
     /// Path to question schema JSON file
-    #[arg(short, long, default_value = "schema/questions.json")]
+    #[arg(short, long)]
     pub schema: PathBuf,
 
     /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
@@ -1174,14 +1190,6 @@ pub struct ReportArgs {
     #[arg(short, long, default_value_t = 2)]
     pub warmup: usize,
 
-    /// Enable semantic decision cache to evaluate caching speedup and hit rates
-    #[arg(long)]
-    pub cache: bool,
-
-    /// Similarity threshold for semantic cache match (default: 0.92)
-    #[arg(long, default_value_t = 0.92)]
-    pub similarity_threshold: f32,
-
     /// Supervisor escalation probability threshold (default: 0.50)
     #[arg(long, default_value_t = 0.50)]
     pub escalate_threshold: f64,
@@ -1194,11 +1202,11 @@ pub struct ReportArgs {
     #[arg(long)]
     pub no_recursive: bool,
 
-    /// Output report format: table, json, compact, or csv
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
+    /// Output report format
+    #[arg(long, value_enum, default_value_t = ReportFormat::Table)]
+    pub format: ReportFormat,
 
-    /// Export statistics report to output file (JSON or CSV)
+    /// Also write the report to this file: .csv, .md, or JSON for any other extension
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 }
@@ -1211,6 +1219,17 @@ pub enum OutputFormat {
     Compact,
     Csv,
     Jsonl,
+}
+
+/// Output formats for `lemmata report`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportFormat {
+    Table,
+    Json,
+    Compact,
+    Csv,
+    /// Markdown, for a PR description or a model card
+    Md,
 }
 
 #[derive(Args, Debug)]
@@ -1257,6 +1276,10 @@ pub struct GuideArgs {
     /// Output workflow recipes as structured JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Write the sample data and schemas that the recipes use into DIR/data and DIR/schema. Existing files stay
+    #[arg(long, value_name = "DIR")]
+    pub samples: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

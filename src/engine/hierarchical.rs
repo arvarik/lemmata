@@ -1,16 +1,18 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::datasource::DataItem;
-use crate::engine::cache::{CacheLookupResult, DecisionCache};
+use crate::engine::cache::{DecisionCache, compute_schema_hash};
 use crate::engine::classifier::LayaClassifier;
-use crate::engine::ood::OodDetector;
 use crate::model::{
-    DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema, QuestionType,
+    DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema, Question,
 };
+
+/// Nested taxonomies deeper than this stop expanding.
+const MAX_DEPTH: usize = 10;
 
 /// A single step in a hierarchical routing trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,20 +56,26 @@ pub struct HierarchicalBenchResult {
     pub avg_coarse_latency_ms: f64,
     pub avg_fine_latency_ms: f64,
     pub avg_total_latency_ms: f64,
-    pub coarse_escalation_rate: f64,
+    pub escalation_rate: f64,
     pub completion_rate: f64,
     pub avg_compound_confidence: f64,
     pub throughput_qps: f64,
 }
 
-/// The hierarchical decision router orchestrating coarse-to-fine inference.
+/// One scored path through the taxonomy.
+struct Candidate {
+    probability: f64,
+    steps: Vec<HierarchicalStep>,
+}
+
+/// Classifies text against a label taxonomy. At each level it follows the top `beam` options,
+/// scores each path as the product of its probabilities, and returns the best path.
 pub struct HierarchicalRouter {
     schema: HierarchicalSchema,
     classifier: LayaClassifier,
-    coarse_threshold: f64,
-    escalate_threshold: f64,
+    beam: usize,
+    path_threshold: f64,
     cache: Option<Arc<Mutex<DecisionCache>>>,
-    ood_detector: Option<Arc<OodDetector>>,
 }
 
 impl HierarchicalRouter {
@@ -75,20 +83,21 @@ impl HierarchicalRouter {
         Self {
             schema,
             classifier,
-            coarse_threshold: 0.50,
-            escalate_threshold: 0.65,
+            beam: 2,
+            path_threshold: 0.50,
             cache: None,
-            ood_detector: None,
         }
     }
 
-    pub fn with_coarse_threshold(mut self, threshold: f64) -> Self {
-        self.coarse_threshold = threshold;
+    /// Follow the top `beam` options at each level. 1 is the greedy top-down router.
+    pub fn with_beam(mut self, beam: usize) -> Self {
+        self.beam = beam.max(1);
         self
     }
 
-    pub fn with_escalate_threshold(mut self, threshold: f64) -> Self {
-        self.escalate_threshold = threshold;
+    /// Escalate an item when its best path probability is below `threshold`.
+    pub fn with_path_threshold(mut self, threshold: f64) -> Self {
+        self.path_threshold = threshold;
         self
     }
 
@@ -97,443 +106,147 @@ impl HierarchicalRouter {
         self
     }
 
-    pub fn with_ood_detector(mut self, detector: Arc<OodDetector>) -> Self {
-        self.ood_detector = Some(detector);
-        self
-    }
-
     pub fn schema(&self) -> &HierarchicalSchema {
         &self.schema
     }
 
-    /// Route a single text input through the coarse-to-fine hierarchy.
+    /// Route one text through the taxonomy.
     pub fn route_text(
         &self,
         text: &str,
         item_id: Option<String>,
     ) -> Result<HierarchicalDecisionResult> {
         let clean_text = text.trim();
+        let start = Instant::now();
+        let mut all_hits = self.cache.is_some();
+        let mut candidates = Vec::new();
+        self.expand(
+            clean_text,
+            &self.schema,
+            0,
+            1.0,
+            Vec::new(),
+            &mut candidates,
+            &mut all_hits,
+        )?;
+        let best = candidates
+            .into_iter()
+            .max_by(|a, b| a.probability.total_cmp(&b.probability))
+            .ok_or_else(|| anyhow!("The taxonomy produced no path for this input"))?;
 
-        // 1. Check semantic / exact cache
-        if let Some(cache_mutex) = &self.cache
-            && let Ok(mut c) = cache_mutex.lock()
-        {
-            match c.lookup(clean_text, "hierarchical") {
-                CacheLookupResult::ExactHit(res)
-                | CacheLookupResult::SemanticHit { result: res, .. } => {
-                    if let Some(ans) = res.answers.get("final") {
-                        let compound_conf = ans.confidence;
-                        let final_choice = ans.choice.clone().unwrap_or_default();
-                        let formatted_path = ans
-                            .selected_labels
-                            .as_ref()
-                            .map(|v| v.join(" -> "))
-                            .unwrap_or_else(|| final_choice.clone());
-                        let path = ans
-                            .selected_labels
-                            .clone()
-                            .unwrap_or_else(|| vec![final_choice.clone()]);
-                        return Ok(HierarchicalDecisionResult {
-                            item_id,
-                            input_text: clean_text.to_string(),
-                            path,
-                            formatted_path,
-                            final_choice,
-                            compound_confidence: compound_conf,
-                            coarse_confidence: compound_conf,
-                            fine_confidence: None,
-                            steps: vec![],
-                            total_latency_ms: res.latency_ms,
-                            escalated: false,
-                            status: "COMPLETED (CACHED)".to_string(),
-                            escalation_reason: None,
-                            cache_hit: true,
+        let path: Vec<String> = best.steps.iter().map(|s| s.chosen_option.clone()).collect();
+        let escalated = best.probability < self.path_threshold;
+        Ok(HierarchicalDecisionResult {
+            item_id,
+            input_text: clean_text.to_string(),
+            formatted_path: path.join(" -> "),
+            final_choice: path.last().cloned().unwrap_or_default(),
+            compound_confidence: (best.probability * 10000.0).round() / 10000.0,
+            coarse_confidence: best.steps.first().map_or(0.0, |s| s.confidence),
+            fine_confidence: (best.steps.len() > 1)
+                .then(|| best.steps.last().map_or(0.0, |s| s.confidence)),
+            path,
+            steps: best.steps,
+            total_latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+            escalated,
+            status: if escalated { "ESCALATED" } else { "COMPLETED" }.to_string(),
+            escalation_reason: escalated.then(|| {
+                format!(
+                    "Path probability {:.4} is below the threshold {:.4}",
+                    best.probability, self.path_threshold
+                )
+            }),
+            cache_hit: all_hits,
+        })
+    }
+
+    /// Score the top `beam` options of `node.coarse`, then expand each one into its branch.
+    #[allow(clippy::too_many_arguments)]
+    fn expand(
+        &self,
+        text: &str,
+        node: &HierarchicalSchema,
+        level: usize,
+        probability: f64,
+        steps: Vec<HierarchicalStep>,
+        out: &mut Vec<Candidate>,
+        all_hits: &mut bool,
+    ) -> Result<()> {
+        if level >= MAX_DEPTH {
+            out.push(Candidate { probability, steps });
+            return Ok(());
+        }
+        let (answer, latency_ms) = self.classify(text, &node.coarse, all_hits)?;
+        for (label, p) in top_options(&answer, self.beam) {
+            let mut path_steps = steps.clone();
+            path_steps.push(step(level, &node.coarse, &label, p, &answer, latency_ms));
+            let path_probability = probability * p;
+            match self.find_branch(&label, &node.branches) {
+                None => out.push(Candidate {
+                    probability: path_probability,
+                    steps: path_steps,
+                }),
+                // A leaf question ends the path, so only its best option can win.
+                Some(HierarchicalNode::Leaf(question)) => {
+                    let (leaf, leaf_ms) = self.classify(text, question, all_hits)?;
+                    for (leaf_label, lp) in top_options(&leaf, 1) {
+                        let mut leaf_steps = path_steps.clone();
+                        leaf_steps.push(step(level + 1, question, &leaf_label, lp, &leaf, leaf_ms));
+                        out.push(Candidate {
+                            probability: path_probability * lp,
+                            steps: leaf_steps,
                         });
                     }
                 }
-                CacheLookupResult::Miss => {}
+                Some(HierarchicalNode::Subtree(sub)) => self.expand(
+                    text,
+                    sub,
+                    level + 1,
+                    path_probability,
+                    path_steps,
+                    out,
+                    all_hits,
+                )?,
             }
         }
-
-        let total_start = Instant::now();
-        let mut steps = Vec::new();
-
-        // 2. Stage 1: Coarse Intent Router
-        let coarse_start = Instant::now();
-
-        // Check OOD gate at root if detector is active
-        if let Some(ood) = &self.ood_detector {
-            let mut qmap = BTreeMap::new();
-            qmap.insert("coarse".to_string(), self.schema.coarse.clone());
-            if let Ok(eval) = ood.evaluate("coarse", clean_text, &self.classifier, &qmap)
-                && eval.is_ood
-            {
-                let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-                return Ok(HierarchicalDecisionResult {
-                    item_id,
-                    input_text: clean_text.to_string(),
-                    path: vec!["REJECTED_OOD".to_string()],
-                    formatted_path: "REJECTED_OOD".to_string(),
-                    final_choice: "REJECTED_OOD".to_string(),
-                    compound_confidence: 0.0,
-                    coarse_confidence: 0.0,
-                    fine_confidence: None,
-                    steps: vec![],
-                    total_latency_ms: total_latency,
-                    escalated: true,
-                    status: "REJECTED_OOD".to_string(),
-                    escalation_reason: Some(format!(
-                        "Out-of-Distribution detected at coarse stage (anomaly score: {:.4})",
-                        eval.anomaly_score
-                    )),
-                    cache_hit: false,
-                });
-            }
-        }
-
-        let coarse_ans = self
-            .classifier
-            .classify_single(clean_text, &self.schema.coarse)?;
-        let coarse_latency = coarse_start.elapsed().as_secs_f64() * 1000.0;
-        let coarse_choice = coarse_ans
-            .choice
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let coarse_conf = coarse_ans.confidence;
-        let coarse_act = coarse_ans.act_probability.unwrap_or(0.0);
-
-        steps.push(HierarchicalStep {
-            level: 0,
-            stage_name: "coarse".to_string(),
-            question_instructions: self.schema.coarse.instructions.clone(),
-            chosen_option: coarse_choice.clone(),
-            confidence: coarse_conf,
-            act_probability: coarse_ans.act_probability,
-            probabilities: coarse_ans.probabilities.clone(),
-            latency_ms: coarse_latency,
-        });
-
-        // Coarse Gate: Escalation check
-        if coarse_conf < self.coarse_threshold {
-            let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(HierarchicalDecisionResult {
-                item_id,
-                input_text: clean_text.to_string(),
-                path: vec![coarse_choice.clone()],
-                formatted_path: coarse_choice.clone(),
-                final_choice: coarse_choice,
-                compound_confidence: coarse_conf,
-                coarse_confidence: coarse_conf,
-                fine_confidence: None,
-                steps,
-                total_latency_ms: total_latency,
-                escalated: true,
-                status: "ESCALATED_AT_COARSE".to_string(),
-                escalation_reason: Some(format!(
-                    "Coarse confidence {:.4} below threshold {:.4}",
-                    coarse_conf, self.coarse_threshold
-                )),
-                cache_hit: false,
-            });
-        }
-
-        if coarse_act > self.escalate_threshold {
-            let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(HierarchicalDecisionResult {
-                item_id,
-                input_text: clean_text.to_string(),
-                path: vec![coarse_choice.clone()],
-                formatted_path: coarse_choice.clone(),
-                final_choice: coarse_choice,
-                compound_confidence: coarse_conf,
-                coarse_confidence: coarse_conf,
-                fine_confidence: None,
-                steps,
-                total_latency_ms: total_latency,
-                escalated: true,
-                status: "ESCALATED_AT_COARSE".to_string(),
-                escalation_reason: Some(format!(
-                    "Coarse act probability {:.4} exceeds threshold {:.4}",
-                    coarse_act, self.escalate_threshold
-                )),
-                cache_hit: false,
-            });
-        }
-
-        // 3. Stage 2: Branch Sub-Classification
-        let branch_node = self.find_branch(&coarse_choice, &self.schema.branches);
-
-        let result = match branch_node {
-            None => {
-                // Coarse choice is a terminal leaf
-                let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-                HierarchicalDecisionResult {
-                    item_id,
-                    input_text: clean_text.to_string(),
-                    path: vec![coarse_choice.clone()],
-                    formatted_path: coarse_choice.clone(),
-                    final_choice: coarse_choice,
-                    compound_confidence: coarse_conf,
-                    coarse_confidence: coarse_conf,
-                    fine_confidence: None,
-                    steps,
-                    total_latency_ms: total_latency,
-                    escalated: false,
-                    status: "COMPLETED".to_string(),
-                    escalation_reason: None,
-                    cache_hit: false,
-                }
-            }
-            Some(HierarchicalNode::Leaf(sub_q)) => {
-                let fine_start = Instant::now();
-                let fine_ans = self.classifier.classify_single(clean_text, sub_q)?;
-                let fine_latency = fine_start.elapsed().as_secs_f64() * 1000.0;
-                let fine_choice = fine_ans
-                    .choice
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                let fine_conf = fine_ans.confidence;
-                let fine_act = fine_ans.act_probability.unwrap_or(0.0);
-
-                steps.push(HierarchicalStep {
-                    level: 1,
-                    stage_name: format!("branch:{}", coarse_choice),
-                    question_instructions: sub_q.instructions.clone(),
-                    chosen_option: fine_choice.clone(),
-                    confidence: fine_conf,
-                    act_probability: fine_ans.act_probability,
-                    probabilities: fine_ans.probabilities.clone(),
-                    latency_ms: fine_latency,
-                });
-
-                let compound_conf = ((coarse_conf * fine_conf) * 10000.0).round() / 10000.0;
-                let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-                let path = vec![coarse_choice.clone(), fine_choice.clone()];
-                let formatted_path = format!("{} -> {}", coarse_choice, fine_choice);
-
-                let (escalated, status, reason) = if fine_act > self.escalate_threshold {
-                    (
-                        true,
-                        "ESCALATED_AT_BRANCH".to_string(),
-                        Some(format!(
-                            "Fine branch act probability {:.4} exceeds threshold {:.4}",
-                            fine_act, self.escalate_threshold
-                        )),
-                    )
-                } else {
-                    (false, "COMPLETED".to_string(), None)
-                };
-
-                HierarchicalDecisionResult {
-                    item_id,
-                    input_text: clean_text.to_string(),
-                    path,
-                    formatted_path,
-                    final_choice: fine_choice,
-                    compound_confidence: compound_conf,
-                    coarse_confidence: coarse_conf,
-                    fine_confidence: Some(fine_conf),
-                    steps,
-                    total_latency_ms: total_latency,
-                    escalated,
-                    status,
-                    escalation_reason: reason,
-                    cache_hit: false,
-                }
-            }
-            Some(HierarchicalNode::Subtree(sub_schema)) => {
-                let mut path = vec![coarse_choice.clone()];
-                let mut current_compound = coarse_conf;
-                let mut fine_conf_val = None;
-                let mut fine_choice_val = coarse_choice.clone();
-                let mut escalated = false;
-                let mut status = "COMPLETED".to_string();
-                let mut reason = None;
-
-                self.traverse_subtree(
-                    clean_text,
-                    sub_schema,
-                    1,
-                    &mut path,
-                    &mut steps,
-                    &mut current_compound,
-                    &mut fine_conf_val,
-                    &mut fine_choice_val,
-                    &mut escalated,
-                    &mut status,
-                    &mut reason,
-                )?;
-
-                let total_latency = total_start.elapsed().as_secs_f64() * 1000.0;
-                let formatted_path = path.join(" -> ");
-
-                HierarchicalDecisionResult {
-                    item_id,
-                    input_text: clean_text.to_string(),
-                    path,
-                    formatted_path,
-                    final_choice: fine_choice_val,
-                    compound_confidence: current_compound,
-                    coarse_confidence: coarse_conf,
-                    fine_confidence: fine_conf_val,
-                    steps,
-                    total_latency_ms: total_latency,
-                    escalated,
-                    status,
-                    escalation_reason: reason,
-                    cache_hit: false,
-                }
-            }
-        };
-
-        // Cache admission check
-        if let Some(cache_mutex) = &self.cache
-            && !result.escalated
-            && result.compound_confidence >= 0.70
-        {
-            let mut answers = BTreeMap::new();
-            answers.insert(
-                "final".to_string(),
-                DecisionAnswer {
-                    qtype: QuestionType::Choice,
-                    choice: Some(result.final_choice.clone()),
-                    selected_labels: Some(result.path.clone()),
-                    score: None,
-                    noul: None,
-                    confidence: result.compound_confidence,
-                    probabilities: BTreeMap::new(),
-                    act_probability: Some(0.1),
-                    logits: None,
-                },
-            );
-            let dec_res = DecisionResult {
-                model: "laya-hierarchical".to_string(),
-                answers,
-                input_tokens: clean_text.split_whitespace().count(),
-                latency_ms: result.total_latency_ms,
-            };
-            if let Ok(mut c) = cache_mutex.lock() {
-                c.insert(clean_text, "hierarchical", &dec_res);
-            }
-        }
-
-        Ok(result)
+        Ok(())
     }
 
-    /// Recursively traverse nested subtrees up to depth limit.
-    #[allow(clippy::too_many_arguments)]
-    fn traverse_subtree(
+    /// Classify `text` against one question, through the cache when one is set. The cache key
+    /// is the question itself, so different taxonomies and levels never share an entry.
+    fn classify(
         &self,
         text: &str,
-        schema: &HierarchicalSchema,
-        level: usize,
-        path: &mut Vec<String>,
-        steps: &mut Vec<HierarchicalStep>,
-        compound_confidence: &mut f64,
-        last_fine_conf: &mut Option<f64>,
-        final_choice: &mut String,
-        escalated: &mut bool,
-        status: &mut String,
-        reason: &mut Option<String>,
-    ) -> Result<()> {
-        if level > 10 {
-            *escalated = true;
-            *status = "ESCALATED_DEPTH_LIMIT".to_string();
-            *reason = Some("Hierarchical traversal exceeded maximum depth limit of 10".to_string());
-            return Ok(());
+        question: &Question,
+        all_hits: &mut bool,
+    ) -> Result<(DecisionAnswer, f64)> {
+        let questions = BTreeMap::from([("q".to_string(), question.clone())]);
+        let schema_hash = compute_schema_hash(&questions);
+        if let Some(cache) = &self.cache
+            && let Some(hit) = cache
+                .lock()
+                .ok()
+                .and_then(|mut c| c.lookup(text, &schema_hash))
+            && let Some(answer) = hit.answers.get("q")
+        {
+            return Ok((answer.clone(), 0.0));
         }
-
-        let step_start = Instant::now();
-        let ans = self.classifier.classify_single(text, &schema.coarse)?;
-        let latency = step_start.elapsed().as_secs_f64() * 1000.0;
-        let choice = ans.choice.clone().unwrap_or_else(|| "unknown".to_string());
-        let conf = ans.confidence;
-        let act = ans.act_probability.unwrap_or(0.0);
-
-        steps.push(HierarchicalStep {
-            level,
-            stage_name: format!("level_{}:{}", level, choice),
-            question_instructions: schema.coarse.instructions.clone(),
-            chosen_option: choice.clone(),
-            confidence: conf,
-            act_probability: ans.act_probability,
-            probabilities: ans.probabilities.clone(),
-            latency_ms: latency,
-        });
-
-        path.push(choice.clone());
-        *compound_confidence = ((*compound_confidence * conf) * 10000.0).round() / 10000.0;
-        *last_fine_conf = Some(conf);
-        *final_choice = choice.clone();
-
-        if act > self.escalate_threshold {
-            *escalated = true;
-            *status = format!("ESCALATED_AT_LEVEL_{}", level);
-            *reason = Some(format!(
-                "Subtree act probability {:.4} exceeds threshold {:.4}",
-                act, self.escalate_threshold
-            ));
-            return Ok(());
+        *all_hits = false;
+        let start = Instant::now();
+        let answer = self.classifier.classify_single(text, question)?;
+        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+        if let Some(cache) = &self.cache
+            && let Ok(mut c) = cache.lock()
+        {
+            let result = DecisionResult {
+                model: self.classifier.config().checkpoint.repo_id().to_string(),
+                answers: BTreeMap::from([("q".to_string(), answer.clone())]),
+                input_tokens: 0,
+                latency_ms,
+            };
+            c.insert(text, &schema_hash, &result);
         }
-
-        if let Some(node) = self.find_branch(&choice, &schema.branches) {
-            match node {
-                HierarchicalNode::Leaf(sub_q) => {
-                    let leaf_start = Instant::now();
-                    let leaf_ans = self.classifier.classify_single(text, sub_q)?;
-                    let leaf_latency = leaf_start.elapsed().as_secs_f64() * 1000.0;
-                    let leaf_choice = leaf_ans
-                        .choice
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let leaf_conf = leaf_ans.confidence;
-                    let leaf_act = leaf_ans.act_probability.unwrap_or(0.0);
-
-                    steps.push(HierarchicalStep {
-                        level: level + 1,
-                        stage_name: format!("leaf:{}", leaf_choice),
-                        question_instructions: sub_q.instructions.clone(),
-                        chosen_option: leaf_choice.clone(),
-                        confidence: leaf_conf,
-                        act_probability: leaf_ans.act_probability,
-                        probabilities: leaf_ans.probabilities.clone(),
-                        latency_ms: leaf_latency,
-                    });
-
-                    path.push(leaf_choice.clone());
-                    *compound_confidence =
-                        ((*compound_confidence * leaf_conf) * 10000.0).round() / 10000.0;
-                    *last_fine_conf = Some(leaf_conf);
-                    *final_choice = leaf_choice;
-
-                    if leaf_act > self.escalate_threshold {
-                        *escalated = true;
-                        *status = "ESCALATED_AT_LEAF".to_string();
-                        *reason = Some(format!(
-                            "Leaf act probability {:.4} exceeds threshold {:.4}",
-                            leaf_act, self.escalate_threshold
-                        ));
-                    }
-                }
-                HierarchicalNode::Subtree(sub) => {
-                    self.traverse_subtree(
-                        text,
-                        sub,
-                        level + 1,
-                        path,
-                        steps,
-                        compound_confidence,
-                        last_fine_conf,
-                        final_choice,
-                        escalated,
-                        status,
-                        reason,
-                    )?;
-                }
-            }
-        }
-
-        Ok(())
+        Ok((answer, latency_ms))
     }
 
     /// Match coarse choice against branch map keys (exact or normalized).
@@ -589,7 +302,7 @@ impl HierarchicalRouter {
         let mut total_coarse_lat = 0.0;
         let mut total_fine_lat = 0.0;
         let mut total_lat = 0.0;
-        let mut coarse_escalations = 0;
+        let mut escalations = 0;
         let mut completions = 0;
         let mut fine_stage_count = 0;
         let mut compound_conf_sum = 0.0;
@@ -610,9 +323,9 @@ impl HierarchicalRouter {
                     fine_stage_count += 1;
                 }
 
-                if res.status == "ESCALATED_AT_COARSE" {
-                    coarse_escalations += 1;
-                } else if res.status == "COMPLETED" {
+                if res.escalated {
+                    escalations += 1;
+                } else {
                     completions += 1;
                 }
             }
@@ -635,7 +348,7 @@ impl HierarchicalRouter {
                 0.0
             },
             avg_total_latency_ms: total_lat / total_samples as f64,
-            coarse_escalation_rate: coarse_escalations as f64 / total_samples as f64,
+            escalation_rate: escalations as f64 / total_samples as f64,
             completion_rate: completions as f64 / total_samples as f64,
             avg_compound_confidence: compound_conf_sum / total_samples as f64,
             throughput_qps: throughput,
@@ -751,10 +464,110 @@ impl HierarchicalRouter {
     }
 }
 
+/// The `k` most probable options of an answer. An answer without option probabilities (a score
+/// or yes/no question) gives its single choice.
+fn top_options(answer: &DecisionAnswer, k: usize) -> Vec<(String, f64)> {
+    let mut options: Vec<(String, f64)> = answer
+        .probabilities
+        .iter()
+        .map(|(label, &p)| (label.clone(), p))
+        .collect();
+    if options.is_empty() {
+        options.push((
+            answer
+                .choice
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            answer.confidence,
+        ));
+    }
+    options.sort_by(|a, b| b.1.total_cmp(&a.1));
+    options.truncate(k.max(1));
+    options
+}
+
+fn step(
+    level: usize,
+    question: &Question,
+    label: &str,
+    probability: f64,
+    answer: &DecisionAnswer,
+    latency_ms: f64,
+) -> HierarchicalStep {
+    HierarchicalStep {
+        level,
+        stage_name: if level == 0 {
+            "coarse".to_string()
+        } else {
+            format!("level_{level}")
+        },
+        question_instructions: question.instructions.clone(),
+        chosen_option: label.to_string(),
+        confidence: probability,
+        act_probability: answer.act_probability,
+        probabilities: answer.probabilities.clone(),
+        latency_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Checkpoint, HierarchicalNode, Question};
+
+    #[test]
+    fn wider_beam_never_lowers_the_best_path() {
+        let schema: HierarchicalSchema =
+            serde_json::from_str(include_str!("../../schema/banking_hierarchy.json")).unwrap();
+        let greedy = HierarchicalRouter::new(
+            schema.clone(),
+            LayaClassifier::with_checkpoint(Checkpoint::English),
+        )
+        .with_beam(1);
+        let wide =
+            HierarchicalRouter::new(schema, LayaClassifier::with_checkpoint(Checkpoint::English))
+                .with_beam(3);
+        for text in [
+            "my debit card was stolen in London",
+            "the wire transfer has not arrived after 48 hours",
+            "someone logged into my account from another country",
+            "how do I change my ATM PIN",
+        ] {
+            let g = greedy.route_text(text, None).unwrap();
+            let w = wide.route_text(text, None).unwrap();
+            // The wide beam also scores the greedy path, so its best path is at least as likely.
+            assert!(w.compound_confidence >= g.compound_confidence, "{text}");
+            assert_eq!(w.path.len(), w.steps.len());
+            assert_eq!(w.escalated, w.compound_confidence < 0.5);
+        }
+    }
+
+    #[test]
+    fn top_options_ranks_by_probability() {
+        let answer = DecisionAnswer {
+            qtype: crate::model::QuestionType::Choice,
+            choice: Some("b".into()),
+            selected_labels: None,
+            score: None,
+            noul: None,
+            confidence: 0.6,
+            probabilities: BTreeMap::from([
+                ("a".to_string(), 0.1),
+                ("b".to_string(), 0.6),
+                ("c".to_string(), 0.3),
+            ]),
+            act_probability: None,
+            logits: None,
+        };
+        let top = top_options(&answer, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!((top[0].0.as_str(), top[1].0.as_str()), ("b", "c"));
+        let no_probs = DecisionAnswer {
+            probabilities: BTreeMap::new(),
+            ..answer
+        };
+        assert_eq!(top_options(&no_probs, 3), vec![("b".to_string(), 0.6)]);
+    }
 
     #[test]
     fn test_hierarchical_benchmark_zero_iterations() {

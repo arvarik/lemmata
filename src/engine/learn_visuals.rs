@@ -389,9 +389,7 @@ pub fn colorize_ascii_diagram(phase: u8, raw_diagram: &str) -> String {
     let phase_caption = match phase {
         1 => "Phase 1 Architecture: Causal O(N) Decoder vs. Bidirectional O(1) Encoder",
         2 => "Phase 2 Architecture: JointSinglePass O(1) vs. NLI Cross-Encoder O(K) vs. MLM Cloze",
-        3 => {
-            "Phase 3 Architecture: Head-Tail Chunking, Two-Stage Shortlisting & <0.5ms Meta-Router"
-        }
+        3 => "Phase 3 Architecture: Head-Tail Chunking, Two-Stage Shortlisting & Meta-Router",
         4 => "Phase 4 Architecture: Free-Energy OOD Gate, Q-ATS Temperature & Conformal Sets",
         5 => "Phase 5 Architecture: Decision Cache, System 1/2 Deferral & Signed Receipts",
         _ => "System 1 Visual Architecture Blueprint",
@@ -537,8 +535,36 @@ pub fn colorize_math_block(phase: u8, raw_math: &str) -> String {
 // 8. Phase-Specific Live Visual Demonstrations (Phases 1..=5)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compute and render a rich, color-coded visual demonstration for `phase` (1..=5).
+/// Compute and render a rich, color-coded visual demonstration for `phase` (1..=5). Under the
+/// `native` backend, a demo whose checkpoints are not installed prints the download commands.
 pub fn render_phase_visual_demonstration(phase: u8) -> String {
+    use crate::model::native::{Backend, backend, native_available};
+    let needs: &[Checkpoint] = match phase {
+        2 => &[Checkpoint::English, Checkpoint::DebertaV3ZeroShot],
+        3 => &[Checkpoint::DebertaV3ZeroShot],
+        5 => &[
+            Checkpoint::English,
+            Checkpoint::DebertaV3ZeroShot,
+            Checkpoint::ModernBertZeroShot,
+        ],
+        _ => &[Checkpoint::English],
+    };
+    let missing: Vec<&str> = needs
+        .iter()
+        .filter(|&&c| backend() == Backend::Native && !native_available(c))
+        .map(|c| c.repo_id())
+        .collect();
+    if !missing.is_empty() {
+        let commands: Vec<String> = missing
+            .iter()
+            .map(|id| format!("  lemmata download --checkpoint {id}"))
+            .collect();
+        return format!(
+            "{}\n{}\n",
+            c_dim("The live demo for this phase needs model weights. Download them with:"),
+            commands.join("\n")
+        );
+    }
     match phase {
         1 => render_phase_1_demo(),
         2 => render_phase_2_demo(),
@@ -882,7 +908,7 @@ fn render_phase_4_demo() -> String {
          • Borderline Multi-Issue → {}   → Action: {}\n\
          • Live Calibration Check → q_hat = {:.3} | Target Coverage = {:.0}% | Empirical Coverage = {:.1}%",
         pill_green("✅ SINGLETON C(x) = {billing}"),
-        c_bold(c_green("AUTO-EXECUTE (<40ms)")),
+        c_bold(c_green("KEEP (System 1)")),
         pill_yellow("⚠️ AMBIGUOUS C(x) = {billing, account}"),
         c_bold(c_yellow("ESCALATE TO SYSTEM 2")),
         conf_rep.quantile_threshold,
@@ -967,12 +993,12 @@ fn render_phase_5_demo() -> String {
              Ticket 2 (Cross-Cutting)    : Conf={} | Epistemic JSD={:.4} | Aleatoric={:.4} → {}\n\
              Checkpoint Vote Breakdown   : {:?}",
             render_prob_bar(clear_q.consensus_confidence, 10),
-            clear_q.epistemic_uncertainty,
-            clear_q.aleatoric_uncertainty,
+            clear_q.disagreement,
+            clear_q.member_entropy,
             pill_green(clear_q.status.badge()),
             render_prob_bar(disp_q.consensus_confidence, 10),
-            disp_q.epistemic_uncertainty,
-            disp_q.aleatoric_uncertainty,
+            disp_q.disagreement,
+            disp_q.member_entropy,
             pill_yellow(disp_q.status.badge()),
             disp_q.checkpoint_votes
         ),

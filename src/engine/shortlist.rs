@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::cache::{cosine_similarity, vectorize_text};
+use crate::engine::features::{cosine_similarity, vectorize_text};
 use crate::model::Question;
 
 /// Output of the lexical option shortlist that runs before model scoring.
