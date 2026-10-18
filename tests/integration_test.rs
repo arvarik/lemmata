@@ -1,18 +1,14 @@
 use lemmata::benchmark::BenchmarkRunner;
-use lemmata::datasource::{
-    DataItem, DataSource, KafkaSource, MemorySource, StreamSink, StreamingDataSource,
-};
+use lemmata::datasource::{DataItem, DataSource, MemorySource};
 use lemmata::engine::{
-    ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibratedAgentConfig,
-    CalibrationLoss, CalibrationTuner, CascadeConfig, CascadeRouter, ClassifierConfig,
-    ConformalEngine, ConsensusEngine, ConsensusStatus, DecisionCache, DriftEngine, Evaluator,
-    ExperimentRunner, GuardAction, GuardrailEngine, GuardrailPolicy, HierarchicalRouter,
-    LayaClassifier, OodDetector, PolicyRule, ReviewQueueItem, RlcdSample, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline, StreamPipelineConfig,
-    SystemStatsReport, SystemTier, UncertaintyStrategy,
+    AttestationEngine, AttributionEngine, CalibratedAgentConfig, CalibrationLoss, CalibrationTuner,
+    CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
+    ConsensusStatus, DecisionCache, Evaluator, GuardAction, GuardrailEngine, GuardrailPolicy,
+    HierarchicalRouter, LayaClassifier, OodDetector, PolicyRule, SchemaKnapsackOptimizer,
+    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, SystemStatsReport, SystemTier,
 };
 use lemmata::model::{Checkpoint, HierarchicalSchema, Question, QuestionType, inspect_safetensors};
-use lemmata::{resolve_data_source_filtered, resolve_streaming_source};
+use lemmata::resolve_data_source_filtered;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -134,24 +130,6 @@ fn test_evaluator_with_ground_truth() {
 }
 
 #[test]
-fn test_experiment_option_ordering() {
-    let items = vec![DataItem::new(
-        "exp_1",
-        serde_json::json!({ "text": "Can I get a refund on billing invoice" }),
-        "test",
-    )];
-
-    let q = Question::new_choice(
-        "Department triage",
-        vec!["billing".into(), "technical".into(), "sales".into()],
-    );
-
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let res = ExperimentRunner::test_option_order_invariance(&classifier, &items, "dept", &q, 3);
-    assert!(res.is_ok());
-}
-
-#[test]
 fn test_benchmark_runner() {
     let items = vec![
         DataItem::new(
@@ -236,69 +214,6 @@ fn test_safetensors_inspector_on_local_weights() {
         assert!(rep.is_laya_compatible);
         assert!(rep.has_act_head);
     }
-}
-
-#[test]
-fn test_drift_detection_engine() {
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "dept".into(),
-        Question::new_choice(
-            "Pick department",
-            vec!["billing".into(), "technical".into()],
-        ),
-    );
-
-    // Baseline: predominantly billing inputs
-    let baseline = vec![
-        DataItem::new(
-            "b1",
-            serde_json::json!({ "text": "Invoice refund billing payment" }),
-            "base",
-        ),
-        DataItem::new(
-            "b2",
-            serde_json::json!({ "text": "Charge invoice refund billing" }),
-            "base",
-        ),
-        DataItem::new(
-            "b3",
-            serde_json::json!({ "text": "Payment credit card invoice billing" }),
-            "base",
-        ),
-    ];
-
-    // Current: shifted heavily toward technical bugs/crashes
-    let current = vec![
-        DataItem::new(
-            "c1",
-            serde_json::json!({ "text": "Server outage crash bug exception" }),
-            "prod",
-        ),
-        DataItem::new(
-            "c2",
-            serde_json::json!({ "text": "System error crash stack trace" }),
-            "prod",
-        ),
-        DataItem::new(
-            "c3",
-            serde_json::json!({ "text": "Database error crash technical failure" }),
-            "prod",
-        ),
-    ];
-
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let drift_engine = DriftEngine::new(&classifier).with_thresholds(0.15, 0.10);
-    let report = drift_engine
-        .detect_drift(&baseline, &current, &questions)
-        .unwrap();
-
-    assert_eq!(report.baseline_count, 3);
-    assert_eq!(report.current_count, 3);
-    assert!(report.question_metrics.contains_key("dept"));
-    let dept_metrics = &report.question_metrics["dept"];
-    assert!(dept_metrics.class_prior_psi.unwrap_or(0.0) > 0.0);
-    assert!(report.has_critical_drift || report.has_moderate_drift);
 }
 
 #[test]
@@ -1074,343 +989,6 @@ fn test_calibrated_config_roundtrip_and_losses() {
 }
 
 #[test]
-fn test_streaming_pipeline_kafka_microbatching_and_sinks() {
-    let source_file = Path::new("data/banking_tickets.jsonl");
-    let items = lemmata::datasource::FileSource::parse_file(source_file).unwrap();
-    assert_eq!(items.len(), 8);
-
-    let mut kafka =
-        KafkaSource::new("127.0.0.1:9092", "inbound_banking", "group_analytics").with_items(items);
-
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-
-    let primary_path = Path::new("target/integration_stream_primary.jsonl");
-    let escalate_path = Path::new("target/integration_stream_escalate.jsonl");
-    if primary_path.exists() {
-        let _ = std::fs::remove_file(primary_path);
-    }
-    if escalate_path.exists() {
-        let _ = std::fs::remove_file(escalate_path);
-    }
-
-    let primary_sink = StreamSink::from_target("target/integration_stream_primary.jsonl").unwrap();
-    let escalate_sink =
-        StreamSink::from_target("target/integration_stream_escalate.jsonl").unwrap();
-
-    let mut pipeline = StreamPipeline::new(classifier, questions, primary_sink)
-        .with_escalate_sink(escalate_sink)
-        .with_config(StreamPipelineConfig {
-            batch_size: 3,
-            max_flush_interval_ms: 20,
-            escalate_threshold: 0.50,
-            enable_cache: true,
-            enable_attest: true,
-            attest_secret: "integration_stream_secret_2026".into(),
-            receipt_log: None,
-            limit: None,
-        });
-
-    let metrics = pipeline.run(&mut kafka).unwrap();
-    assert_eq!(metrics.total_ingested, 8);
-    assert_eq!(metrics.total_classified, 8);
-    assert_eq!(metrics.batches_processed, 3); // 3 + 3 + 2 = 8
-    assert_eq!(kafka.committed_offset(), 8);
-    assert_eq!(metrics.total_attested, 8);
-    assert!(metrics.throughput_qps > 0.0);
-
-    // Verify written outputs
-    let primary_lines = if primary_path.exists() {
-        std::fs::read_to_string(primary_path)
-            .unwrap()
-            .lines()
-            .count()
-    } else {
-        0
-    };
-    let escalate_lines = if escalate_path.exists() {
-        std::fs::read_to_string(escalate_path)
-            .unwrap()
-            .lines()
-            .count()
-    } else {
-        0
-    };
-
-    assert_eq!(primary_lines + escalate_lines, 8);
-}
-
-#[test]
-fn test_lakehouse_columnar_projection_and_streaming() {
-    let mut source =
-        resolve_streaming_source("lakehouse://data/customer_support.jsonl?columns=body", None)
-            .unwrap();
-    assert_eq!(source.name(), "LakehouseColumnarSource");
-
-    // Fetch batch and inspect state
-    let batch = source
-        .next_batch(2, std::time::Duration::from_millis(10))
-        .unwrap();
-    assert_eq!(batch.len(), 2);
-    for item in &batch {
-        match &item.state {
-            serde_json::Value::Object(map) => {
-                assert!(map.contains_key("body"));
-                assert!(!map.contains_key("author"));
-                assert!(!map.contains_key("timestamp"));
-            }
-            _ => panic!("Expected JSON object state with projected columns"),
-        }
-    }
-    source.commit_offset(batch.len()).unwrap();
-    assert_eq!(source.committed_offset(), 2);
-
-    // Run pipeline with limit
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let sink = StreamSink::from_target("target/integration_lakehouse_sink.jsonl").unwrap();
-
-    let mut pipeline =
-        StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
-            batch_size: 4,
-            limit: Some(3),
-            ..Default::default()
-        });
-
-    let metrics = pipeline.run(source.as_mut()).unwrap();
-    assert_eq!(metrics.total_classified, 3);
-}
-
-#[test]
-fn test_object_store_uri_rejected_and_stream_attestation_audit() {
-    // lemmata has no object-store client, so it must not read a local file in place of s3://.
-    let err = resolve_streaming_source("s3://prod-lakehouse/customer_support.jsonl", None)
-        .err()
-        .expect("s3:// must be rejected");
-    assert!(err.to_string().contains("no s3 client"));
-
-    let mut source = resolve_streaming_source("data/customer_support.jsonl", None).unwrap();
-
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let sink_path = Path::new("target/integration_s3_sink.jsonl");
-    if sink_path.exists() {
-        let _ = std::fs::remove_file(sink_path);
-    }
-    let sink = StreamSink::from_target("target/integration_s3_sink.jsonl").unwrap();
-
-    let mut pipeline =
-        StreamPipeline::new(classifier, questions, sink).with_config(StreamPipelineConfig {
-            batch_size: 4,
-            enable_attest: true,
-            attest_secret: "s3_compliance_audit_key_2026".into(),
-            receipt_log: Some("target/integration_stream_receipts.jsonl".into()),
-            limit: Some(4),
-            ..Default::default()
-        });
-
-    let metrics = pipeline.run(source.as_mut()).unwrap();
-    assert_eq!(metrics.total_classified, 4);
-    assert_eq!(metrics.total_attested, 4);
-
-    // The full receipts verify with the signing key.
-    let receipts: Vec<lemmata::engine::DecisionReceipt> =
-        std::fs::read_to_string("target/integration_stream_receipts.jsonl")
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-    let report = lemmata::engine::AttestationEngine::verify_ledger(
-        &receipts,
-        "s3_compliance_audit_key_2026",
-    );
-    assert_eq!(report.valid_receipts, 4);
-    assert!(report.chain_intact);
-
-    // Read sink and verify records have valid receipt_digest
-    let content = std::fs::read_to_string(sink_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines.len(), 4);
-    for line in lines {
-        let rec: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert!(rec.get("receipt_digest").is_some());
-        assert!(!rec["receipt_digest"].as_str().unwrap().is_empty());
-    }
-}
-
-#[test]
-fn test_active_learning_sampling_all_strategies() {
-    let source = lemmata::resolve_data_source(
-        Path::new("data"),
-        Some(Path::new("data/customer_support.jsonl")),
-        false,
-        None,
-    )
-    .unwrap();
-    let items = source.read_items().unwrap();
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-
-    let active_engine = ActiveLearningEngine::new();
-
-    let strategies = vec![
-        UncertaintyStrategy::Composite,
-        UncertaintyStrategy::Entropy,
-        UncertaintyStrategy::Margin,
-        UncertaintyStrategy::Conformal,
-        UncertaintyStrategy::Energy,
-    ];
-
-    for strategy in strategies {
-        let (queue, report) = active_engine
-            .sample(&classifier, &items, &questions, strategy, 3, None)
-            .unwrap();
-
-        assert_eq!(report.strategy, strategy);
-        assert_eq!(report.acquired_count, 3);
-        assert_eq!(queue.len(), 3);
-        assert!(report.mean_acquisition_score >= 0.0);
-
-        // Verify sorted descending by acquisition score
-        for w in queue.windows(2) {
-            assert!(
-                w[0].acquisition_score >= w[1].acquisition_score - 1e-6,
-                "Queue items must be sorted descending by acquisition score: {} vs {}",
-                w[0].acquisition_score,
-                w[1].acquisition_score
-            );
-        }
-
-        // Verify prediction contents
-        for item in &queue {
-            assert!(!item.id.is_empty());
-            assert!(!item.text.is_empty());
-            assert!(questions.contains_key(&item.question_id));
-            assert!(!item.prediction.chosen_option.is_empty());
-            assert!(item.prediction.confidence >= 0.0 && item.prediction.confidence <= 1.0);
-            assert!(item.prediction.top2_margin >= 0.0 && item.prediction.top2_margin <= 1.0);
-            assert!(
-                item.prediction.normalized_entropy >= 0.0
-                    && item.prediction.normalized_entropy <= 1.0
-            );
-        }
-    }
-}
-
-#[test]
-fn test_active_learning_review_queue_export() {
-    let source = lemmata::resolve_data_source(
-        Path::new("data"),
-        Some(Path::new("data/customer_support.jsonl")),
-        false,
-        None,
-    )
-    .unwrap();
-    let items = source.read_items().unwrap();
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-
-    let active_engine = ActiveLearningEngine::new();
-    let (queue, _report) = active_engine
-        .sample(
-            &classifier,
-            &items,
-            &questions,
-            UncertaintyStrategy::Composite,
-            4,
-            None,
-        )
-        .unwrap();
-
-    let export_path = Path::new("target/integration_review_queue.jsonl");
-    if export_path.exists() {
-        let _ = std::fs::remove_file(export_path);
-    }
-
-    ActiveLearningEngine::export_queue(&queue, export_path).unwrap();
-    assert!(export_path.exists());
-
-    let content = std::fs::read_to_string(export_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines.len(), 4);
-
-    for line in lines {
-        let item: ReviewQueueItem = serde_json::from_str(line).unwrap();
-        assert!(!item.id.is_empty());
-        assert!(!item.text.is_empty());
-        assert!(item.acquisition_score > 0.0);
-        assert!(item.ood_diagnostics.free_energy.is_finite());
-        assert!(questions.contains_key(&item.question_id));
-        assert!(!item.prediction.chosen_option.is_empty());
-        assert!(!item.escalation_reason.is_empty());
-    }
-}
-
-#[test]
-fn test_active_distill_rlcd_dataset_generation() {
-    let source = lemmata::resolve_data_source(
-        Path::new("data"),
-        Some(Path::new("data/customer_support.jsonl")),
-        false,
-        None,
-    )
-    .unwrap();
-    let items = source.read_items().unwrap();
-    let questions = lemmata::load_questions_from_file(Path::new("schema/questions.json")).unwrap();
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-
-    let active_engine = ActiveLearningEngine::new();
-    let (rlcd_samples, report) = active_engine
-        .distill(&classifier, &items, &questions, 0.25, "customer_support")
-        .unwrap();
-
-    assert!(report.total_samples > 0);
-    assert_eq!(
-        report.train_samples + report.val_samples,
-        report.total_samples
-    );
-    assert!(report.average_margin_weight >= 1.0);
-    assert_eq!(rlcd_samples.len(), report.total_samples);
-
-    let export_path = Path::new("target/integration_rlcd_dataset.jsonl");
-    if export_path.exists() {
-        let _ = std::fs::remove_file(export_path);
-    }
-
-    ActiveLearningEngine::export_rlcd(&rlcd_samples, export_path).unwrap();
-    assert!(export_path.exists());
-
-    let content = std::fs::read_to_string(export_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines.len(), report.total_samples);
-
-    let mut train_count = 0;
-    let mut val_count = 0;
-
-    for line in lines {
-        let sample: RlcdSample = serde_json::from_str(line).unwrap();
-        assert!(!sample.input_text.is_empty());
-        assert!(!sample.question_id.is_empty());
-        assert!(!sample.candidate_options.is_empty());
-        assert!(!sample.target_label.is_empty());
-        assert!(!sample.negative_label.is_empty());
-        // Target and negative must be contrastive (different labels)
-        assert_ne!(sample.target_label, sample.negative_label);
-        // Margin weight must be >= 1.0
-        assert!(sample.margin_weight >= 1.0);
-
-        match sample.split.as_str() {
-            "train" => train_count += 1,
-            "val" => val_count += 1,
-            other => panic!("Invalid split label: {}", other),
-        }
-    }
-
-    assert_eq!(train_count, report.train_samples);
-    assert_eq!(val_count, report.val_samples);
-}
-
-#[test]
 fn test_stats_engine_speed_performance_accuracy() {
     let source = lemmata::resolve_data_source(
         Path::new("data"),
@@ -1570,48 +1148,6 @@ fn test_stats_engine_export_file() {
 }
 
 #[test]
-fn test_huggingface_ingest_and_auto_schema() {
-    unsafe {
-        std::env::set_var("LEMMATA_OFFLINE", "1");
-    }
-
-    let source = lemmata::datasource::HuggingFaceSource::new("fancyzhx/ag_news").with_limit(4);
-    let (items, schema) = source.read_items_with_schema().unwrap();
-
-    assert_eq!(items.len(), 4);
-    assert_eq!(items[0].id, "fancyzhx/ag_news:train:0");
-    assert!(items[0].ground_truth.is_some());
-    let gt = items[0].ground_truth.as_ref().unwrap();
-    assert_eq!(gt.get("classification").unwrap(), "Business");
-    assert_eq!(
-        items[1]
-            .ground_truth
-            .as_ref()
-            .unwrap()
-            .get("classification")
-            .unwrap(),
-        "Sci/Tech"
-    );
-
-    assert!(schema.contains_key("classification"));
-    let q = &schema["classification"];
-    let mut opts = q.render_options();
-    opts.sort();
-    assert_eq!(opts, vec!["Business", "Sci/Tech", "Sports", "World"]);
-
-    // Feed directly into StatsEngine
-    let classifier = LayaClassifier::with_checkpoint(Checkpoint::English);
-    let stats_engine = StatsEngine::new(classifier)
-        .with_iterations(2)
-        .with_warmup(1);
-    let report = stats_engine.evaluate(&items, &schema).unwrap();
-
-    assert_eq!(report.dataset_items, 4);
-    assert!(report.questions.contains_key("classification"));
-    assert!(report.speed.latency_p50_ms >= 0.0);
-}
-
-#[test]
 fn test_web_scraper_html_extraction_and_classification() {
     unsafe {
         std::env::set_var("LEMMATA_OFFLINE", "1");
@@ -1656,26 +1192,6 @@ fn test_web_scraper_html_extraction_and_classification() {
     let ans = res.answers.get("topic").unwrap();
     assert_eq!(ans.choice.as_deref(), Some("encoders"));
     assert!(ans.confidence > 0.5);
-}
-
-#[test]
-fn test_hacker_news_and_wikipedia_ingestion() {
-    unsafe {
-        std::env::set_var("LEMMATA_OFFLINE", "1");
-    }
-
-    let hn_source = lemmata::datasource::HackerNewsSource::new("top", 1);
-    let hn_items = hn_source.read_items().unwrap();
-    assert_eq!(hn_items.len(), 1);
-    assert_eq!(hn_items[0].id, "hn:39000000");
-    assert!(hn_items[0].preview_text(200).contains("AWS terms"));
-
-    let wiki_source =
-        lemmata::datasource::WikipediaSource::new(Some("Rust_(programming_language)".into()), 1);
-    let wiki_items = wiki_source.read_items().unwrap();
-    assert_eq!(wiki_items.len(), 1);
-    assert_eq!(wiki_items[0].id, "wiki:29414838");
-    assert!(wiki_items[0].preview_text(200).contains("Rust"));
 }
 
 #[test]
@@ -1738,19 +1254,6 @@ fn test_html_extractor_edge_cases_and_consecutive_lines() {
     let doc_entity = HtmlExtractor::extract(html_entity, "https://example.com");
     assert!(doc_entity.markdown.contains("AT&T"));
     assert!(doc_entity.markdown.contains("5 < 10"));
-}
-
-#[test]
-fn test_two_sample_ks_identical_distributions_ties() {
-    use lemmata::engine::drift::calculate_ks_statistic;
-
-    let dist_a = vec![1.0, 1.0, 1.0];
-    let dist_b = vec![1.0, 1.0];
-    assert_eq!(calculate_ks_statistic(&dist_a, &dist_b), 0.0);
-
-    let continuous_a = vec![0.1, 0.2, 0.3, 0.4];
-    let continuous_b = vec![0.1, 0.2, 0.3, 0.4];
-    assert_eq!(calculate_ks_statistic(&continuous_a, &continuous_b), 0.0);
 }
 
 #[test]

@@ -21,8 +21,6 @@ pub struct ScrapeOptions {
     pub user_agent: String,
     pub timeout_secs: u64,
     pub max_chars: usize,
-    pub use_jina: bool,
-    pub jina_api_key: Option<String>,
 }
 
 impl Default for ScrapeOptions {
@@ -31,8 +29,6 @@ impl Default for ScrapeOptions {
             user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; LemmataBot/0.1; +https://github.com/arvarik/lemmata)".to_string(),
             timeout_secs: 15,
             max_chars: 4000,
-            use_jina: false,
-            jina_api_key: std::env::var("JINA_API_KEY").ok(),
         }
     }
 }
@@ -433,55 +429,7 @@ pub(crate) fn curl_fetch(url: &str, headers: &[(&str, &str)], timeout_secs: u64)
     unreachable!("the last attempt returns or fails")
 }
 
-/// Jina Reader API client (`https://r.jina.ai/<url>`) for dynamic SPA rendering.
-pub struct JinaReaderClient;
-
-impl JinaReaderClient {
-    pub fn fetch(url: &str, api_key: Option<&str>, timeout_secs: u64) -> Result<ExtractedDocument> {
-        let jina_url = format!("https://r.jina.ai/{}", url);
-        let auth_header = api_key.map(|k| format!("Bearer {}", k));
-        let mut headers = vec![
-            ("Accept", "text/plain"),
-            ("X-Return-Format", "markdown"),
-            ("X-Timeout", "20"),
-        ];
-        if let Some(auth) = &auth_header {
-            headers.push(("Authorization", auth.as_str()));
-        }
-
-        let body = curl_fetch(&jina_url, &headers, timeout_secs)?
-            .trim()
-            .to_string();
-        if body.is_empty() {
-            bail!("Jina Reader returned empty response for {}", url);
-        }
-
-        // Try extracting first title line: Title: <title> or # <title>
-        let mut title = String::new();
-        for line in body.lines().take(10) {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed
-                .strip_prefix("Title:")
-                .or_else(|| trimmed.strip_prefix("# "))
-            {
-                title = rest.trim().to_string();
-                break;
-            }
-        }
-
-        let word_count = body.split_whitespace().count();
-
-        Ok(ExtractedDocument {
-            url: url.to_string(),
-            title,
-            markdown: body,
-            word_count,
-            is_likely_spa: false,
-        })
-    }
-}
-
-/// Unified web scraper with local parsing and automatic Jina Reader fallback for SPAs.
+/// Web scraper: fetches the page with curl and extracts its text locally.
 pub struct WebScraper {
     options: ScrapeOptions,
 }
@@ -504,15 +452,7 @@ impl WebScraper {
             }
         }
 
-        if self.options.use_jina {
-            return JinaReaderClient::fetch(
-                url,
-                self.options.jina_api_key.as_deref(),
-                self.options.timeout_secs,
-            );
-        }
-
-        // 1. Fetch raw HTML via system curl (zero dependencies)
+        // Fetch raw HTML via system curl (zero dependencies)
         let headers = [
             ("User-Agent", self.options.user_agent.as_str()),
             (
@@ -524,20 +464,7 @@ impl WebScraper {
         let raw_html = curl_fetch(url, &headers, self.options.timeout_secs)?;
         let mut doc = HtmlExtractor::extract(&raw_html, url);
 
-        // 2. Fallback check: if extracted text is minimal or SPA detected, try Jina Reader
-        if (doc.is_likely_spa || doc.markdown.len() < 120)
-            && !self.options.use_jina
-            && let Ok(jina_doc) = JinaReaderClient::fetch(
-                url,
-                self.options.jina_api_key.as_deref(),
-                self.options.timeout_secs,
-            )
-            && jina_doc.word_count > doc.word_count
-        {
-            doc = jina_doc;
-        }
-
-        // 3. Truncate safely on unicode character boundary
+        // Truncate safely on unicode character boundary
         let char_count = doc.markdown.chars().count();
         if char_count > self.options.max_chars {
             doc.markdown = doc.markdown.chars().take(self.options.max_chars).collect();

@@ -47,7 +47,7 @@ Every mock result has a `mock:` model id, so simulated decisions cannot pass for
 | `cpu` | The CPU |
 | `metal` | The Metal GPU. Fails when none is present |
 
-On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Latency for one item with 3 questions, and the peak memory of the process (`lemmata --device <d> bench -m <ckpt> --iterations 5 --warmup 2` on `data/customer_support.jsonl`, Apple M5 Pro, peak memory from `/usr/bin/time -l`):
+On the GPU, batch commands classify items in order, because calls from many threads only queue on one GPU. On the CPU they run in parallel. Latency for one item with 3 questions, and the peak memory of the process (`lemmata --device cpu bench -m <ckpt> --iterations 5 --warmup 2`, and the same with `--device metal`, on `data/customer_support.jsonl`, Apple M5 Pro, peak memory from `/usr/bin/time -l`):
 
 | Checkpoint | CPU p50 / p95 | CPU peak memory | Metal p50 / p95 | Metal peak memory |
 |---|---|---|---|---|
@@ -75,7 +75,7 @@ The robustness, consistency, and probe tests pass on both devices (`LEMMATA_DEVI
 
 **Masked-LM checkpoints** are pretrained encoders without a classification head, so lemmata uses cloze scoring (Schick & Schütze 2021). The prompt is `{text}\nQuestion: {instructions}\nAnswer:` with one mask per label token. An option's score is the log-probability of its label tokens (their sum), minus the same score for the content-free input "N/A" (contextual calibration, Zhao et al. 2021). Without that subtraction, common words such as "other" win regardless of the text. The prompt does not list the options, because the model then copies whichever option has the right number of tokens. `noul` uses the words "no" and "yes", and `score` uses each level's description. Input is capped at 2048 tokens, because the full attention matrix at 8k tokens needs gigabytes.
 
-Zero-shot accuracy, measured with `lemmata test` on public data from `lemmata fetch`: 1,000 seeded random items from the AG News and Banking77 test splits, the full SST-2 validation split (872), and 900 tweets from `cardiffnlp/tweet_sentiment_multilingual` (300 each in German, Spanish, and Arabic, 3 classes). Brackets give the 95% Wilson interval:
+Zero-shot accuracy, measured with `lemmata test` on public Hugging Face datasets: 1,000 seeded random items from the AG News and Banking77 test splits, the full SST-2 validation split (872), and 900 tweets from `cardiffnlp/tweet_sentiment_multilingual` (300 each in German, Spanish, and Arabic, 3 classes). Brackets give the 95% Wilson interval:
 
 | Checkpoint | AG News, 1,000 | SST-2, 872 | Banking77, 1,000 | Multilingual sentiment, 900 |
 |---|---|---|---|---|
@@ -220,9 +220,6 @@ lemmata classify --data-dir data --schema schema/questions.json --escalate-only 
 # Reuse decisions for repeated inputs within one run (exact-match cache)
 lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --cache --cache-stats
 
-# Intercept out-of-distribution inputs via free-energy profiling
-lemmata classify --file data/customer_support.jsonl --schema schema/questions.json --ood-profile models/laya/ood_profile.json --ood-action flag
-
 # Specify custom temperature calibration buckets and file extensions
 lemmata classify --data-dir data --schema schema/questions.json --config models/laya/rl_agent_config.json --extensions jsonl,csv
 ```
@@ -264,72 +261,31 @@ Verify question definitions and ensure candidate options fit within ModernBERT (
 lemmata schema validate schema/questions.json --checkpoint english
 ```
 
-### 7. Feature Experimentation (`lemmata experiment`)
-Evaluate model behavior, prompt variations, and calibration:
-
-```bash
-# 1. Option Order Invariance Test: tests for positional bias in [MASK] markers
-lemmata experiment --mode order --file data/customer_support.jsonl --schema schema/questions.json --permutations 10
-
-# 2. Temperature Calibration Sweep: find optimal ECE calibration temperature
-lemmata experiment --mode temp --file data/customer_support.jsonl --schema schema/questions.json
-
-# 3. Checkpoint Comparison: benchmark accuracy, latency, and ECE across all 3 checkpoints
-lemmata experiment --mode checkpoints --file data/customer_support.jsonl --schema schema/questions.json
-```
-
-### 8. Evaluate & Test Accuracy (`lemmata test`)
+### 7. Evaluate & Test Accuracy (`lemmata test`)
 Compute statistical metrics against labeled ground truth data (supports CI/CD test gates with `--min-accuracy`):
 
 ```bash
 lemmata test --file data/customer_support.jsonl --schema schema/questions.json --min-accuracy 0.60
 ```
 
-### 9. Benchmark Performance (`lemmata bench`)
+### 8. Benchmark Performance (`lemmata bench`)
 Measure real-world throughput and latency percentiles (with `--json` output for CI benchmarking):
 
 ```bash
 lemmata bench --data-dir data --schema schema/questions.json --iterations 50 --warmup 5
 ```
 
-### 10. Inspect Model Family Specs (`lemmata info`)
+### 9. Inspect Model Family Specs (`lemmata info`)
 ```bash
 lemmata info --checkpoint english
 ```
 
-### 11. Real-Time Distribution Drift & Concept Shift Detector (`lemmata drift`)
-Monitors unlabeled live production streams against golden reference datasets using Population Stability Index (PSI), continuous Wasserstein-1 Earth Mover's Distance, and class prior Jensen-Shannon Divergence:
+### 10. Ensembles (`lemmata ensemble`)
+Runs several checkpoints on the same inputs and averages their probabilities with weights (a linear pool). Each model's saved calibration applies first. The disagreement score is the mutual information between the members, so a high score flags an item where the models disagree:
 
 ```bash
-# Monitor drift between golden baseline and live production traffic
-lemmata drift \
-  --baseline data/customer_support.jsonl \
-  --current data/production_traffic.jsonl \
-  --schema schema/questions.json \
-  --psi-threshold 0.20 \
-  --wasserstein-threshold 0.15 \
-  --fail-on-drift
-```
-
-### 12. Declarative Policy Guardrails & Cryptographic Audit Trail (`lemmata guard`)
-Enforces deterministic safety rules, threshold policies, and routing actions (`ALLOW`, `BLOCK`, `ESCALATE`, `QUARANTINE`) with cryptographic audit logging:
-
-```bash
-# Evaluate incoming requests against enterprise safety policies
-lemmata guard \
-  --policy schema/policy.json \
-  --file data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --audit-output logs/audit.jsonl \
-  --format table
-```
-
-### 13. Multi-Checkpoint Mixture-of-Decisions Consensus (`lemmata consensus`)
-Executes parallel inference across all three Laya checkpoints (`english`, `multilingual`, `typed-decisions`), pools calibrated probabilities via Bayesian Model Averaging (BMA), and isolates epistemic uncertainty (model disagreement entropy) to flag disputed decisions:
-
-```bash
-# Evaluate 3-way checkpoint agreement with epistemic uncertainty scoring
-lemmata consensus \
+# Pool three checkpoints and flag the items where they disagree
+lemmata ensemble \
   --file data/customer_support.jsonl \
   --schema schema/questions.json \
   --checkpoints english,multilingual,typed-decisions \
@@ -337,7 +293,7 @@ lemmata consensus \
   --format table
 ```
 
-### 14. Automated Schema Induction & Criteria Synthesis (`lemmata schema infer`)
+### 11. Automated Schema Induction & Criteria Synthesis (`lemmata schema infer`)
 Automatically derives typed Laya question schemas (`choice`, `score`, `noul`) and synthesizes discriminative criteria from raw CSV or JSON files, using knapsack optimization to guarantee candidate descriptions strictly respect ModernBERT (192) or mmBERT (256) head token budgets:
 
 ```bash
@@ -348,7 +304,7 @@ lemmata schema infer \
   --output schema/inferred_schema.json
 ```
 
-### 15. Multi-Label Tag Classification (`lemmata classify --multi-label`)
+### 12. Multi-Label Tag Classification (`lemmata classify --multi-label`)
 Bypasses mutual-exclusion softmax for independent sigmoid scoring per option marker, returning all matching categories exceeding a calibrated threshold:
 
 ```bash
@@ -360,7 +316,7 @@ lemmata classify \
   --multi-label-threshold 0.40
 ```
 
-### 16. Decision Cache (`lemmata cache`)
+### 13. Decision Cache (`lemmata cache`)
 An in-memory cache for one run. The exact tier reuses a decision when the input text and schema repeat. The semantic tier (`--cache-semantic`, off by default) also reuses a decision for similar text, using cosine similarity over hashed 128-d word features. Those features do not come from the model, so a negated sentence can match the original. An admission guard caches only high-confidence, non-escalated decisions:
 
 ```bash
@@ -374,45 +330,26 @@ lemmata cache bench --file data/customer_support.jsonl --schema schema/questions
 lemmata cache clear
 ```
 
-### 17. Energy-Based OOD Detection (`lemmata ood`)
-Detects out-of-distribution inputs with the energy score of Liu et al. 2020, $E(x) = -\ln \sum_k \exp(z_k)$, on the raw option logits ($T = 1$). It also measures the distance to class centroids of hashed word features (not model embeddings). A profile covers one question. Its energy threshold is the in-distribution quantile that flags `--fpr-rate` of the in-distribution items, so `0.05` keeps 95% TPR. Profiles fitted before energy moved to raw logits are rejected, so refit them:
+### 14. Deferral to System 2 (`lemmata defer`)
+Decides which items System 1 keeps and which it defers to System 2 (a larger model or a person). lemmata does not call System 2 itself: `defer run` marks each item as kept or deferred, and your pipeline sends the deferred items on.
 
 ```bash
-# Fit an OOD baseline profile from golden in-distribution data
-lemmata ood fit \
-  --train-data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --output models/laya/ood_profile.json \
-  --fpr-rate 0.05
-
-# Evaluate OOD detection FPR and TPR/Recall against test data
-lemmata ood eval \
-  --profile models/laya/ood_profile.json \
-  --id-data data/customer_support.jsonl \
-  --ood-data data/banking_tickets.jsonl \
-  --schema schema/questions.json
-```
-
-### 18. Cost-Aware System 1 / System 2 Hybrid Cascading Router (`lemmata cascade`)
-Routes high-confidence requests through fast ModernBERT/mmBERT Laya (System 1, sub-35ms) while escalating ambiguous requests to frontier LLMs (System 2) seeded with Laya prior distributions:
-
-```bash
-# 1. Tune the Pareto-optimal risk threshold tau* for a given accuracy SLA
-lemmata cascade tune \
+# 1. Tune the risk threshold tau* for a target accuracy on labelled data
+lemmata defer tune \
   --val-data data/customer_support.jsonl \
   --schema schema/questions.json \
   --target-accuracy 0.95 \
   --system2-cost 0.01
 
-# 2. Execute live cascade routing
-lemmata cascade run \
+# 2. Mark each item as kept or deferred
+lemmata defer run \
   --file data/customer_support.jsonl \
   --schema schema/questions.json \
   --risk-threshold 0.45 \
   --system2-cost 0.01
 ```
 
-### 19. Signed Decision Receipts & Hash Chain (`lemmata attest`)
+### 15. Signed Decision Receipts & Hash Chain (`lemmata attest`)
 Each receipt holds a SHA-256 digest of its payload and an HMAC-SHA256 signature of that digest. Each receipt also stores the digest of the previous one ($H_i = \text{SHA256}(\text{Payload}_i)$, with $H_{i-1}$ inside the payload), so a changed, removed, or reordered receipt breaks the chain. HMAC is a shared-key scheme: anyone who can verify can also sign.
 
 Read the key from the `LEMMATA_ATTEST_KEY` environment variable. A key typed on the command line stays in your shell history:
@@ -420,18 +357,17 @@ Read the key from the `LEMMATA_ATTEST_KEY` environment variable. A key typed on 
 ```bash
 export LEMMATA_ATTEST_KEY="$(openssl rand -hex 32)"
 
-# Generate signed receipts during policy evaluation
-lemmata guard \
-  --policy schema/policy.json \
+# Append one signed receipt per decision (a later run continues the same chain)
+lemmata classify \
   --file data/customer_support.jsonl \
   --schema schema/questions.json \
-  --receipt-log logs/receipts.jsonl
+  --receipts logs/receipts.jsonl
 
 # Verify digests, signatures, and chain links across the receipt log
 lemmata attest verify --receipt-log logs/receipts.jsonl
 ```
 
-### 20. Dynamic Schema Criteria Knapsack Optimizer (`lemmata schema optimize`)
+### 16. Dynamic Schema Criteria Knapsack Optimizer (`lemmata schema optimize`)
 Uses 0/1 dynamic programming knapsack optimization over criteria clauses to compact verbose option descriptions into ModernBERT (192) or mmBERT (256) head token limits:
 
 ```bash
@@ -442,28 +378,28 @@ lemmata schema optimize \
   --diff
 ```
 
-### 21. Hierarchical Coarse-to-Fine Decision Routing (`lemmata hierarchical` / `lemmata route`)
+### 17. Label Taxonomies (`lemmata taxonomy`)
 Solves high-cardinality classification (>20 labels, e.g. Banking77) via a two-stage coarse-to-fine hierarchy:
 
 ```bash
-# 1. Visualize the hierarchical decision tree with token budget allocations
-lemmata hierarchical tree --schema schema/banking_hierarchy.json
+# 1. Print the taxonomy as a tree with its token budgets
+lemmata taxonomy show --schema schema/banking_hierarchy.json
 
 # 2. Validate token budgets across all coarse and fine nodes
-lemmata hierarchical validate --schema schema/banking_hierarchy.json
+lemmata taxonomy validate --schema schema/banking_hierarchy.json
 
-# 3. Classify inputs through the coarse-to-fine hierarchy (also via `lemmata route run`)
+# 3. Classify inputs through the coarse-to-fine taxonomy (also via `lemmata taxonomy run`)
 lemmata classify \
   --file data/banking_tickets.jsonl \
-  --hierarchical schema/banking_hierarchy.json \
+  --taxonomy schema/banking_hierarchy.json \
   --coarse-threshold 0.50 \
   --format table
 
 # 4. Benchmark coarse vs fine latency, escalation rates, and throughput
-lemmata hierarchical bench --schema schema/banking_hierarchy.json --file data/banking_tickets.jsonl
+lemmata taxonomy bench --schema schema/banking_hierarchy.json --file data/banking_tickets.jsonl
 ```
 
-### 22. Automated Temperature Calibration & ECE Tuner (`lemmata calibrate`)
+### 18. Automated Temperature Calibration & ECE Tuner (`lemmata calibrate`)
 Tunes per-bucket temperature parameters (`choice:2`, `choice:3-5`, `choice:6-10`, `choice:11+`, `score:3-5`, `noul:2`) from labeled validation sets using Golden-Section optimization to minimize ECE, NLL, or Brier score, with optional Quantile-Adaptive Temperature Scaling (**Q-ATS**). Fitted temperatures stay in [0.5, 5.0]. A bucket with fewer than 30 labeled samples (`--min-bucket-samples`) keeps its prior temperature:
 
 ```bash
@@ -509,7 +445,7 @@ The bias helps most where a model prefers some label words (NeoBERT on AG News: 
 
 `--fit-label-bias` fits one bias per choice label that maximizes the likelihood of the labelled answers (vector scaling with a bias term, Guo et al. 2017), and exports it as `cost_weights`. Zero-shot models favor some label words regardless of the text, and the bias removes that prior. Temperatures do not change which option wins, but the bias does.
 
-### 22b. Supervised Linear Probes (`lemmata probe fit`)
+### 19. Supervised Linear Probes (`lemmata probe fit`)
 With labelled data, a probe learns one choice question directly. It fits a softmax regression on the checkpoint's mean-pooled final hidden states (standardized per dimension), and picks the L2 strength on a held-out fifth of the training data. `--probe` then replaces zero-shot scoring for that question in `classify` and `test`. Probes need real weights. They lift the base encoders the most (NeoBERT on Banking77: 42.8% zero-shot, 71.8% with a probe fitted on 500 items):
 
 Accuracy (%) as zero-shot / `--fit-label-bias` / probe, each fitted on the same 500 training items (600 for multilingual sentiment) and tested on the sets of the accuracy table above. Bold marks the best of the three:
@@ -536,70 +472,14 @@ lemmata test -c eurobert --file data/test.jsonl --schema schema/topics.json --pr
 lemmata classify -c eurobert --text "Stocks fell after the earnings report" --schema schema/topics.json --probe probes/eurobert-topics.json
 ```
 
-### 23. Micro-Batch Streaming (`lemmata stream`)
-Classifies a stream of records in micro-batches, with optional caching and signed receipts. lemmata has no Kafka, S3, or Iceberg client. A `kafka://` source replays the local file in `?file=` with Kafka-style offsets, a `kafka://` sink writes the local file in `?file=`, and `lakehouse://` projects columns from a local file. `s3://`, `gcs://`, and `blob://` URIs return an error:
-
-```bash
-# 1. Ingest streaming events from Kafka topic and route to primary and escalation sinks
-lemmata stream \
-  --source "kafka://localhost:9092/inbound_tickets?group_id=lemmata_workers&file=data/customer_support.jsonl" \
-  --schema schema/questions.json \
-  --sink "output/routed_tickets.jsonl" \
-  --escalate-sink "output/human_review_queue.jsonl" \
-  --batch-size 32 \
-  --attest \
-  --receipt-log output/stream_receipts.jsonl \
-  --cache  # --attest reads the key from LEMMATA_ATTEST_KEY; verify with `lemmata attest verify --receipt-log output/stream_receipts.jsonl`
-
-# 2. Lakehouse columnar projection
-lemmata stream \
-  --source "lakehouse://data/customer_support.jsonl?columns=body" \
-  --schema schema/questions.json \
-  --sink output/lakehouse_decisions.jsonl \
-  --format compact
-```
-
-### 24. Active Learning & RLCD Distillation (`lemmata active`)
-Harvests ambiguous or out-of-distribution items into human-in-the-loop review queues and synthesizes contrastive preference corpora for **RLCD**:
-
-```bash
-# 1. Uncertainty Sampling (strategies: composite, entropy, margin, conformal, energy)
-lemmata active sample \
-  --data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --strategy composite \
-  --budget 20 \
-  --export-queue output/supervisor_review_queue.jsonl
-
-# 2. RLCD Dataset Synthesis
-lemmata active distill \
-  --data data/customer_support.jsonl \
-  --schema schema/questions.json \
-  --val-split 0.20 \
-  --output output/rlcd_contrastive_dataset.jsonl
-
-# 3. Active Learning Pool Diagnostics
-lemmata active stats --data data/customer_support.jsonl --schema schema/questions.json
-```
-
-### 25. Unified Speed, Performance & Accuracy Diagnostics (`lemmata stats`)
+### 20. Evaluation Report (`lemmata report`)
 Evaluates end-to-end system telemetry across **Speed & Latency Distributions**, **Throughput & Cache Efficiency**, and **Decision Accuracy & Calibration Quality**:
 
 ```bash
 # Full diagnostic report or compact one-line summary
-lemmata stats --file data/customer_support.jsonl --schema schema/questions.json --format table
-lemmata stats --file data/customer_support.jsonl --schema schema/questions.json --format compact
+lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format table
+lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format compact
 ```
-
-### 26. Public Dataset & Web Ingestion (`lemmata fetch` & `lemmata scrape`)
-Ingest datasets from Hugging Face Hub, Hacker News, Reddit, or Wikipedia, or scrape web pages into clean Markdown:
-
-```bash
-lemmata fetch --hf fancyzhx/ag_news --limit 50 --auto-schema --output data/ag_news.jsonl
-lemmata scrape --url https://example.com/article --format jsonl
-```
-
----
 
 ## 📄 License
 

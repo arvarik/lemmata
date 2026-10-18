@@ -1,4 +1,3 @@
-pub mod active;
 pub mod attest;
 pub mod cache;
 pub mod calibrate;
@@ -6,7 +5,6 @@ pub mod cascade;
 pub mod classifier;
 pub mod conformal;
 pub mod consensus;
-pub mod drift;
 pub mod evaluator;
 pub mod experiment;
 pub mod explain;
@@ -21,13 +19,8 @@ pub mod probe;
 pub mod shortlist;
 pub mod slicing;
 pub mod stats;
-pub mod stream;
 pub mod synthesis;
 
-pub use active::{
-    ActiveDistillReport, ActiveLearningEngine, ActiveLearningReport, OodDiagnostics,
-    ReviewQueueItem, ReviewQueuePrediction, RlcdSample, UncertaintyStrategy,
-};
 pub use attest::{
     AttestationEngine, AttestationVerificationReport, DecisionReceipt, RECEIPT_VERSION,
     schema_digest,
@@ -46,12 +39,8 @@ pub use cascade::{
 pub use classifier::{ClassifierConfig, LayaClassifier};
 pub use conformal::{ConformalEngine, ConformalReport};
 pub use consensus::{ConsensusEngine, ConsensusResult, ConsensusStatus};
-pub use drift::{DriftEngine, DriftReport, DriftSeverity};
 pub use evaluator::{BaselineComparison, Evaluator};
-pub use experiment::{
-    AdversarialPerturbationStat, AdversarialReport, ArenaDisagreement, ExperimentRunner,
-    ModelArenaEntry, ModelArenaReport,
-};
+pub use experiment::{ArenaDisagreement, ExperimentRunner, ModelArenaEntry, ModelArenaReport};
 pub use explain::AttributionEngine;
 pub use guardrail::{AuditRecord, GuardAction, GuardrailEngine, GuardrailPolicy, PolicyRule};
 pub use hierarchical::{
@@ -89,7 +78,6 @@ pub use stats::{
     AccuracyStats, CacheStatsSummary, PerformanceStats, QuestionStats, SpeedStats, StatsEngine,
     StatsEngineConfig, SystemStatsReport, UncertaintyStats,
 };
-pub use stream::{StreamMetrics, StreamPipeline, StreamPipelineConfig, StreamRecord};
 pub use synthesis::{
     InferredSchemaResult, SchemaKnapsackOptimizer, SchemaOptimizationResult, SchemaSynthesizer,
 };

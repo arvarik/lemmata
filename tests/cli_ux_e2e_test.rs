@@ -1,57 +1,35 @@
 use clap::Parser;
-use lemmata::cli::{Cli, Commands, GuardArgs};
-use std::path::Path;
+use lemmata::cli::{Cli, Commands};
 use std::process::Command;
 
 #[test]
-fn test_cli_flag_aliases_and_policy_default() {
-    // 1. Verify `lemmata route` alias maps to `Commands::Hierarchical`
-    let cli_route = Cli::try_parse_from([
+fn test_cli_flag_aliases() {
+    // 1. `lemmata taxonomy run` parses, and the old `route` alias is gone
+    let cli = Cli::try_parse_from([
         "lemmata",
-        "route",
+        "taxonomy",
         "run",
         "--schema",
         "schema/banking_hierarchy.json",
     ])
-    .expect("`lemmata route run` alias must parse");
-    assert!(matches!(cli_route.command, Commands::Hierarchical(_)));
-
-    // 2. Verify `lemmata guard` defaults to existing `schema/policy.json`
-    let cli_guard = Cli::try_parse_from(["lemmata", "guard"]).expect("`lemmata guard` must parse");
-    if let Commands::Guard(GuardArgs { policy, .. }) = cli_guard.command {
-        assert_eq!(policy, Path::new("schema/policy.json"));
-        assert!(policy.exists(), "Default policy path must exist on disk");
-    } else {
-        panic!("Expected Commands::Guard");
-    }
-
-    // 3. Verify documented README aliases (`--in-data`, `--test-data`, `--eval-data`, `--target-acc`, `--receipts`, `--attest-key`)
+    .expect("`lemmata taxonomy run` must parse");
+    assert!(matches!(cli.command, Commands::Taxonomy(_)));
     assert!(
         Cli::try_parse_from([
             "lemmata",
-            "ood",
-            "fit",
-            "--in-data",
-            "data/customer_support.jsonl",
-            "--fpr-rate",
-            "0.05",
+            "route",
+            "run",
+            "--schema",
+            "schema/banking_hierarchy.json"
         ])
-        .is_ok()
+        .is_err()
     );
+
+    // 2. Documented README aliases (`--eval-data`, `--target-acc`, `--data`, `--threshold`, `--receipts`, `--attest-key`)
     assert!(
         Cli::try_parse_from([
             "lemmata",
-            "ood",
-            "eval",
-            "--test-data",
-            "data/banking_tickets.jsonl",
-        ])
-        .is_ok()
-    );
-    assert!(
-        Cli::try_parse_from([
-            "lemmata",
-            "cascade",
+            "defer",
             "tune",
             "--eval-data",
             "data/customer_support.jsonl",
@@ -63,7 +41,7 @@ fn test_cli_flag_aliases_and_policy_default() {
     assert!(
         Cli::try_parse_from([
             "lemmata",
-            "cascade",
+            "defer",
             "run",
             "--data",
             "data/customer_support.jsonl",
@@ -108,28 +86,27 @@ fn test_cli_json_stdout_free_of_banner_pollution() {
         .expect("lemmata test --json stdout must be valid JSON without leading banners");
     assert!(parsed_test.get("accuracy").is_some());
 
-    // 2. `lemmata guard --format json` must emit pure JSON array on stdout
-    let out_guard = Command::new(bin)
+    // 2. `lemmata ensemble --json` must emit a pure JSON array on stdout
+    let out_ensemble = Command::new(bin)
         .env("LEMMATA_BACKEND", "mock")
         .args([
-            "guard",
+            "ensemble",
             "-f",
             "data/customer_support.jsonl",
             "-s",
             "schema/questions.json",
-            "--format",
-            "json",
+            "--json",
         ])
         .output()
-        .expect("Failed to execute lemmata guard --format json");
-    assert!(out_guard.status.success());
-    let parsed_guard: serde_json::Value = serde_json::from_slice(&out_guard.stdout)
-        .expect("lemmata guard --format json stdout must be valid JSON");
-    assert!(parsed_guard.is_array());
+        .expect("Failed to execute lemmata ensemble --json");
+    assert!(out_ensemble.status.success());
+    let parsed_ensemble: serde_json::Value = serde_json::from_slice(&out_ensemble.stdout)
+        .expect("lemmata ensemble --json stdout must be valid JSON");
+    assert!(parsed_ensemble.is_array());
 }
 
 #[test]
-fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
+fn test_arena_sweep_baseline_and_cost_calibration_e2e() {
     let bin = env!("CARGO_BIN_EXE_lemmata");
     let tmp_dir = std::env::temp_dir().join(format!("lemmata_e2e_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -164,11 +141,11 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
             < 1e-6
     );
 
-    // #2 Pareto Frontier Sweep (`lemmata cascade sweep --json`)
+    // #2 Pareto Frontier Sweep (`lemmata defer sweep --json`)
     let out_sweep = Command::new(bin)
         .env("LEMMATA_BACKEND", "mock")
         .args([
-            "cascade",
+            "defer",
             "sweep",
             "--file",
             "data/customer_support.jsonl",
@@ -179,10 +156,10 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
             "--json",
         ])
         .output()
-        .expect("Failed to execute lemmata cascade sweep --json");
+        .expect("Failed to execute lemmata defer sweep --json");
     assert!(out_sweep.status.success());
     let parsed_sweep: serde_json::Value =
-        serde_json::from_slice(&out_sweep.stdout).expect("Cascade sweep output must be valid JSON");
+        serde_json::from_slice(&out_sweep.stdout).expect("Defer sweep output must be valid JSON");
     let sweep_arr = parsed_sweep.as_array().expect("Sweep JSON must be array");
     assert_eq!(sweep_arr.len(), 19);
     assert!(
@@ -232,26 +209,6 @@ fn test_arena_sweep_baseline_adversarial_and_cost_calibration_e2e() {
         parsed_diff["baseline_diff"]["regressed"].as_bool(),
         Some(false)
     );
-
-    // #6 Adversarial Perturbation & Boundary Stress Test (`lemmata experiment --adversarial --json`)
-    let out_adv = Command::new(bin)
-        .env("LEMMATA_BACKEND", "mock")
-        .args([
-            "experiment",
-            "-f",
-            "data/customer_support.jsonl",
-            "-s",
-            "schema/questions.json",
-            "--adversarial",
-            "--json",
-        ])
-        .output()
-        .expect("Failed to execute lemmata experiment --adversarial --json");
-    assert!(out_adv.status.success());
-    let parsed_adv: serde_json::Value =
-        serde_json::from_slice(&out_adv.stdout).expect("Adversarial output must be valid JSON");
-    assert_eq!(parsed_adv["perturbations"].as_array().unwrap().len(), 5);
-    assert!(parsed_adv["robustness_score"].as_f64().is_some());
 
     // #8 Cost-Sensitive / Asymmetric Loss Threshold Optimizer (`lemmata calibrate --cost-weights ...`)
     let out_cal = Command::new(bin)
@@ -535,4 +492,193 @@ fn test_learn_never_panics_under_real_backends() {
             String::from_utf8_lossy(&out.stderr)
         ),
     }
+}
+
+/// Split a documented command into words, honoring single and double quotes. Stops at a pipe,
+/// a redirect, or a shell comment, because those belong to the shell, not to lemmata.
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for c in command.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    let end = words
+        .iter()
+        .position(|w| {
+            w == "|" || w == "&&" || w == "#" || w.starts_with('>') || w.starts_with("2>")
+        })
+        .unwrap_or(words.len());
+    words.truncate(end);
+    words
+}
+
+/// Every `lemmata ...` command in the lessons, recipes, glossary, quiz, reading list, and README
+/// must parse. Prose may name a command without its required values, so those errors pass.
+#[test]
+fn test_documented_commands_parse() {
+    use clap::error::ErrorKind;
+    use lemmata::engine::{
+        CurriculumPhase, build_all_quiz_questions, build_glossary, build_phase_lesson,
+        build_reading_list, build_workflow_recipes,
+    };
+
+    fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut texts = Vec::new();
+    for phase in CurriculumPhase::all() {
+        strings(
+            &serde_json::to_value(build_phase_lesson(phase)).unwrap(),
+            &mut texts,
+        );
+    }
+    strings(
+        &serde_json::to_value(build_workflow_recipes()).unwrap(),
+        &mut texts,
+    );
+    strings(&serde_json::to_value(build_glossary()).unwrap(), &mut texts);
+    strings(
+        &serde_json::to_value(build_all_quiz_questions()).unwrap(),
+        &mut texts,
+    );
+    strings(
+        &serde_json::to_value(build_reading_list(None)).unwrap(),
+        &mut texts,
+    );
+
+    let readme = std::fs::read_to_string("README.md").unwrap();
+    let mut in_block = false;
+    let mut pending = String::new();
+    for line in readme.lines() {
+        if line.trim_start().starts_with("```") {
+            in_block = !in_block;
+            continue;
+        }
+        if in_block {
+            pending.push_str(line.trim_end().trim_end_matches('\\'));
+            pending.push(' ');
+            if !line.trim_end().ends_with('\\') {
+                texts.push(std::mem::take(&mut pending).trim().to_string());
+            }
+        } else {
+            // In prose, only inline code is a command.
+            texts.extend(
+                line.split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .map(|span| format!("`{span}`")),
+            );
+        }
+    }
+
+    let mut commands = Vec::new();
+    for text in &texts {
+        if text.starts_with("lemmata ") {
+            commands.extend(
+                text.split(" / ")
+                    .filter(|c| c.starts_with("lemmata "))
+                    .map(str::to_string),
+            );
+        }
+        for span in text.split('`').skip(1).step_by(2) {
+            if span.starts_with("lemmata ") {
+                commands.push(span.to_string());
+            }
+        }
+    }
+    assert!(
+        commands.len() > 50,
+        "found only {} documented commands",
+        commands.len()
+    );
+
+    let failures: Vec<String> = commands
+        .iter()
+        .filter_map(|command| {
+            let err = Cli::try_parse_from(shell_words(command)).err()?;
+            match err.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::MissingRequiredArgument
+                | ErrorKind::MissingSubcommand
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => None,
+                _ => Some(format!(
+                    "{command}\n    {}",
+                    err.to_string().lines().next().unwrap_or("")
+                )),
+            }
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} documented commands do not parse:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Two `classify --receipts` runs append to one log and continue its hash chain.
+#[test]
+fn test_classify_receipts_append_and_verify() {
+    let bin = env!("CARGO_BIN_EXE_lemmata");
+    let log = std::env::temp_dir().join(format!("lemmata_receipts_{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .env("LEMMATA_BACKEND", "mock")
+            .env("LEMMATA_ATTEST_KEY", "test-key")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let log_arg = log.to_str().unwrap();
+    assert!(
+        run(&["classify", "--text", "refund me", "--receipts", log_arg])
+            .status
+            .success()
+    );
+    let file_run = [
+        "classify",
+        "-f",
+        "data/customer_support.jsonl",
+        "-s",
+        "schema/questions.json",
+        "--receipts",
+        log_arg,
+    ];
+    assert!(run(&file_run).status.success());
+
+    let out = run(&["attest", "verify", "--receipts", log_arg, "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let _ = std::fs::remove_file(&log);
+    assert_eq!(report["total_receipts"], 7);
+    assert_eq!(report["valid_receipts"], 7);
+    assert_eq!(report["chain_intact"], true);
 }

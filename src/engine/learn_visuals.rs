@@ -310,8 +310,8 @@ pub fn colorize_ascii_diagram(phase: u8, raw_diagram: &str) -> String {
         "[CLS] State [SEP]",
         "Head 25%",
         "Tail 75%",
-        "Semantic Cache",
-        "INCOMING STREAM",
+        "Decision Cache",
+        "INCOMING ITEMS",
         "RAW LOGITS",
     ];
     let magenta_terms = [
@@ -329,8 +329,8 @@ pub fn colorize_ascii_diagram(phase: u8, raw_diagram: &str) -> String {
         "Q-ATS",
         "Free Energy",
         "Split Conformal Set",
-        "System 1 Router / Consensus",
-        "Guardrail & Merkle Attest",
+        "System 1 Model or Ensemble",
+        "Signed Receipt",
     ];
     let green_terms = [
         "P(billing)=0.94",
@@ -341,7 +341,6 @@ pub fn colorize_ascii_diagram(phase: u8, raw_diagram: &str) -> String {
         "AUTO-EXECUTE",
         "SINGLETON",
         "Singleton",
-        "ACTIVE RLCD DISTILL",
         "✅",
     ];
     let yellow_terms = [
@@ -394,7 +393,7 @@ pub fn colorize_ascii_diagram(phase: u8, raw_diagram: &str) -> String {
             "Phase 3 Architecture: Head-Tail Chunking, Two-Stage Shortlisting & <0.5ms Meta-Router"
         }
         4 => "Phase 4 Architecture: Free-Energy OOD Gate, Q-ATS Temperature & Conformal Sets",
-        5 => "Phase 5 Architecture: Semantic Cache, System 1/2 Pareto Cascade & Active RLCD Loop",
+        5 => "Phase 5 Architecture: Decision Cache, System 1/2 Deferral & Signed Receipts",
         _ => "System 1 Visual Architecture Blueprint",
     };
 

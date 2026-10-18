@@ -20,7 +20,7 @@ These are the trust boundaries that lemmata relies on. A report that breaks one 
 
 - **Model files.** lemmata loads weights only from `model.safetensors`, through a memory map, plus JSON configs and `tokenizer.json`. Safetensors holds only tensors, so loading a checkpoint does not run code. lemmata never runs the Python files that ship with some checkpoints (for example `rl_agent_api.py`). A crafted model or tokenizer file that crashes lemmata, reads outside its file, or runs code is a vulnerability.
 - **Downloads.** `lemmata` downloads checkpoints by running the Hugging Face CLI (`hf`, or `huggingface-cli`) as a subprocess. It uses your existing Hugging Face login and stores no credentials itself.
-- **Network data.** `fetch`, `hn`, `reddit`, `wikipedia`, and `scrape` run `curl` on the URLs that you give. lemmata treats their responses as untrusted text. lemmata does not open a listening port.
+- **Network data.** `classify --url` runs `curl` on the URL that you give, and lemmata treats the page as untrusted text. lemmata sends your data to no other service, and it does not open a listening port.
 - **Decision receipts.** lemmata signs receipts with HMAC-SHA256 and chains them by hash. The key comes from `LEMMATA_ATTEST_KEY` or `--attest-key`. A key on the command line stays in your shell history, so use the environment variable. A way to forge or reorder receipts without the key is a vulnerability.
 
 Out of scope: wrong or low-confidence classifications. Those are model accuracy issues, so report them as normal issues.

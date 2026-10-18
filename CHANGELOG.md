@@ -12,7 +12,8 @@ The first release.
 - `classify` for files, stdin, and inline text. `native` is the default backend: a checkpoint without weights fails and names the `lemmata download` command to run. `--backend auto` and `--backend mock` simulate missing models.
 - Temperature calibration (`calibrate`), conformal prediction sets (`conformal`), and supervised probes (`probe`) in plain, residual, and stacked kinds.
 - Evaluation and benchmarks: `test`, `bench`, `compare`, and `explain`.
-- Signed, hash-chained decision receipts (`attest`).
+- Signed, hash-chained decision receipts: `classify --receipts` writes them, and `attest verify` checks them.
+- Ensembles (`ensemble`), label taxonomies (`taxonomy`), deferral to System 2 (`defer`), evaluation reports (`report`), a decision cache (`cache`), lessons (`learn`), and workflow recipes (`guide`).
 - Prebuilt binaries for Linux (x86_64 glibc and musl, ARM64) and macOS (Intel and Apple Silicon) with build provenance attestations, and a container image on GHCR.
 
 [0.1.0]: https://github.com/arvarik/lemmata/releases/tag/v0.1.0

@@ -179,7 +179,7 @@ fn test_downloader_verify_checkpoint_no_false_positive_on_missing_dir() {
 }
 
 #[test]
-fn test_arena_and_slice_matrix_with_options_and_checkpoint_temperature_sweep() {
+fn test_arena_and_slice_matrix_with_options() {
     let items = FileSource::parse_file(Path::new("data/system1_golden_benchmark.jsonl")).unwrap();
     let schema_str = std::fs::read_to_string("schema/system1_benchmark_questions.json").unwrap();
     let questions: BTreeMap<String, Question> = serde_json::from_str(&schema_str).unwrap();
@@ -222,12 +222,4 @@ fn test_arena_and_slice_matrix_with_options_and_checkpoint_temperature_sweep() {
     assert!(slices.contains(&"long".to_string()));
     assert_eq!(rows.len(), 2);
     assert!(rows[0].slice_accuracies["long"] >= 0.60);
-
-    ExperimentRunner::sweep_temperature_calibration_for_checkpoint(
-        Checkpoint::DebertaV3ZeroShot,
-        &long_items,
-        &questions,
-        &[0.5, 1.0, 2.0],
-    )
-    .unwrap();
 }

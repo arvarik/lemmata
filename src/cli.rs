@@ -45,15 +45,6 @@ pub enum Commands {
     #[command(visible_alias = "run", alias = "predict", alias = "infer")]
     Classify(ClassifyArgs),
 
-    /// Fetch public datasets or live discussions from Hugging Face, Hacker News, Reddit, or Wikipedia
-    Fetch(FetchArgs),
-
-    /// Scrape web pages or articles into clean LLM-ready markdown or text
-    Scrape(ScrapeArgs),
-
-    /// Run robustness and calibration experiments (order invariance, temperature sweeps)
-    Experiment(ExperimentArgs),
-
     /// Evaluate classification accuracy and calibration against ground-truth labels
     #[command(visible_alias = "eval")]
     Test(TestArgs),
@@ -78,30 +69,20 @@ pub enum Commands {
     /// Validate and lint question schemas against Laya head token budgets
     Schema(SchemaArgs),
 
-    /// Detect concept drift and distribution shift between baseline and live inputs
-    Drift(DriftArgs),
-
-    /// Enforce declarative policy guardrails and emit immutable audit records
-    Guard(GuardArgs),
-
-    /// Multi-checkpoint mixture-of-decisions consensus with epistemic uncertainty
-    Consensus(ConsensusArgs),
+    /// Pool several checkpoints into one ensemble and show where they disagree
+    Ensemble(EnsembleArgs),
 
     /// Manage sub-millisecond semantic and exact decision cache
     Cache(CacheArgs),
 
-    /// Free-energy and Mahalanobis++ out-of-distribution (OOD) detection
-    Ood(OodArgs),
-
-    /// Cost-aware System 1 / System 2 cascading hybrid router
-    Cascade(CascadeArgs),
+    /// Decide which items to defer to a larger model or a person (a System 1 / System 2 cascade)
+    Defer(DeferArgs),
 
     /// Verify signed, hash-chained decision receipts
     Attest(AttestArgs),
 
-    /// Hierarchical coarse-to-fine decision trees for high-cardinality routing
-    #[command(visible_alias = "route")]
-    Hierarchical(HierarchicalArgs),
+    /// Classify against a label taxonomy: a coarse label first, then a fine label
+    Taxonomy(TaxonomyArgs),
 
     /// Automatically tune and calibrate temperature parameters per question bucket
     #[command(visible_alias = "tune")]
@@ -110,14 +91,8 @@ pub enum Commands {
     /// Fit supervised linear probes on labelled data
     Probe(ProbeArgs),
 
-    /// Process live streaming events with micro-batching, lakehouse columnar projection, and dual sinks
-    Stream(StreamArgs),
-
-    /// Active learning uncertainty sampling, supervisor review queue, and RLCD contrastive distillation
-    Active(ActiveArgs),
-
-    /// Comprehensive system speed, throughput performance, and classification accuracy statistics
-    Stats(StatsArgs),
+    /// Full evaluation report for one checkpoint: accuracy, calibration, speed, and escalation
+    Report(ReportArgs),
 
     /// Head-to-head System 1 model arena comparing accuracy, agreement, Cohen's kappa, McNemar's chi2, and speedup
     #[command(visible_alias = "arena")]
@@ -287,17 +262,13 @@ pub struct ClassifyArgs {
     #[arg(long)]
     pub cache_stats: bool,
 
-    /// Path to fitted OOD profile JSON to check for anomalies
-    #[arg(long)]
-    pub ood_profile: Option<PathBuf>,
+    /// Append one signed, hash-chained receipt per decision to this JSONL file. Check it with `lemmata attest verify`
+    #[arg(long, conflicts_with = "taxonomy")]
+    pub receipts: Option<PathBuf>,
 
-    /// Critical OOD threshold (anomaly score >= threshold triggers action, default: 0.60)
-    #[arg(long, default_value_t = 0.60)]
-    pub ood_threshold: f64,
-
-    /// Action when OOD detected (allow, flag, escalate, quarantine)
-    #[arg(long, default_value = "escalate")]
-    pub ood_action: String,
+    /// HMAC-SHA256 key that signs the receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
+    #[arg(long, env = "LEMMATA_ATTEST_KEY", hide_env_values = true)]
+    pub attest_key: Option<String>,
 
     /// Comma-separated file extensions to ingest from directory (e.g. "json,jsonl,csv")
     #[arg(long)]
@@ -307,9 +278,9 @@ pub struct ClassifyArgs {
     #[arg(long)]
     pub no_recursive: bool,
 
-    /// Path to hierarchical question schema (coarse-to-fine decision tree)
+    /// Path to a taxonomy schema (coarse labels, then fine labels), as for `lemmata taxonomy run`
     #[arg(long)]
-    pub hierarchical: Option<PathBuf>,
+    pub taxonomy: Option<PathBuf>,
 
     /// Coarse router confidence threshold to proceed to fine sub-classifier (default: 0.50)
     #[arg(long, default_value_t = 0.50)]
@@ -330,41 +301,6 @@ pub struct ClassifyArgs {
     /// Supervised probe from `lemmata probe fit`. It replaces zero-shot scoring for its question
     #[arg(long)]
     pub probe: Option<PathBuf>,
-}
-
-#[derive(Args, Debug)]
-pub struct ExperimentArgs {
-    /// Directory to ingest data from (default: data)
-    #[arg(long, default_value = "data")]
-    pub data_dir: PathBuf,
-
-    /// Specific file to ingest
-    #[arg(short, long)]
-    pub file: Option<PathBuf>,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Experiment mode: order (position invariance), temp (calibration sweep), checkpoints (compare models), or adversarial
-    #[arg(short, long, default_value = "order")]
-    pub mode: ExperimentMode,
-
-    /// Run adversarial perturbation and boundary stress test (shortcut for --mode adversarial)
-    #[arg(long)]
-    pub adversarial: bool,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(short, long, visible_alias = "model", default_value = "english")]
-    pub checkpoint: String,
-
-    /// Number of permutations for option ordering experiment
-    #[arg(long, default_value_t = 5)]
-    pub permutations: usize,
-
-    /// Output experiment results as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -605,6 +541,10 @@ pub struct ExplainArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
+    /// Comma-separated labels for an inline question, used when no --schema is given
+    #[arg(short, long, default_value = "billing,technical,sales,other")]
+    pub labels: String,
+
     /// Specific question ID to explain
     #[arg(long)]
     pub qid: Option<String>,
@@ -733,117 +673,7 @@ pub struct SchemaInferArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct DriftArgs {
-    /// Path to golden baseline reference dataset (JSONL or CSV)
-    #[arg(short, long)]
-    pub baseline: PathBuf,
-
-    /// Specific current production file to test for drift
-    #[arg(long)]
-    pub current: Option<PathBuf>,
-
-    /// Directory to ingest current production data from (default: data)
-    #[arg(long, default_value = "data")]
-    pub data_dir: PathBuf,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Critical threshold for Population Stability Index (PSI)
-    #[arg(long, default_value_t = 0.20)]
-    pub psi_threshold: f64,
-
-    /// Critical threshold for continuous Wasserstein-1 Earth Mover's Distance
-    #[arg(long, default_value_t = 0.15)]
-    pub wasserstein_threshold: f64,
-
-    /// Exit with error code if critical drift is detected (for CI/CD gating)
-    #[arg(long)]
-    pub fail_on_drift: bool,
-
-    /// Output report as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct GuardArgs {
-    /// Path to declarative policy JSON file defining guardrail rules
-    #[arg(short, long, default_value = "schema/policy.json")]
-    pub policy: PathBuf,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Directory to ingest data from (default: data)
-    #[arg(long, default_value = "data")]
-    pub data_dir: PathBuf,
-
-    /// Specific file to ingest
-    #[arg(short, long)]
-    pub file: Option<PathBuf>,
-
-    /// Read data streamed from standard input
-    #[arg(long)]
-    pub stdin: bool,
-
-    /// Classify inline text snippet directly from command line
-    #[arg(short, long)]
-    pub text: Option<String>,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Optional path to write JSONL audit log records
-    #[arg(long)]
-    pub audit_output: Option<PathBuf>,
-
-    /// HMAC-SHA256 key that signs decision receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
-    #[arg(long, env = "LEMMATA_ATTEST_KEY", hide_env_values = true)]
-    pub attest_key: Option<String>,
-
-    /// Path to output cryptographically signed receipts JSONL
-    #[arg(long)]
-    pub receipt_log: Option<PathBuf>,
-
-    /// Comma-separated file extensions to ingest from directory
-    #[arg(long)]
-    pub extensions: Option<String>,
-
-    /// Do not recursively traverse subdirectories
-    #[arg(long)]
-    pub no_recursive: bool,
-
-    /// Output presentation format (table, json, pretty, compact, csv, jsonl)
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
-
-    /// Output report as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct ConsensusArgs {
+pub struct EnsembleArgs {
     /// Comma-separated list of checkpoints (default: "english,multilingual,typed-decisions")
     #[arg(
         short,
@@ -930,120 +760,25 @@ pub struct CacheBenchArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct OodArgs {
+pub struct DeferArgs {
     #[command(subcommand)]
-    pub action: OodCommands,
+    pub action: DeferCommands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum OodCommands {
-    /// Fit OOD detection profile on baseline in-distribution data
-    Fit(OodFitArgs),
-
-    /// Evaluate OOD detection on in-distribution vs anomaly datasets
-    Eval(OodEvalArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct OodFitArgs {
-    /// In-distribution training dataset (JSONL or CSV)
-    #[arg(
-        short,
-        long,
-        visible_alias = "in-data",
-        visible_alias = "file",
-        default_value = "data/customer_support.jsonl"
-    )]
-    pub train_data: PathBuf,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long, default_value = "schema/questions.json")]
-    pub schema: PathBuf,
-
-    /// Target question ID to fit centroids for
-    #[arg(long, default_value = "classification")]
-    pub target_qid: String,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Target false-positive rate (FPR) for threshold calibration
-    #[arg(long, default_value_t = 0.05)]
-    pub fpr_rate: f64,
-
-    /// Output file to save fitted OOD profile JSON
-    #[arg(short, long, default_value = "models/laya/ood_profile.json")]
-    pub output: PathBuf,
-
-    /// Output fitted profile as JSON to stdout
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct OodEvalArgs {
-    /// In-distribution evaluation dataset
-    #[arg(long, default_value = "data/customer_support.jsonl")]
-    pub id_data: PathBuf,
-
-    /// Out-of-distribution anomaly dataset
-    #[arg(
-        long,
-        visible_alias = "test-data",
-        default_value = "data/banking_tickets.jsonl"
-    )]
-    pub ood_data: PathBuf,
-
-    /// Path to questions schema JSON file
-    #[arg(short, long, default_value = "schema/questions.json")]
-    pub schema: PathBuf,
-
-    /// Path to fitted OOD profile JSON
-    #[arg(short, long, default_value = "models/laya/ood_profile.json")]
-    pub profile: PathBuf,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Output evaluation metrics as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct CascadeArgs {
-    #[command(subcommand)]
-    pub action: CascadeCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum CascadeCommands {
+pub enum DeferCommands {
     /// Tune Pareto-optimal threshold given target accuracy SLA
-    Tune(CascadeTuneArgs),
+    Tune(DeferTuneArgs),
 
     /// Sweep thresholds across [0.05, 0.95] and display full Cost / Coverage / Accuracy Pareto table
-    Sweep(CascadeTuneArgs),
+    Sweep(DeferTuneArgs),
 
     /// Run cost-aware cascading router on inputs
-    Run(CascadeRunArgs),
+    Run(DeferRunArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct CascadeTuneArgs {
+pub struct DeferTuneArgs {
     /// Labeled validation dataset
     #[arg(
         short,
@@ -1090,7 +825,7 @@ pub struct CascadeTuneArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct CascadeRunArgs {
+pub struct DeferRunArgs {
     /// Specific file to route
     #[arg(short, long, visible_alias = "data")]
     pub file: Option<PathBuf>,
@@ -1188,25 +923,25 @@ pub struct SchemaOptimizeArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct HierarchicalArgs {
+pub struct TaxonomyArgs {
     #[command(subcommand)]
-    pub command: HierarchicalCommands,
+    pub command: TaxonomyCommands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum HierarchicalCommands {
+pub enum TaxonomyCommands {
     /// Classify inputs through a hierarchical coarse-to-fine decision tree
-    Run(HierarchicalRunArgs),
-    /// Inspect and print ASCII tree visualization of a hierarchical schema
-    Tree(HierarchicalTreeArgs),
+    Run(TaxonomyRunArgs),
+    /// Print a taxonomy schema as a tree
+    Show(TaxonomyShowArgs),
     /// Validate token budgets across all coarse and fine hierarchical nodes
-    Validate(HierarchicalValidateArgs),
+    Validate(TaxonomyValidateArgs),
     /// Benchmark hierarchical coarse vs fine latency and throughput
-    Bench(HierarchicalBenchArgs),
+    Bench(TaxonomyBenchArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct HierarchicalRunArgs {
+pub struct TaxonomyRunArgs {
     /// Path to hierarchical question schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
@@ -1259,7 +994,7 @@ pub struct HierarchicalRunArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct HierarchicalTreeArgs {
+pub struct TaxonomyShowArgs {
     /// Path to hierarchical question schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
@@ -1276,7 +1011,7 @@ pub struct HierarchicalTreeArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct HierarchicalValidateArgs {
+pub struct TaxonomyValidateArgs {
     /// Path to hierarchical question schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
@@ -1293,7 +1028,7 @@ pub struct HierarchicalValidateArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct HierarchicalBenchArgs {
+pub struct TaxonomyBenchArgs {
     /// Path to hierarchical question schema JSON file
     #[arg(short, long)]
     pub schema: PathBuf,
@@ -1400,209 +1135,7 @@ pub struct CalibrateArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct StreamArgs {
-    /// Input: a local path, - for stdin, lakehouse://path?columns=..., or kafka://broker/topic?file=path (replays the local file)
-    #[arg(short = 'i', long, alias = "input")]
-    pub source: String,
-
-    /// Path to question schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Output file path, - for stdout, or kafka://broker/topic?file=path (writes the local file)
-    #[arg(long, default_value = "-")]
-    pub sink: String,
-
-    /// Escalation output file path, or kafka://broker/topic?file=path (writes the local file)
-    #[arg(long)]
-    pub escalate_sink: Option<String>,
-
-    /// Micro-batch accumulation size limit (default: 32)
-    #[arg(long, default_value_t = 32)]
-    pub batch_size: usize,
-
-    /// Maximum accumulation flush window in milliseconds (default: 50)
-    #[arg(long, default_value_t = 50)]
-    pub max_flush_interval_ms: u64,
-
-    /// Confidence threshold below which events are diverted to the escalation sink (default: 0.50)
-    #[arg(long, default_value_t = 0.50)]
-    pub escalate_threshold: f64,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Optional calibrated agent config (rl_agent_config.json)
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-
-    /// Columnar projection list for lakehouse / tabular sources (comma-separated, e.g. "id,body,target")
-    #[arg(long)]
-    pub columns: Option<String>,
-
-    /// Enable semantic decision cache
-    #[arg(long)]
-    pub cache: bool,
-
-    /// Emit signed, hash-chained decision receipts (needs a signing key)
-    #[arg(long)]
-    pub attest: bool,
-
-    /// HMAC-SHA256 key that signs receipts. Prefer the LEMMATA_ATTEST_KEY environment variable: a key on the command line stays in shell history
-    #[arg(long, env = "LEMMATA_ATTEST_KEY", hide_env_values = true)]
-    pub attest_secret: Option<String>,
-
-    /// Write the full signed receipts to this JSONL file, for `lemmata attest verify`
-    #[arg(long, requires = "attest")]
-    pub receipt_log: Option<PathBuf>,
-
-    /// Maximum number of events to process before stopping (default: unlimited)
-    #[arg(long)]
-    pub limit: Option<usize>,
-
-    /// Output report format (compact, table, json)
-    #[arg(long, default_value = "compact")]
-    pub format: OutputFormat,
-}
-
-#[derive(Args, Debug)]
-pub struct ActiveArgs {
-    #[command(subcommand)]
-    pub action: ActiveCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ActiveCommands {
-    /// Select high-uncertainty samples for supervisor review queue using active learning
-    Sample(ActiveSampleArgs),
-
-    /// Export supervisor resolutions or labeled data into RLCD contrastive distillation pairs
-    Distill(ActiveDistillArgs),
-
-    /// Inspect uncertainty distributions and active learning pool diagnostics
-    Stats(ActiveStatsArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct ActiveSampleArgs {
-    /// Unlabeled or candidate evaluation dataset file (JSON, JSONL, CSV)
-    #[arg(short = 'd', long, alias = "file")]
-    pub data: PathBuf,
-
-    /// Path to question schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Uncertainty sampling strategy: composite, entropy, margin, conformal, energy (default: composite)
-    #[arg(long, default_value = "composite")]
-    pub strategy: crate::engine::active::UncertaintyStrategy,
-
-    /// Maximum number of high-uncertainty samples to acquire for review (default: 50)
-    #[arg(short = 'k', long, default_value_t = 50)]
-    pub budget: usize,
-
-    /// Conformal error rate alpha for set cardinality calculation (default: 0.10)
-    #[arg(long, default_value_t = 0.10)]
-    pub conformal_alpha: f64,
-
-    /// Escalation threshold for flagging critical items (default: 0.50)
-    #[arg(long, default_value_t = 0.50)]
-    pub escalate_threshold: f64,
-
-    /// Optional path to pre-fitted OOD profile for free-energy calculation
-    #[arg(long)]
-    pub ood_profile: Option<PathBuf>,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Export prioritized review queue items to specified JSONL file (e.g. data/review_queue.jsonl)
-    #[arg(short = 'o', long, alias = "output")]
-    pub export_queue: Option<PathBuf>,
-
-    /// Output report format (table, json, compact)
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
-}
-
-#[derive(Args, Debug)]
-pub struct ActiveDistillArgs {
-    /// Path to reviewed queue or labeled ground-truth dataset (JSON, JSONL, CSV)
-    #[arg(short = 'd', long, alias = "file")]
-    pub data: PathBuf,
-
-    /// Path to question schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Destination path for RLCD contrastive dataset (default: data/rlcd_dataset.jsonl)
-    #[arg(short = 'o', long, default_value = "data/rlcd_dataset.jsonl")]
-    pub output: PathBuf,
-
-    /// Fraction of samples allocated to validation split (default: 0.15)
-    #[arg(long, default_value_t = 0.15)]
-    pub val_split: f64,
-
-    /// Data provenance source label (default: human_supervisor_resolution)
-    #[arg(long, default_value = "human_supervisor_resolution")]
-    pub source_label: String,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Output report format (table, json, compact)
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
-}
-
-#[derive(Args, Debug)]
-pub struct ActiveStatsArgs {
-    /// Dataset file to inspect for uncertainty distributions
-    #[arg(short = 'd', long, alias = "file")]
-    pub data: PathBuf,
-
-    /// Path to question schema JSON file
-    #[arg(short, long)]
-    pub schema: Option<PathBuf>,
-
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
-    #[arg(
-        short,
-        long,
-        short_alias = 'm',
-        visible_alias = "model",
-        default_value = "english"
-    )]
-    pub checkpoint: String,
-
-    /// Output report format (table, json, compact)
-    #[arg(long, default_value = "table")]
-    pub format: OutputFormat,
-}
-
-#[derive(Args, Debug)]
-pub struct StatsArgs {
+pub struct ReportArgs {
     /// Directory to ingest data from (default: data)
     #[arg(long, default_value = "data")]
     pub data_dir: PathBuf,
@@ -1680,108 +1213,9 @@ pub enum OutputFormat {
     Jsonl,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExperimentMode {
-    Order,
-    Temp,
-    Checkpoints,
-    Adversarial,
-}
-
-#[derive(Args, Debug)]
-#[command(group(
-    clap::ArgGroup::new("source")
-        .required(true)
-        .args(["hf", "hn", "reddit", "wikipedia"])
-))]
-pub struct FetchArgs {
-    /// Hugging Face dataset identifier (e.g. "ag_news", "fancyzhx/ag_news", "PolyAI/banking77", "imdb")
-    #[arg(long, group = "source", value_name = "DATASET")]
-    pub hf: Option<String>,
-
-    /// Hacker News feed ("top", "new", "best", "ask", "show")
-    #[arg(long, group = "source", value_name = "CATEGORY")]
-    pub hn: Option<String>,
-
-    /// Reddit subreddit name to fetch from (e.g. "rust", "machinelearning", "localllama")
-    #[arg(long, group = "source", value_name = "SUBREDDIT")]
-    pub reddit: Option<String>,
-
-    /// Wikipedia article title or search term (e.g. "Rust_(programming_language)", "Artificial_intelligence")
-    #[arg(long, group = "source", value_name = "ARTICLE")]
-    pub wikipedia: Option<String>,
-
-    /// Dataset configuration / subset (for multi-subset Hugging Face datasets, default: "default")
-    #[arg(long, default_value = "default")]
-    pub config: String,
-
-    /// Dataset split to retrieve (default: "train" for Hugging Face)
-    #[arg(short, long, default_value = "train")]
-    pub split: String,
-
-    /// Maximum number of records or stories to fetch (default: 50)
-    #[arg(short = 'n', long, default_value_t = 50)]
-    pub limit: usize,
-
-    /// Record or pagination offset (default: 0)
-    #[arg(long, default_value_t = 0)]
-    pub offset: usize,
-
-    /// Custom text column override
-    #[arg(long)]
-    pub text_col: Option<String>,
-
-    /// Custom label column override
-    #[arg(long)]
-    pub label_col: Option<String>,
-
-    /// Automatically infer and generate an aligned Laya question schema from dataset features
-    #[arg(long)]
-    pub auto_schema: bool,
-
-    /// Optional file destination to save inferred schema JSON (when --auto-schema is set)
-    #[arg(long, value_name = "PATH")]
-    pub schema_output: Option<PathBuf>,
-
-    /// Write output to file instead of standard output (stdout)
-    #[arg(short = 'o', long, value_name = "FILE")]
-    pub output: Option<PathBuf>,
-
-    /// Output presentation format (jsonl, json, csv, table; default: jsonl for piping)
-    #[arg(long, default_value = "jsonl")]
-    pub format: OutputFormat,
-}
-
-#[derive(Args, Debug)]
-pub struct ScrapeArgs {
-    /// Target web page URL to scrape (e.g. `https://news.ycombinator.com`)
-    #[arg(short = 'u', long, value_name = "URL")]
-    pub url: String,
-
-    /// Maximum Unicode character count for scraped content (default: 4000)
-    #[arg(long, default_value_t = 4000)]
-    pub max_chars: usize,
-
-    /// Request timeout in seconds (default: 15)
-    #[arg(long, default_value_t = 15)]
-    pub timeout: u64,
-
-    /// Route through Jina Reader (`https://r.jina.ai/<url>`) for headless dynamic markdown rendering
-    #[arg(long)]
-    pub jina: bool,
-
-    /// Write output to file instead of standard output (stdout)
-    #[arg(short = 'o', long, value_name = "FILE")]
-    pub output: Option<PathBuf>,
-
-    /// Output presentation format (jsonl, json, table; default: jsonl)
-    #[arg(long, default_value = "jsonl")]
-    pub format: OutputFormat,
-}
-
 #[derive(Args, Debug)]
 pub struct LearnArgs {
-    /// Optional phase number (`1`..`5`), topic slug (`foundations`, `paradigms`, `scaling`, `calibration`, `production`), `all`, `glossary`, `reading`, or `guide`
+    /// Optional phase number (`1`..`5`), topic slug (`foundations`, `paradigms`, `scaling`, `calibration`, `production`), `all`, `glossary`, or `reading`. For recipes, run `lemmata guide`
     #[arg(value_name = "PHASE_OR_TOPIC")]
     pub topic: Option<String>,
 

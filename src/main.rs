@@ -8,27 +8,23 @@ use std::str::FromStr;
 
 use lemmata::benchmark::BenchmarkRunner;
 use lemmata::cli::{
-    ActiveArgs, ActiveCommands, ActiveDistillArgs, ActiveSampleArgs, ActiveStatsArgs, AttestArgs,
-    AttestCommands, Backend, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, CascadeArgs,
-    CascadeCommands, Cli, Commands, CompareArgs, CompletionsArgs, ConformalArgs, ConsensusArgs,
-    DownloadArgs, DriftArgs, ExperimentArgs, ExperimentMode, ExplainArgs, FetchArgs, GuardArgs,
-    GuideArgs, HierarchicalCommands, InfoArgs, InspectArgs, LearnArgs, OodArgs, OodCommands,
-    OutputFormat, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
-    SchemaValidateArgs, ScrapeArgs, StatsArgs, StreamArgs, TestArgs,
+    AttestArgs, AttestCommands, Backend, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, Cli,
+    Commands, CompareArgs, CompletionsArgs, ConformalArgs, DeferArgs, DeferCommands, DownloadArgs,
+    EnsembleArgs, ExplainArgs, GuideArgs, InfoArgs, InspectArgs, LearnArgs, OutputFormat,
+    ReportArgs, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
+    SchemaValidateArgs, TaxonomyCommands, TestArgs,
 };
-use lemmata::datasource::{DataItem, DataSource, StreamSink};
+use lemmata::datasource::{DataItem, DataSource};
 use lemmata::engine::{
-    ActiveLearningEngine, AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner,
-    CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
-    DecisionCache, DriftEngine, Evaluator, ExperimentRunner, GuardAction, GuardrailEngine,
-    GuardrailPolicy, HierarchicalRouter, LayaClassifier, OodDetector, OodProfile,
-    SchemaKnapsackOptimizer, SchemaSynthesizer, SemanticCacheConfig, StatsEngine, StreamPipeline,
-    StreamPipelineConfig, UncertaintyStrategy, compute_schema_hash, parse_cost_weights,
+    AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner, CascadeConfig,
+    CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine, DecisionCache, Evaluator,
+    ExperimentRunner, HierarchicalRouter, LayaClassifier, SchemaKnapsackOptimizer,
+    SchemaSynthesizer, SemanticCacheConfig, StatsEngine, compute_schema_hash, parse_cost_weights,
 };
 use lemmata::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
 use lemmata::{
     create_inline_question, load_questions_from_file, resolve_data_source,
-    resolve_data_source_filtered, resolve_streaming_source,
+    resolve_data_source_filtered,
 };
 
 fn main() -> Result<()> {
@@ -50,7 +46,6 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Download(args) => handle_download(args),
         Commands::Classify(args) => handle_classify(args),
-        Commands::Experiment(args) => handle_experiment(args),
         Commands::Compare(args) => handle_compare(args),
         Commands::Test(args) => handle_test(args),
         Commands::Bench(args) => handle_bench(args),
@@ -59,23 +54,16 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Explain(args) => handle_explain(args),
         Commands::Conformal(args) => handle_conformal(args),
         Commands::Schema(args) => handle_schema(args),
-        Commands::Drift(args) => handle_drift(args),
-        Commands::Guard(args) => handle_guard(args),
-        Commands::Consensus(args) => handle_consensus(args),
+        Commands::Ensemble(args) => handle_ensemble(args),
         Commands::Cache(args) => handle_cache(args),
-        Commands::Ood(args) => handle_ood(args),
-        Commands::Cascade(args) => handle_cascade(args),
+        Commands::Defer(args) => handle_defer(args),
         Commands::Attest(args) => handle_attest(args),
-        Commands::Hierarchical(args) => handle_hierarchical(args),
+        Commands::Taxonomy(args) => handle_taxonomy(args),
         Commands::Calibrate(args) => handle_calibrate(args),
         Commands::Probe(args) => match args.action {
             lemmata::cli::ProbeCommands::Fit(fit) => handle_probe_fit(fit),
         },
-        Commands::Stream(args) => handle_stream(args),
-        Commands::Active(args) => handle_active(args),
-        Commands::Stats(args) => handle_stats(args),
-        Commands::Fetch(args) => handle_fetch(args),
-        Commands::Scrape(args) => handle_scrape(args),
+        Commands::Report(args) => handle_report(args),
         Commands::Learn(args) => handle_learn(args),
         Commands::Guide(args) => handle_guide(args),
         Commands::Completions(args) => handle_completions(args),
@@ -282,7 +270,57 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
     Ok(())
 }
 
+/// Append one signed receipt per decision to `path`, continuing the hash chain of the receipts
+/// already in it. An item is escalated when any answer reaches `escalate_threshold`.
+fn append_receipts(
+    path: &std::path::Path,
+    key: &str,
+    items: &[DataItem],
+    decisions: &[(String, lemmata::model::DecisionResult)],
+    questions: &std::collections::BTreeMap<String, lemmata::model::Question>,
+    escalate_threshold: f64,
+) -> Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(log) => log,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let mut engine = match existing.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(last) => {
+            let last: lemmata::engine::DecisionReceipt = serde_json::from_str(last)?;
+            AttestationEngine::with_latest_hash(key, last.receipt_digest)
+        }
+        None => AttestationEngine::new(key),
+    };
+    let schema_digest = lemmata::engine::schema_digest(questions)?;
+    let mut lines = String::new();
+    for (item, (_, decision)) in items.iter().zip(decisions) {
+        let escalated = decision
+            .answers
+            .values()
+            .any(|a| a.act_probability.unwrap_or(0.0) >= escalate_threshold);
+        let action = if escalated {
+            lemmata::engine::GuardAction::Escalate
+        } else {
+            lemmata::engine::GuardAction::Allow
+        };
+        let receipt = engine.create_receipt(item, decision, None, action, &schema_digest)?;
+        lines.push_str(&serde_json::to_string(&receipt)?);
+        lines.push('\n');
+    }
+    ensure_parent_dir(path)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(lines.as_bytes())?;
+    Ok(())
+}
+
 fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
+    if args.receipts.is_some() && args.attest_key.as_deref().unwrap_or_default().is_empty() {
+        bail!("--receipts needs a signing key. Set LEMMATA_ATTEST_KEY.");
+    }
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let inline_text = args.text.as_deref().or(args.positional_text.as_deref());
 
@@ -302,8 +340,8 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
         )?
     };
 
-    if let Some(hier_path) = &args.hierarchical {
-        return run_hierarchical_classification(
+    if let Some(hier_path) = &args.taxonomy {
+        return run_taxonomy_classification(
             hier_path,
             source,
             checkpoint,
@@ -311,7 +349,6 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
             args.escalate_threshold,
             args.cache,
             args.escalate_only,
-            args.ood_profile.as_deref(),
             args.format,
             args.output.as_deref(),
             args.limit,
@@ -362,13 +399,6 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
     }
     let classifier = LayaClassifier::new(config);
 
-    let ood_detector = match &args.ood_profile {
-        Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
-            std::fs::File::open(ood_path)?,
-        )?)?),
-        None => None,
-    };
-
     let mut cache = args.cache.then(|| {
         DecisionCache::new(SemanticCacheConfig {
             semantic: args.cache_semantic,
@@ -394,28 +424,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
             }
         }
 
-        let mut res = classifier.classify(&item.state, &questions)?;
-
-        if let Some(detector) = &ood_detector {
-            let ood_eval = detector.evaluate(&item.id, &text, &classifier, &questions)?;
-            if ood_eval.is_ood || ood_eval.anomaly_score >= args.ood_threshold {
-                match args.ood_action.to_lowercase().as_str() {
-                    "quarantine" => res
-                        .answers
-                        .values_mut()
-                        .for_each(|a| a.act_probability = Some(1.0)),
-                    "escalate" => res
-                        .answers
-                        .values_mut()
-                        .for_each(|a| a.act_probability = Some(0.99)),
-                    "flag" => eprintln!(
-                        "🚩 Item '{}' flagged as OOD (score={:.3}, energy={:.2})",
-                        item.id, ood_eval.anomaly_score, ood_eval.free_energy
-                    ),
-                    _ => {}
-                }
-            }
-        }
+        let res = classifier.classify(&item.state, &questions)?;
 
         if let Some(c) = &mut cache {
             c.insert(&text, &schema_hash, &res);
@@ -435,6 +444,23 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
             stats.misses,
             stats.hit_rate() * 100.0,
             c.len()
+        );
+    }
+
+    if let Some(path) = &args.receipts {
+        let key = args.attest_key.as_deref().unwrap_or_default();
+        append_receipts(
+            path,
+            key,
+            &items,
+            &raw_results,
+            &questions,
+            args.escalate_threshold,
+        )?;
+        eprintln!(
+            "🔏 Appended {} signed receipts to {}",
+            raw_results.len(),
+            path.display()
         );
     }
 
@@ -579,109 +605,6 @@ fn format_answer_value(ans: &lemmata::model::DecisionAnswer, sep: &str) -> Strin
     } else {
         "N/A".into()
     }
-}
-
-fn handle_experiment(args: ExperimentArgs) -> Result<()> {
-    let questions =
-        load_questions_or_inline(args.schema.as_deref(), "Classify the topic or sentiment")?;
-    let items =
-        resolve_data_source(&args.data_dir, args.file.as_deref(), false, None)?.read_items()?;
-    if items.is_empty() {
-        eprintln!("⚠️  No data items found for experiment.");
-        return Ok(());
-    }
-
-    let ckpt = parse_checkpoint(&args.checkpoint)?;
-    let classifier = LayaClassifier::with_checkpoint(ckpt);
-    let temps = [0.5, 0.8, 1.0, 1.25, 1.5, 1.76, 2.0, 2.5];
-    let mode = if args.adversarial {
-        ExperimentMode::Adversarial
-    } else {
-        args.mode
-    };
-
-    if args.json {
-        let out = match mode {
-            ExperimentMode::Order => {
-                let (qid, _) = questions
-                    .iter()
-                    .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
-                    .unwrap_or_else(|| questions.iter().next().unwrap());
-                serde_json::json!({
-                    "mode": "order",
-                    "question_id": qid,
-                    "permutations": args.permutations,
-                    "samples": items.len(),
-                })
-            }
-            ExperimentMode::Temp => {
-                let mut rows = Vec::new();
-                for &t in &temps {
-                    let mut cfg = ClassifierConfig::with_checkpoint(ckpt);
-                    cfg.temperature = t;
-                    cfg.temperature_by_options.clear();
-                    let m =
-                        Evaluator::new(LayaClassifier::new(cfg)).evaluate(&items, &questions)?;
-                    rows.push(serde_json::json!({
-                        "temperature": t, "accuracy": m.accuracy, "ece": m.ece,
-                        "brier_score": m.brier_score, "soft_accuracy": m.soft_accuracy,
-                    }));
-                }
-                serde_json::json!({ "mode": "temp", "sweep": rows })
-            }
-            ExperimentMode::Checkpoints => {
-                let arena = ExperimentRunner::run_arena(
-                    &items,
-                    &questions,
-                    &lemmata::model::native::runnable_checkpoints(),
-                    5,
-                )?;
-                serde_json::json!({
-                    "mode": "checkpoints",
-                    "reference_model": arena.reference_model,
-                    "results": arena.models,
-                    "top_disagreements": arena.top_disagreements,
-                })
-            }
-            ExperimentMode::Adversarial => {
-                let report =
-                    ExperimentRunner::test_adversarial_robustness(&classifier, &items, &questions)?;
-                serde_json::to_value(report)?
-            }
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-
-    match mode {
-        ExperimentMode::Order => {
-            let (qid, question) = questions
-                .iter()
-                .find(|(_, q)| q.qtype == lemmata::model::QuestionType::Choice)
-                .unwrap_or_else(|| questions.iter().next().unwrap());
-            ExperimentRunner::test_option_order_invariance(
-                &classifier,
-                &items,
-                qid,
-                question,
-                args.permutations,
-            )?;
-        }
-        ExperimentMode::Temp => {
-            ExperimentRunner::sweep_temperature_calibration_for_checkpoint(
-                ckpt, &items, &questions, &temps,
-            )?;
-        }
-        ExperimentMode::Checkpoints => {
-            ExperimentRunner::compare_checkpoints(&items, &questions)?;
-        }
-        ExperimentMode::Adversarial => {
-            let report =
-                ExperimentRunner::test_adversarial_robustness(&classifier, &items, &questions)?;
-            ExperimentRunner::print_adversarial_report(&report);
-        }
-    }
-    Ok(())
 }
 
 fn handle_compare(args: CompareArgs) -> Result<()> {
@@ -1208,7 +1131,10 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
             )
         })?;
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_questions_or_inline(args.schema.as_deref(), "Classify department")?;
+    let questions = match &args.schema {
+        Some(path) => load_questions_from_file(path)?,
+        None => create_inline_question("choice", "Classify department", &args.labels)?,
+    };
 
     let qid = args
         .qid
@@ -1531,160 +1457,7 @@ fn handle_schema_optimize(args: SchemaOptimizeArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_drift(args: DriftArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_questions_or_inline(args.schema.as_deref(), "Classify topic")?;
-    let base_items = lemmata::datasource::FileSource::new(&args.baseline).read_items()?;
-    let curr_items =
-        resolve_data_source(&args.data_dir, args.current.as_deref(), false, None)?.read_items()?;
-
-    if base_items.is_empty() {
-        bail!("Baseline dataset has no items");
-    }
-    if curr_items.is_empty() {
-        bail!("Current dataset has no items");
-    }
-
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let drift_engine = DriftEngine::new(&classifier)
-        .with_thresholds(args.psi_threshold, args.wasserstein_threshold);
-
-    log_status(
-        args.json,
-        format!(
-            "🔬 Monitoring distribution drift (Baseline: {} items, Current: {} items)...",
-            base_items.len(),
-            curr_items.len()
-        ),
-    );
-
-    let report = drift_engine.detect_drift(&base_items, &curr_items, &questions)?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        DriftEngine::print_report(&report);
-    }
-
-    if args.fail_on_drift && report.has_critical_drift {
-        bail!("CI/CD gate failed: Critical distribution drift detected!");
-    }
-    Ok(())
-}
-
-fn handle_guard(args: GuardArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let policy = GuardrailPolicy::from_file(&args.policy)?;
-    let questions = load_questions_or_inline(args.schema.as_deref(), "Classify topic")?;
-    let items = resolve_data_source_filtered(
-        &args.data_dir,
-        args.file.as_deref(),
-        args.stdin,
-        args.text.as_deref(),
-        args.extensions.as_deref(),
-        args.no_recursive,
-    )?
-    .read_items()?;
-
-    if items.is_empty() {
-        eprintln!("⚠️  No data items found for guardrail evaluation.");
-        return Ok(());
-    }
-
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let guard_engine = GuardrailEngine::new(policy);
-
-    let decisions = classifier.classify_batch(&items, &questions)?;
-    let audit_records = guard_engine.evaluate_batch(&items, &decisions);
-    let quiet_stdout = args.json || is_machine_format(args.format);
-
-    if let Some(audit_path) = &args.audit_output {
-        ensure_parent_dir(audit_path)?;
-        let mut file = std::fs::File::create(audit_path)?;
-        for rec in &audit_records {
-            writeln!(file, "{}", serde_json::to_string(rec)?)?;
-        }
-        log_status(
-            quiet_stdout,
-            format!(
-                "📜 Wrote {} cryptographic audit records to: {}",
-                audit_records.len(),
-                audit_path.display()
-            ),
-        );
-    }
-
-    if let (Some(key), Some(receipt_path)) = (&args.attest_key, &args.receipt_log) {
-        ensure_parent_dir(receipt_path)?;
-        let mut attest_engine = AttestationEngine::new(key);
-        let mut file = std::fs::File::create(receipt_path)?;
-        let schema_digest = lemmata::engine::schema_digest(&questions)?;
-
-        for (item, (_, dec)) in items.iter().zip(decisions.iter()) {
-            let matched_rec = audit_records.iter().find(|r| r.item_id == item.id);
-            let rule = matched_rec.and_then(|r| r.matched_rule.as_deref());
-            let action = matched_rec
-                .map(|r| r.final_action)
-                .unwrap_or(GuardAction::Allow);
-            let receipt = attest_engine.create_receipt(item, dec, rule, action, &schema_digest)?;
-            writeln!(file, "{}", serde_json::to_string(&receipt)?)?;
-        }
-        log_status(
-            quiet_stdout,
-            format!(
-                "🔏 Emitted {} cryptographically attested receipts to: {}",
-                items.len(),
-                receipt_path.display()
-            ),
-        );
-    }
-
-    if args.json || matches!(args.format, OutputFormat::Json | OutputFormat::Pretty) {
-        println!("{}", serde_json::to_string_pretty(&audit_records)?);
-    } else {
-        match args.format {
-            OutputFormat::Jsonl => {
-                for rec in &audit_records {
-                    println!("{}", serde_json::to_string(rec)?);
-                }
-            }
-            OutputFormat::Csv => {
-                let mut wtr = csv::Writer::from_writer(std::io::stdout());
-                wtr.write_record([
-                    "audit_id",
-                    "item_id",
-                    "final_action",
-                    "matched_rule",
-                    "latency_ms",
-                ])?;
-                for r in &audit_records {
-                    wtr.write_record([
-                        r.audit_id.as_str(),
-                        r.item_id.as_str(),
-                        r.final_action.badge(),
-                        r.matched_rule.as_deref().unwrap_or(""),
-                        &format!("{:.2}", r.latency_ms),
-                    ])?;
-                }
-                wtr.flush()?;
-            }
-            OutputFormat::Compact => {
-                for r in &audit_records {
-                    println!(
-                        "{} => {} (rule: {}) [{:.1}ms]",
-                        r.item_id,
-                        r.final_action.badge(),
-                        r.matched_rule.as_deref().unwrap_or("default"),
-                        r.latency_ms
-                    );
-                }
-            }
-            _ => GuardrailEngine::print_report(&audit_records),
-        }
-    }
-    Ok(())
-}
-
-fn handle_consensus(args: ConsensusArgs) -> Result<()> {
+fn handle_ensemble(args: EnsembleArgs) -> Result<()> {
     let ckpt_names: Vec<&str> = args
         .checkpoints
         .split(',')
@@ -1879,140 +1652,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_ood(args: OodArgs) -> Result<()> {
-    match args.action {
-        OodCommands::Fit(fit_args) => {
-            let checkpoint = parse_checkpoint(&fit_args.checkpoint)?;
-            let questions = load_questions_from_file(&fit_args.schema)?;
-            let items = lemmata::datasource::FileSource::new(&fit_args.train_data).read_items()?;
-
-            log_status(
-                fit_args.json,
-                format!(
-                    "🔬 Fitting OOD profile on {} in-distribution samples...",
-                    items.len()
-                ),
-            );
-            let classifier = LayaClassifier::with_checkpoint(checkpoint);
-
-            let target_qid = if questions.contains_key(&fit_args.target_qid) {
-                &fit_args.target_qid
-            } else {
-                questions.keys().next().unwrap()
-            };
-
-            let profile = OodDetector::fit(
-                "laya_profile",
-                &items,
-                &classifier,
-                &questions,
-                target_qid,
-                fit_args.fpr_rate,
-            )?;
-
-            write_json_file(&fit_args.output, &profile)?;
-
-            if fit_args.json {
-                eprintln!("💾 Saved profile to: {}", fit_args.output.display());
-                println!("{}", serde_json::to_string_pretty(&profile)?);
-            } else {
-                println!(
-                    "\n✅ Fitted OOD Profile:\n   Question ID       : {}\n   Target Classes    : {}\n   Mean Free Energy  : {:.4}\n   Std Free Energy   : {:.4}\n   Energy Threshold  : {:.4}\n   Distance Threshold: {:.4}\n💾 Saved profile to: {}",
-                    profile.question_id,
-                    profile.target_classes.join(", "),
-                    profile.mean_energy,
-                    profile.std_energy,
-                    profile.energy_threshold,
-                    profile.distance_threshold,
-                    fit_args.output.display()
-                );
-            }
-        }
-        OodCommands::Eval(eval_args) => {
-            let checkpoint = parse_checkpoint(&eval_args.checkpoint)?;
-            let questions = load_questions_from_file(&eval_args.schema)?;
-            let profile: OodProfile =
-                serde_json::from_reader(std::fs::File::open(&eval_args.profile)?)?;
-            let detector = OodDetector::new(profile)?;
-            let classifier = LayaClassifier::with_checkpoint(checkpoint);
-
-            let id_items = lemmata::datasource::FileSource::new(&eval_args.id_data).read_items()?;
-            let ood_items =
-                lemmata::datasource::FileSource::new(&eval_args.ood_data).read_items()?;
-
-            log_status(
-                eval_args.json,
-                format!(
-                    "🎯 Evaluating OOD Profile against ID ({} items) and OOD ({} items)...",
-                    id_items.len(),
-                    ood_items.len()
-                ),
-            );
-
-            let id_evals = detector.evaluate_batch(&id_items, &classifier, &questions)?;
-            let ood_evals = detector.evaluate_batch(&ood_items, &classifier, &questions)?;
-
-            let id_avg_energy =
-                id_evals.iter().map(|e| e.free_energy).sum::<f64>() / id_evals.len().max(1) as f64;
-            let ood_avg_energy = ood_evals.iter().map(|e| e.free_energy).sum::<f64>()
-                / ood_evals.len().max(1) as f64;
-            let id_avg_dist = id_evals.iter().map(|e| e.mahalanobis_distance).sum::<f64>()
-                / id_evals.len().max(1) as f64;
-            let ood_avg_dist = ood_evals
-                .iter()
-                .map(|e| e.mahalanobis_distance)
-                .sum::<f64>()
-                / ood_evals.len().max(1) as f64;
-
-            let id_flagged = id_evals.iter().filter(|e| e.is_ood).count();
-            let ood_flagged = ood_evals.iter().filter(|e| e.is_ood).count();
-            let fpr = id_flagged as f64 / id_items.len().max(1) as f64;
-            let tpr = ood_flagged as f64 / ood_items.len().max(1) as f64;
-
-            if eval_args.json {
-                let out = serde_json::json!({
-                    "id_samples": id_items.len(), "ood_samples": ood_items.len(),
-                    "id_mean_energy": id_avg_energy, "ood_mean_energy": ood_avg_energy,
-                    "id_mean_distance": id_avg_dist, "ood_mean_distance": ood_avg_dist,
-                    "id_flagged": id_flagged, "ood_flagged": ood_flagged,
-                    "fpr": fpr, "tpr_recall": tpr,
-                });
-                println!("{}", serde_json::to_string_pretty(&out)?);
-                return Ok(());
-            }
-
-            let mut table = Table::new();
-            table.set_header(vec![
-                Cell::new("Dataset").fg(Color::Cyan),
-                Cell::new("Samples").fg(Color::White),
-                Cell::new("Mean Free Energy").fg(Color::Yellow),
-                Cell::new("Mean Distance").fg(Color::Blue),
-                Cell::new("Flagged OOD").fg(Color::Magenta),
-                Cell::new("Rejection Rate").fg(Color::Green),
-            ]);
-            table.add_row(vec![
-                Cell::new("In-Distribution (ID)"),
-                Cell::new(id_items.len().to_string()),
-                Cell::new(format!("{:.4}", id_avg_energy)),
-                Cell::new(format!("{:.4}", id_avg_dist)),
-                Cell::new(id_flagged.to_string()),
-                Cell::new(format!("{:.1}% (FPR)", fpr * 100.0)),
-            ]);
-            table.add_row(vec![
-                Cell::new("Out-of-Distribution (OOD)"),
-                Cell::new(ood_items.len().to_string()),
-                Cell::new(format!("{:.4}", ood_avg_energy)),
-                Cell::new(format!("{:.4}", ood_avg_dist)),
-                Cell::new(ood_flagged.to_string()),
-                Cell::new(format!("{:.1}% (TPR/Recall)", tpr * 100.0)),
-            ]);
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
-fn handle_cascade_tune(tune_args: lemmata::cli::CascadeTuneArgs, force_sweep: bool) -> Result<()> {
+fn handle_defer_tune(tune_args: lemmata::cli::DeferTuneArgs, force_sweep: bool) -> Result<()> {
     let checkpoint = parse_checkpoint(&tune_args.checkpoint)?;
     let questions = load_questions_from_file(&tune_args.schema)?;
     let items = lemmata::datasource::FileSource::new(&tune_args.val_data).read_items()?;
@@ -2110,11 +1750,11 @@ fn handle_cascade_tune(tune_args: lemmata::cli::CascadeTuneArgs, force_sweep: bo
     Ok(())
 }
 
-fn handle_cascade(args: CascadeArgs) -> Result<()> {
+fn handle_defer(args: DeferArgs) -> Result<()> {
     match args.action {
-        CascadeCommands::Tune(tune_args) => handle_cascade_tune(tune_args, false)?,
-        CascadeCommands::Sweep(tune_args) => handle_cascade_tune(tune_args, true)?,
-        CascadeCommands::Run(run_args) => {
+        DeferCommands::Tune(tune_args) => handle_defer_tune(tune_args, false)?,
+        DeferCommands::Sweep(tune_args) => handle_defer_tune(tune_args, true)?,
+        DeferCommands::Run(run_args) => {
             let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
             let questions =
                 load_questions_or_inline(run_args.schema.as_deref(), "Department triage")?;
@@ -2269,7 +1909,7 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_hierarchical_classification(
+fn run_taxonomy_classification(
     schema_path: &std::path::Path,
     source: Box<dyn DataSource>,
     checkpoint: Checkpoint,
@@ -2277,7 +1917,6 @@ fn run_hierarchical_classification(
     escalate_threshold: f64,
     cache_enabled: bool,
     escalate_only: bool,
-    ood_profile: Option<&std::path::Path>,
     format: OutputFormat,
     output: Option<&std::path::Path>,
     limit: Option<usize>,
@@ -2306,10 +1945,6 @@ fn run_hierarchical_classification(
         )));
         router = router.with_cache(cache);
     }
-    if let Some(ood_path) = ood_profile {
-        let profile: OodProfile = serde_json::from_reader(std::fs::File::open(ood_path)?)?;
-        router = router.with_ood_detector(std::sync::Arc::new(OodDetector::new(profile)?));
-    }
 
     let mut results = router.classify_items(&items)?;
     if escalate_only {
@@ -2337,9 +1972,9 @@ fn run_hierarchical_classification(
     Ok(())
 }
 
-fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
+fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
     match args.command {
-        HierarchicalCommands::Run(run_args) => {
+        TaxonomyCommands::Run(run_args) => {
             let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
             let source = resolve_data_source(
                 &run_args.data_dir,
@@ -2347,7 +1982,7 @@ fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
                 false,
                 run_args.text.as_deref(),
             )?;
-            run_hierarchical_classification(
+            run_taxonomy_classification(
                 &run_args.schema,
                 source,
                 checkpoint,
@@ -2355,13 +1990,12 @@ fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
                 run_args.escalate_threshold,
                 run_args.cache,
                 run_args.escalate_only,
-                None,
                 run_args.format,
                 run_args.output.as_deref(),
                 None,
             )
         }
-        HierarchicalCommands::Tree(tree_args) => {
+        TaxonomyCommands::Show(tree_args) => {
             let checkpoint = parse_checkpoint(&tree_args.checkpoint)?;
             let schema = HierarchicalSchema::load_from_file(&tree_args.schema)?;
             let budget = checkpoint.head_budget();
@@ -2373,7 +2007,7 @@ fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
             );
             Ok(())
         }
-        HierarchicalCommands::Validate(val_args) => {
+        TaxonomyCommands::Validate(val_args) => {
             let checkpoint = parse_checkpoint(&val_args.checkpoint)?;
             let schema = HierarchicalSchema::load_from_file(&val_args.schema)?;
             let budget = checkpoint.head_budget();
@@ -2411,7 +2045,7 @@ fn handle_hierarchical(args: lemmata::cli::HierarchicalArgs) -> Result<()> {
                 }
             }
         }
-        HierarchicalCommands::Bench(bench_args) => {
+        TaxonomyCommands::Bench(bench_args) => {
             let checkpoint = parse_checkpoint(&bench_args.checkpoint)?;
             let schema = HierarchicalSchema::load_from_file(&bench_args.schema)?;
             let items = resolve_data_source(
@@ -2639,221 +2273,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_stream(args: StreamArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_schema_or_default(args.schema.as_deref())?;
-
-    let mut config = ClassifierConfig::with_checkpoint(checkpoint);
-    config.escalate_threshold = args.escalate_threshold;
-    if let Some(cfg_path) = &args.config {
-        apply_calibrated_config(&mut config, cfg_path, true)?;
-    }
-
-    let classifier = LayaClassifier::new(config);
-    let primary_sink = StreamSink::from_target(&args.sink)?;
-    let pipeline_cfg = StreamPipelineConfig {
-        batch_size: args.batch_size,
-        max_flush_interval_ms: args.max_flush_interval_ms,
-        escalate_threshold: args.escalate_threshold,
-        enable_cache: args.cache,
-        enable_attest: args.attest,
-        attest_secret: match (args.attest, args.attest_secret) {
-            (true, None) => {
-                bail!(
-                    "--attest needs a signing key. Set LEMMATA_ATTEST_KEY or pass --attest-secret."
-                )
-            }
-            (_, secret) => secret.unwrap_or_default(),
-        },
-        receipt_log: args.receipt_log,
-        limit: args.limit,
-    };
-
-    let mut pipeline =
-        StreamPipeline::new(classifier, questions, primary_sink).with_config(pipeline_cfg);
-    if let Some(esc_target) = &args.escalate_sink {
-        pipeline = pipeline.with_escalate_sink(StreamSink::from_target(esc_target)?);
-    }
-
-    let mut source = resolve_streaming_source(&args.source, args.columns.as_deref())?;
-    eprintln!(
-        "🚀 Ingesting stream from '{}' [{}] (batch_size: {}, flush_window: {}ms)...",
-        args.source,
-        source.name(),
-        args.batch_size,
-        args.max_flush_interval_ms
-    );
-
-    let metrics = pipeline.run(source.as_mut())?;
-
-    match args.format {
-        OutputFormat::Json => println!("{}", StreamPipeline::format_json(&metrics)?),
-        OutputFormat::Jsonl => println!("{}", serde_json::to_string(&metrics)?),
-        OutputFormat::Table | OutputFormat::Pretty => {
-            println!("{}", StreamPipeline::format_table(&metrics))
-        }
-        OutputFormat::Csv => {
-            let mut wtr = csv::Writer::from_writer(std::io::stdout());
-            wtr.write_record([
-                "total_classified",
-                "throughput_qps",
-                "total_escalated",
-                "escalation_rate",
-                "total_cached",
-                "cache_hit_rate",
-                "total_attested",
-            ])?;
-            wtr.write_record([
-                &metrics.total_classified.to_string(),
-                &format!("{:.2}", metrics.throughput_qps),
-                &metrics.total_escalated.to_string(),
-                &format!("{:.4}", metrics.escalation_rate),
-                &metrics.total_cached.to_string(),
-                &format!("{:.4}", metrics.cache_hit_rate),
-                &metrics.total_attested.to_string(),
-            ])?;
-            wtr.flush()?;
-        }
-        OutputFormat::Compact => println!(
-            "✅ Processed {} events ({:.1} QPS) | Escalated: {} ({:.1}%) | Cached: {} ({:.1}%) | Attested: {}",
-            metrics.total_classified,
-            metrics.throughput_qps,
-            metrics.total_escalated,
-            metrics.escalation_rate * 100.0,
-            metrics.total_cached,
-            metrics.cache_hit_rate * 100.0,
-            metrics.total_attested
-        ),
-    }
-    Ok(())
-}
-
-fn handle_active(args: ActiveArgs) -> Result<()> {
-    match args.action {
-        ActiveCommands::Sample(sample_args) => handle_active_sample(sample_args),
-        ActiveCommands::Distill(distill_args) => handle_active_distill(distill_args),
-        ActiveCommands::Stats(stats_args) => handle_active_stats(stats_args),
-    }
-}
-
-fn handle_active_sample(args: ActiveSampleArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
-    if items.is_empty() {
-        bail!("No items found in dataset: {}", args.data.display());
-    }
-
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let ood_detector = match &args.ood_profile {
-        Some(ood_path) => Some(OodDetector::new(serde_json::from_reader(
-            std::fs::File::open(ood_path)?,
-        )?)?),
-        None => None,
-    };
-
-    let engine = ActiveLearningEngine::new()
-        .with_escalate_threshold(args.escalate_threshold)
-        .with_conformal_alpha(args.conformal_alpha);
-
-    let (queue_items, report) = engine.sample(
-        &classifier,
-        &items,
-        &questions,
-        args.strategy,
-        args.budget,
-        ood_detector.as_ref(),
-    )?;
-
-    if let Some(export_path) = &args.export_queue {
-        ActiveLearningEngine::export_queue(&queue_items, export_path)?;
-    }
-
-    match args.format {
-        OutputFormat::Json => println!(
-            "{}",
-            ActiveLearningEngine::format_sample_json(&report, &queue_items)?
-        ),
-        OutputFormat::Jsonl => {
-            for item in &queue_items {
-                println!("{}", serde_json::to_string(item)?);
-            }
-        }
-        _ => println!(
-            "{}",
-            ActiveLearningEngine::format_sample_table(
-                &report,
-                &queue_items,
-                args.export_queue.as_deref()
-            )
-        ),
-    }
-    Ok(())
-}
-
-fn handle_active_distill(args: ActiveDistillArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
-    if items.is_empty() {
-        bail!("No items found in dataset: {}", args.data.display());
-    }
-
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-    let (samples, mut report) = ActiveLearningEngine::new().distill(
-        &classifier,
-        &items,
-        &questions,
-        args.val_split,
-        &args.source_label,
-    )?;
-
-    ActiveLearningEngine::export_rlcd(&samples, &args.output)?;
-    report.export_path = args.output.display().to_string();
-
-    match args.format {
-        OutputFormat::Json => println!(
-            "{}",
-            ActiveLearningEngine::format_distill_json(&report, &samples)?
-        ),
-        OutputFormat::Jsonl => {
-            for s in &samples {
-                println!("{}", serde_json::to_string(s)?);
-            }
-        }
-        _ => println!("{}", ActiveLearningEngine::format_distill_table(&report)),
-    }
-    Ok(())
-}
-
-fn handle_active_stats(args: ActiveStatsArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
-    let questions = load_schema_or_default(args.schema.as_deref())?;
-    let items = lemmata::datasource::FileSource::parse_file(&args.data)?;
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
-
-    let total_len = items.len() * questions.len();
-    let (queue, report) = ActiveLearningEngine::new().sample(
-        &classifier,
-        &items,
-        &questions,
-        UncertaintyStrategy::Composite,
-        total_len,
-        None,
-    )?;
-
-    match args.format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        OutputFormat::Jsonl => println!("{}", serde_json::to_string(&report)?),
-        _ => println!(
-            "{}",
-            ActiveLearningEngine::format_sample_table(&report, &queue, None)
-        ),
-    }
-    Ok(())
-}
-
-fn handle_stats(args: StatsArgs) -> Result<()> {
+fn handle_report(args: ReportArgs) -> Result<()> {
     let checkpoint = parse_checkpoint(&args.checkpoint)?;
     let questions = if args.schema.exists() {
         load_questions_from_file(&args.schema)?
@@ -2912,158 +2332,6 @@ fn handle_stats(args: StatsArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_fetch(args: FetchArgs) -> Result<()> {
-    let mut schema_generated = None;
-    let (items, source_desc) = if let Some(dataset) = &args.hf {
-        let source = lemmata::datasource::HuggingFaceSource::new(dataset)
-            .with_config(args.config)
-            .with_split(args.split)
-            .with_limit(args.limit)
-            .with_offset(args.offset)
-            .with_custom_columns(args.text_col, args.label_col);
-        let (items, schema) = source.read_items_with_schema()?;
-        schema_generated = Some((dataset.clone(), schema));
-        (items, format!("Hugging Face dataset '{}'", dataset))
-    } else if let Some(category) = &args.hn {
-        let source = lemmata::datasource::HackerNewsSource::new(category, args.limit);
-        (
-            source.read_items()?,
-            format!("Hacker News feed '{}'", category),
-        )
-    } else if let Some(sub) = &args.reddit {
-        let source = lemmata::datasource::RedditSource::new(sub, args.limit);
-        (source.read_items()?, format!("r/{} on Reddit", sub))
-    } else if let Some(article) = &args.wikipedia {
-        let source = lemmata::datasource::WikipediaSource::new(Some(article.clone()), args.limit);
-        (
-            source.read_items()?,
-            format!("Wikipedia article '{}'", article),
-        )
-    } else {
-        bail!("No source specified for fetch. Specify one of: --hf, --hn, --reddit, --wikipedia");
-    };
-
-    if args.auto_schema
-        && let Some((name, schema)) = schema_generated
-        && !schema.is_empty()
-    {
-        let schema_path = args.schema_output.unwrap_or_else(|| {
-            std::path::PathBuf::from(format!("schema/{}.json", name.replace('/', "_")))
-        });
-        write_json_file(&schema_path, &schema)?;
-        eprintln!(
-            "✨ Inferred question schema written to {}",
-            schema_path.display()
-        );
-    }
-
-    if items.is_empty() {
-        eprintln!("⚠️  No records retrieved from {}.", source_desc);
-        return Ok(());
-    }
-
-    eprintln!("📦 Ingested {} items from {}", items.len(), source_desc);
-    let mut out_writer = open_output_writer(args.output.as_deref())?;
-
-    match args.format {
-        OutputFormat::Jsonl => {
-            for item in &items {
-                writeln!(out_writer, "{}", serde_json::to_string(item)?)?;
-            }
-        }
-        OutputFormat::Json | OutputFormat::Pretty => {
-            writeln!(out_writer, "{}", serde_json::to_string_pretty(&items)?)?
-        }
-        OutputFormat::Table | OutputFormat::Compact => {
-            let mut table = comfy_table::Table::new();
-            table.load_style(comfy_table::presets::UTF8_FULL);
-            table.set_header(vec!["ID", "Origin", "Ground Truth", "Preview Text"]);
-            for item in &items {
-                let gt_str = item
-                    .ground_truth
-                    .as_ref()
-                    .map(|gt| serde_json::to_string(gt).unwrap_or_default())
-                    .unwrap_or_else(|| "-".to_string());
-                table.add_row(vec![
-                    comfy_table::Cell::new(&item.id),
-                    comfy_table::Cell::new(&item.source_uri),
-                    comfy_table::Cell::new(gt_str),
-                    comfy_table::Cell::new(item.preview_text(60)),
-                ]);
-            }
-            writeln!(out_writer, "{table}")?;
-        }
-        OutputFormat::Csv => {
-            let mut wtr = csv::Writer::from_writer(out_writer);
-            wtr.write_record(["id", "source_uri", "ground_truth", "state"])?;
-            for item in &items {
-                let gt_str = item
-                    .ground_truth
-                    .as_ref()
-                    .map(|gt| serde_json::to_string(gt).unwrap_or_default())
-                    .unwrap_or_default();
-                let state_str = serde_json::to_string(&item.state).unwrap_or_default();
-                wtr.write_record([&item.id, &item.source_uri, &gt_str, &state_str])?;
-            }
-            wtr.flush()?;
-        }
-    }
-    Ok(())
-}
-
-fn handle_scrape(args: ScrapeArgs) -> Result<()> {
-    let scraper = lemmata::datasource::WebScraper::new(lemmata::datasource::ScrapeOptions {
-        timeout_secs: args.timeout,
-        max_chars: args.max_chars,
-        use_jina: args.jina,
-        ..Default::default()
-    });
-    let doc = scraper.scrape(&args.url)?;
-
-    eprintln!(
-        "🌐 Scraped '{}' ({} words, SPA: {})",
-        doc.url, doc.word_count, doc.is_likely_spa
-    );
-
-    let state = serde_json::json!({ "title": doc.title, "text": doc.markdown, "url": doc.url, "words": doc.word_count });
-    let item = lemmata::datasource::DataItem::new(format!("web:{}", doc.url), state, &doc.url);
-    let mut out_writer = open_output_writer(args.output.as_deref())?;
-
-    match args.format {
-        OutputFormat::Jsonl => writeln!(out_writer, "{}", serde_json::to_string(&item)?)?,
-        OutputFormat::Json | OutputFormat::Pretty => {
-            writeln!(out_writer, "{}", serde_json::to_string_pretty(&item)?)?
-        }
-        OutputFormat::Table | OutputFormat::Compact => {
-            let mut table = comfy_table::Table::new();
-            table.load_style(comfy_table::presets::UTF8_FULL);
-            table.set_header(vec!["Field", "Value"]);
-            table.add_row(vec!["URL", &doc.url]);
-            table.add_row(vec!["Title", &doc.title]);
-            table.add_row(vec!["Word Count", &doc.word_count.to_string()]);
-            table.add_row(vec![
-                "SPA Shell",
-                if doc.is_likely_spa { "true" } else { "false" },
-            ]);
-            table.add_row(vec!["Content Preview", &item.preview_text(160)]);
-            writeln!(out_writer, "{table}")?;
-        }
-        OutputFormat::Csv => {
-            let mut wtr = csv::Writer::from_writer(out_writer);
-            wtr.write_record(["id", "url", "title", "words", "text"])?;
-            wtr.write_record([
-                &item.id,
-                &doc.url,
-                &doc.title,
-                &doc.word_count.to_string(),
-                &doc.markdown,
-            ])?;
-            wtr.flush()?;
-        }
-    }
-    Ok(())
-}
-
 fn handle_learn(args: LearnArgs) -> Result<()> {
     let raw_target = args
         .phase
@@ -3098,18 +2366,6 @@ fn handle_learn(args: LearnArgs) -> Result<()> {
             lemmata::engine::print_glossary(filter);
         }
         return Ok(());
-    }
-
-    if raw_target.is_some_and(|t| {
-        matches!(
-            t.to_ascii_lowercase().as_str(),
-            "guide" | "recipes" | "cookbook" | "howto" | "cheatsheet"
-        )
-    }) {
-        return handle_guide(GuideArgs {
-            topic: None,
-            json: args.json,
-        });
     }
 
     let is_reading_topic = raw_target.is_some_and(|t| {
