@@ -55,6 +55,24 @@ impl Downloader {
 
     /// Download a System 1 checkpoint to a local directory.
     pub fn download(&self, checkpoint: Checkpoint, target_dir: &Path, dry_run: bool) -> Result<()> {
+        if checkpoint == Checkpoint::AutoRoute {
+            println!(
+                "⚡ `route` dispatches across English + Multilingual Laya checkpoints; downloading both..."
+            );
+            let en_dir = if target_dir == Path::new("models/laya") {
+                Checkpoint::English.local_dir()
+            } else {
+                target_dir.to_path_buf()
+            };
+            let multi_dir = if target_dir == Path::new("models/laya") {
+                Checkpoint::Multilingual.local_dir()
+            } else {
+                target_dir.join("multilingual")
+            };
+            self.download(Checkpoint::English, &en_dir, dry_run)?;
+            return self.download(Checkpoint::Multilingual, &multi_dir, dry_run);
+        }
+
         let effective_dir = if target_dir == Path::new("models/laya") {
             checkpoint.local_dir()
         } else {
@@ -136,6 +154,28 @@ impl Downloader {
         checkpoint: Checkpoint,
         target_dir: &Path,
     ) -> Result<VerificationReport> {
+        if checkpoint == Checkpoint::AutoRoute {
+            let en_dir = if target_dir == Path::new("models/laya") {
+                Checkpoint::English.local_dir()
+            } else {
+                target_dir.to_path_buf()
+            };
+            let multi_dir = if target_dir == Path::new("models/laya") {
+                Checkpoint::Multilingual.local_dir()
+            } else {
+                target_dir.join("multilingual")
+            };
+            let mut en_rep = self.verify(&en_dir)?;
+            let multi_rep = self.verify(&multi_dir)?;
+            for (f, sz) in multi_rep.found {
+                en_rep.found.push((format!("multilingual/{f}"), sz));
+            }
+            for m in multi_rep.missing {
+                en_rep.missing.push(format!("multilingual/{m}"));
+            }
+            en_rep.is_valid = en_rep.missing.is_empty();
+            return Ok(en_rep);
+        }
         if target_dir == Path::new("models/laya") {
             let ckpt_dir = checkpoint.local_dir();
             return self.verify(&ckpt_dir);

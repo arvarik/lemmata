@@ -22,7 +22,7 @@ pub use registry::{
     DynamicModelSpec, compute_dir_size_bytes, inspect_model_directory, print_models_inventory,
     scan_registered_models,
 };
-pub use safetensors::{SafetensorsReport, inspect_safetensors};
+pub use safetensors::{SafetensorsReport, inspect_safetensors, safetensors_header_sha256};
 pub use schema::{
     DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema,
     HierarchicalValidationReport, Question, QuestionType, clean_email_body, email_questions,

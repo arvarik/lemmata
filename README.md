@@ -119,8 +119,6 @@ Choice options keep the order the schema lists them in, as Laya was trained. For
 
 ## 🚀 Installation & Quickstart
 
-> No release is published yet. Options 1 to 4 need a tagged release. Until then, use option 5 or 6.
-
 ### 1. Standalone Installer (macOS & Linux)
 Installs the pre-built binary for your platform and verifies SHA-256 checksum:
 ```bash

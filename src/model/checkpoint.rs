@@ -238,6 +238,20 @@ impl Checkpoint {
         &[Self::English, Self::Multilingual, Self::TypedDecisions]
     }
 
+    /// All concrete downloadable checkpoints (excluding the virtual `AutoRoute` dispatcher).
+    pub fn downloadable_checkpoints() -> &'static [Checkpoint] {
+        &[
+            Self::English,
+            Self::Multilingual,
+            Self::TypedDecisions,
+            Self::ModernBertZeroShot,
+            Self::DebertaV3ZeroShot,
+            Self::ModernBertNli,
+            Self::EuroBert,
+            Self::NeoBert,
+        ]
+    }
+
     pub fn all() -> &'static [Checkpoint] {
         &[
             Self::English,
@@ -300,9 +314,10 @@ impl std::str::FromStr for Checkpoint {
             | "moritzlaurer/deberta-v3-large-zeroshot-v2.0" => Ok(Self::DebertaV3ZeroShot),
             "eurobert" | "eurobert-210m" | "eurobert/eurobert-210m" => Ok(Self::EuroBert),
             "neobert" | "neobert-250m" | "chandar-lab/neobert" => Ok(Self::NeoBert),
-            "modernbert-nli" | "nli" | "deberta-nli" | "tasksource/modernbert-large-nli" => {
-                Ok(Self::ModernBertNli)
-            }
+            "modernbert-nli"
+            | "nli"
+            | "modernbert-large-nli"
+            | "tasksource/modernbert-large-nli" => Ok(Self::ModernBertNli),
             other => Err(format!(
                 "Unknown checkpoint '{}'. Options: english, multilingual, typed-decisions, route, modernbert-zeroshot, deberta-v3, eurobert, neobert, modernbert-nli",
                 other

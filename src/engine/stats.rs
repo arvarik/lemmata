@@ -212,7 +212,7 @@ impl StatsEngine {
             let options = q.render_options();
             let est_tokens: usize = options
                 .iter()
-                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                .map(|o| crate::model::estimate_tokens(o) + 1)
                 .sum();
             let util_pct = (est_tokens as f64 / head_budget as f64 * 100.0).clamp(0.0, 200.0);
             total_head_util_sum += util_pct;
@@ -223,7 +223,7 @@ impl StatsEngine {
         // 2. Warmup phase: run warmup iterations to hot-cache memory and CPU pipelines
         for _ in 0..self.config.warmup_runs {
             for item in items.iter().take(5) {
-                let _ = self.classifier.classify(&item.state, questions);
+                self.classifier.classify(&item.state, questions)?;
             }
         }
 
@@ -353,48 +353,103 @@ impl StatsEngine {
                         if let Some(target_val) = opt_gt {
                             acc.gt_count += 1;
                             overall_evaluated += 1;
-                            confidences_all.push(ans.confidence);
 
-                            let (is_correct, soft_acc) = match question.qtype {
+                            let (is_correct, soft_acc, include_in_ece) = match question.qtype {
                                 QuestionType::Choice => {
-                                    let pred_str = ans.choice.as_deref().unwrap_or("");
-                                    let target_str = target_val.as_str().unwrap_or("");
-                                    if !target_str.is_empty() {
-                                        acc.truth_predicted.push((
-                                            target_str.to_lowercase(),
-                                            pred_str.to_lowercase(),
-                                        ));
-                                    }
-                                    let correct = !target_str.is_empty()
-                                        && (pred_str.eq_ignore_ascii_case(target_str)
-                                            || ans.selected_labels.as_ref().is_some_and(|v| {
-                                                v.iter().any(|s| s.eq_ignore_ascii_case(target_str))
-                                            }));
-                                    let soft = ans
-                                        .probabilities
-                                        .iter()
-                                        .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
-                                        .map(|(_, &v)| v)
-                                        .unwrap_or(0.0);
-
-                                    let keys: Vec<&String> = ans.probabilities.keys().collect();
-                                    if let Some(t_idx) =
-                                        keys.iter().position(|k| k.eq_ignore_ascii_case(target_str))
+                                    if let Some(target_set) =
+                                        super::metrics::extract_multi_label_targets(target_val)
                                     {
-                                        probs_all.push(
-                                            keys.iter()
-                                                .map(|k| {
+                                        let mut pred_set: Vec<String> = if let Some(sel) =
+                                            &ans.selected_labels
+                                        {
+                                            sel.iter().map(|s| s.trim().to_lowercase()).collect()
+                                        } else if let Some(c) = &ans.choice {
+                                            vec![c.trim().to_lowercase()]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        pred_set.sort();
+                                        pred_set.dedup();
+
+                                        // Record exact per-label TP / FN / FP into truth_predicted
+                                        for t in &target_set {
+                                            if pred_set.contains(t) {
+                                                acc.truth_predicted.push((t.clone(), t.clone()));
+                                            } else {
+                                                acc.truth_predicted
+                                                    .push((t.clone(), String::new()));
+                                            }
+                                        }
+                                        for p in &pred_set {
+                                            if !target_set.contains(p) {
+                                                acc.truth_predicted
+                                                    .push((String::new(), p.clone()));
+                                            }
+                                        }
+
+                                        let correct = pred_set == target_set;
+                                        let soft = if target_set.is_empty() {
+                                            1.0 - ans
+                                                .probabilities
+                                                .values()
+                                                .copied()
+                                                .fold(0.0, f64::max)
+                                        } else {
+                                            target_set
+                                                .iter()
+                                                .map(|t| {
                                                     ans.probabilities
-                                                        .get(*k)
-                                                        .copied()
+                                                        .iter()
+                                                        .find(|(k, _)| k.eq_ignore_ascii_case(t))
+                                                        .map(|(_, &v)| v)
                                                         .unwrap_or(0.0)
                                                 })
-                                                .collect(),
-                                        );
-                                        targets_all.push(t_idx);
-                                    }
+                                                .sum::<f64>()
+                                                / target_set.len() as f64
+                                        };
+                                        (correct, soft, false)
+                                    } else {
+                                        let pred_str = ans.choice.as_deref().unwrap_or("");
+                                        let target_str = target_val.as_str().unwrap_or("");
+                                        if !target_str.is_empty() {
+                                            acc.truth_predicted.push((
+                                                target_str.to_lowercase(),
+                                                pred_str.to_lowercase(),
+                                            ));
+                                        }
+                                        let correct = !target_str.is_empty()
+                                            && (pred_str.eq_ignore_ascii_case(target_str)
+                                                || ans.selected_labels.as_ref().is_some_and(|v| {
+                                                    v.iter()
+                                                        .any(|s| s.eq_ignore_ascii_case(target_str))
+                                                }));
+                                        let soft = ans
+                                            .probabilities
+                                            .iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
+                                            .map(|(_, &v)| v)
+                                            .unwrap_or(0.0);
 
-                                    (correct, soft)
+                                        let keys: Vec<&String> = ans.probabilities.keys().collect();
+                                        if let Some(t_idx) = keys
+                                            .iter()
+                                            .position(|k| k.eq_ignore_ascii_case(target_str))
+                                        {
+                                            probs_all.push(
+                                                keys.iter()
+                                                    .map(|k| {
+                                                        ans.probabilities
+                                                            .get(*k)
+                                                            .copied()
+                                                            .unwrap_or(0.0)
+                                                    })
+                                                    .collect(),
+                                            );
+                                            targets_all.push(t_idx);
+                                        }
+
+                                        (correct, soft, true)
+                                    }
                                 }
                                 QuestionType::Score => {
                                     let pred_num = ans.score.unwrap_or(0.0);
@@ -405,18 +460,12 @@ impl StatsEngine {
                                             .unwrap_or(0.0)
                                     });
                                     let err = (pred_num - target_num).abs();
-                                    (err < 0.5, 1.0 - (err / 5.0).min(1.0))
+                                    (err < 0.5, 1.0 - (err / 5.0).min(1.0), true)
                                 }
                                 QuestionType::Noul => {
-                                    let target_bool = target_val
-                                        .as_bool()
-                                        .or_else(|| {
-                                            target_val
-                                                .as_str()
-                                                .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
-                                        })
-                                        .or_else(|| target_val.as_u64().map(|n| n != 0))
-                                        .unwrap_or(false);
+                                    let target_bool =
+                                        super::metrics::parse_noul_ground_truth(target_val)
+                                            .unwrap_or(false);
                                     let pred_prob = ans.noul.unwrap_or(0.0);
                                     let pred_bool = pred_prob >= 0.5;
                                     let correct = pred_bool == target_bool;
@@ -429,7 +478,7 @@ impl StatsEngine {
                                     probs_all.push(vec![1.0 - pred_prob, pred_prob]);
                                     targets_all.push(usize::from(target_bool));
 
-                                    (correct, soft)
+                                    (correct, soft, true)
                                 }
                             };
 
@@ -437,7 +486,10 @@ impl StatsEngine {
                                 overall_correct += 1;
                                 acc.correct_count += 1;
                             }
-                            correctness_all.push(is_correct);
+                            if include_in_ece {
+                                confidences_all.push(super::metrics::winning_probability(ans));
+                                correctness_all.push(is_correct);
+                            }
                             acc.confidence_correct.push((ans.confidence, is_correct));
                             overall_soft_acc_sum += soft_acc;
                             acc.soft_acc_sum += soft_acc;
@@ -714,7 +766,7 @@ impl StatsEngine {
             (
                 "Mean Predicted Confidence",
                 format!("{:.2}%", report.uncertainty.mean_confidence * 100.0),
-                "Average winning option probability",
+                "Average chance-adjusted & negentropy decision confidence",
             ),
             (
                 "Mean Top-2 Margin Gap (Δ)",
@@ -1143,9 +1195,13 @@ fn label_stats(truth_predicted: &[(String, String)]) -> Vec<LabelStats> {
     // (support, predicted, true positives) per label.
     let mut counts: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
     for (truth, predicted) in truth_predicted {
-        counts.entry(truth).or_default().0 += 1;
-        counts.entry(predicted).or_default().1 += 1;
-        if truth == predicted {
+        if !truth.is_empty() {
+            counts.entry(truth).or_default().0 += 1;
+        }
+        if !predicted.is_empty() {
+            counts.entry(predicted).or_default().1 += 1;
+        }
+        if !truth.is_empty() && truth == predicted {
             counts.entry(truth).or_default().2 += 1;
         }
     }
@@ -1188,7 +1244,7 @@ fn f1_averages(labels: &[LabelStats]) -> (Option<f64>, Option<f64>) {
 fn confused_pairs(truth_predicted: &[(String, String)], k: usize) -> Vec<ConfusedPair> {
     let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for (truth, predicted) in truth_predicted {
-        if truth != predicted {
+        if !truth.is_empty() && !predicted.is_empty() && truth != predicted {
             *counts.entry((truth, predicted)).or_default() += 1;
         }
     }

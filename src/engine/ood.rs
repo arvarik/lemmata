@@ -52,7 +52,7 @@ impl OodDetector {
     pub fn new(profile: OodProfile) -> Result<Self> {
         if profile.energy_kind != ENERGY_KIND {
             bail!(
-                "OOD profile '{}' was fitted by an older lemmata that computed energy from probabilities. Refit it with `lemmata ood fit`.",
+                "OOD profile '{}' was fitted by an older lemmata that computed energy from probabilities. Refit it with `OodDetector::fit` or `lemmata calibrate --adaptive`.",
                 profile.name
             );
         }
@@ -88,10 +88,7 @@ impl OodDetector {
         let batch_results = classifier.classify_batch(items, questions)?;
 
         for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
-            let text = match &item.state {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other)?,
-            };
+            let text = item.state_text();
 
             let feat = vectorize_text(&text);
             let ans = res
@@ -273,10 +270,7 @@ impl OodDetector {
         let batch_results = classifier.classify_batch(items, questions)?;
         let mut results = Vec::with_capacity(items.len());
         for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
-            let text = match &item.state {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other)?,
-            };
+            let text = item.state_text();
             results.push(self.evaluate_with_decision(&item.id, &text, res)?);
         }
         Ok(results)

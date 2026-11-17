@@ -7,9 +7,7 @@ use std::time::Instant;
 use crate::datasource::DataItem;
 use crate::engine::cache::{DecisionCache, compute_schema_hash};
 use crate::engine::classifier::LayaClassifier;
-use crate::model::{
-    DecisionAnswer, DecisionResult, HierarchicalNode, HierarchicalSchema, Question,
-};
+use crate::model::{DecisionAnswer, HierarchicalNode, HierarchicalSchema, Question};
 
 /// Nested taxonomies deeper than this stop expanding.
 const MAX_DEPTH: usize = 10;
@@ -233,19 +231,19 @@ impl HierarchicalRouter {
         }
         *all_hits = false;
         let start = Instant::now();
-        let answer = self.classifier.classify_single(text, question)?;
+        let mut result = self
+            .classifier
+            .classify(&serde_json::Value::String(text.to_string()), &questions)?;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
         if let Some(cache) = &self.cache
             && let Ok(mut c) = cache.lock()
         {
-            let result = DecisionResult {
-                model: self.classifier.config().checkpoint.repo_id().to_string(),
-                answers: BTreeMap::from([("q".to_string(), answer.clone())]),
-                input_tokens: 0,
-                latency_ms,
-            };
             c.insert(text, &schema_hash, &result);
         }
+        let answer = result
+            .answers
+            .remove("q")
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract hierarchical decision answer"))?;
         Ok((answer, latency_ms))
     }
 
@@ -264,11 +262,7 @@ impl HierarchicalRouter {
         for (k, node) in branches {
             let k_clean = k.trim().to_lowercase();
             let k_prefix = k_clean.split(':').next().unwrap_or(&k_clean).trim();
-            if k_clean == clean
-                || k_prefix == clean_prefix
-                || clean.starts_with(k_prefix)
-                || k_clean.starts_with(clean_prefix)
-            {
+            if k_clean == clean || k_prefix == clean_prefix {
                 return Some(node);
             }
         }
@@ -278,10 +272,7 @@ impl HierarchicalRouter {
     /// Classify a slice of DataItems in parallel using Rayon.
     pub fn classify_items(&self, items: &[DataItem]) -> Result<Vec<HierarchicalDecisionResult>> {
         crate::model::native::map_items(items, |item| {
-            let text = match &item.state {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other).unwrap_or_default(),
-            };
+            let text = item.state_text();
             self.route_text(&text, Some(item.id.clone()))
         })
         .into_iter()

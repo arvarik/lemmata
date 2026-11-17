@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// A standardized item ingested from any data source for Laya classification.
@@ -15,6 +16,10 @@ pub struct DataItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ground_truth: Option<BTreeMap<String, serde_json::Value>>,
 
+    /// Optional non-model metadata (slice columns, leakage group keys, provenance tags).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+
     /// Origin identifier (e.g. file path, stream partition, URI).
     pub source_uri: String,
 }
@@ -29,6 +34,7 @@ impl DataItem {
             id: id.into(),
             state,
             ground_truth: None,
+            metadata: BTreeMap::new(),
             source_uri: source_uri.into(),
         }
     }
@@ -38,18 +44,44 @@ impl DataItem {
         self
     }
 
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, serde_json::Value>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Canonical model-visible text representation of a `state` JSON value.
+    ///
+    /// Unwraps single-key `{"text": "..."}` wrappers emitted by plain-text, CSV, and JSONL
+    /// ingestion so encoders and routers see raw text instead of JSON punctuation, while
+    /// serializing genuine multi-field structured objects as JSON.
+    pub fn state_to_text(state: &serde_json::Value) -> Cow<'_, str> {
+        match state {
+            serde_json::Value::String(text) => Cow::Borrowed(text.as_str()),
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                    Cow::Borrowed(text)
+                } else {
+                    Cow::Owned(serde_json::to_string(state).unwrap_or_default())
+                }
+            }
+            other => Cow::Owned(serde_json::to_string(other).unwrap_or_default()),
+        }
+    }
+
+    /// Return the canonical model-visible text representation of `self.state`.
+    pub fn state_text(&self) -> Cow<'_, str> {
+        Self::state_to_text(&self.state)
+    }
+
     /// Helper to convert state to a readable string for logging or preview.
     pub fn preview_text(&self, max_chars: usize) -> String {
-        let s = match &self.state {
-            serde_json::Value::String(text) => text.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
+        let s = self.state_text();
         let char_count = s.chars().count();
         if char_count > max_chars {
             let truncated: String = s.chars().take(max_chars).collect();
             format!("{}...", truncated)
         } else {
-            s
+            s.into_owned()
         }
     }
 }

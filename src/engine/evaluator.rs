@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
 use super::metrics::{
-    EvaluationMetrics, calculate_brier_score, calculate_ece, resolve_ground_truth_for_question,
+    EvaluationMetrics, calculate_brier_score, calculate_ece, extract_multi_label_targets,
+    parse_noul_ground_truth, resolve_ground_truth_for_question, winning_probability,
 };
 use crate::datasource::DataItem;
-use crate::model::{Question, QuestionType};
+use crate::model::{DecisionResult, Question, QuestionType};
 
 /// Evaluator that computes Laya metrics against labeled ground truth data.
 pub struct Evaluator {
@@ -27,6 +28,21 @@ impl Evaluator {
         if items.is_empty() {
             bail!("No items to evaluate");
         }
+        let batch_results = self.classifier.classify_batch(items, questions)?;
+        self.evaluate_with_results(items, questions, &batch_results)
+    }
+
+    /// Compute evaluation metrics over pre-computed `classify_batch` results without running
+    /// a redundant forward pass.
+    pub fn evaluate_with_results(
+        &self,
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        batch_results: &[(String, DecisionResult)],
+    ) -> Result<EvaluationMetrics> {
+        if items.is_empty() {
+            bail!("No items to evaluate");
+        }
 
         let mut total_samples = 0;
         let mut correct_count = 0;
@@ -34,15 +50,14 @@ impl Evaluator {
         let mut escalate_count = 0;
 
         let mut confidences = Vec::new();
-        let mut correctness = Vec::new();
+        let mut ece_confidences = Vec::new();
+        let mut ece_correctness = Vec::new();
 
         let mut all_probs = Vec::new();
         let mut all_targets = Vec::new();
 
         let mut score_err_sum = 0.0;
         let mut score_count = 0;
-
-        let batch_results = self.classifier.classify_batch(items, questions)?;
 
         for (item, (_, result)) in items.iter().zip(batch_results.iter()) {
             let Some(gt_map) = &item.ground_truth else {
@@ -70,33 +85,69 @@ impl Evaluator {
 
                 match answer.qtype {
                     QuestionType::Choice => {
-                        let pred_choice = answer.choice.as_deref().unwrap_or("");
-                        let target_str = target_val.as_str().unwrap_or("");
-                        let is_correct = pred_choice.eq_ignore_ascii_case(target_str);
+                        if let Some(target_set) = extract_multi_label_targets(target_val) {
+                            let mut pred_set: Vec<String> =
+                                if let Some(sel) = &answer.selected_labels {
+                                    sel.iter().map(|s| s.trim().to_lowercase()).collect()
+                                } else if let Some(c) = &answer.choice {
+                                    vec![c.trim().to_lowercase()]
+                                } else {
+                                    Vec::new()
+                                };
+                            pred_set.sort();
+                            pred_set.dedup();
 
-                        if is_correct {
-                            correct_count += 1;
-                        }
-                        correctness.push(is_correct);
+                            let is_correct = pred_set == target_set;
+                            if is_correct {
+                                correct_count += 1;
+                            }
+                            let soft = if target_set.is_empty() {
+                                1.0 - answer.probabilities.values().copied().fold(0.0, f64::max)
+                            } else {
+                                let sum_p: f64 = target_set
+                                    .iter()
+                                    .map(|t| {
+                                        answer
+                                            .probabilities
+                                            .iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case(t))
+                                            .map(|(_, &v)| v)
+                                            .unwrap_or(0.0)
+                                    })
+                                    .sum();
+                                sum_p / target_set.len() as f64
+                            };
+                            soft_acc_sum += soft;
+                        } else {
+                            let pred_choice = answer.choice.as_deref().unwrap_or("");
+                            let target_str = target_val.as_str().unwrap_or("");
+                            let is_correct = pred_choice.eq_ignore_ascii_case(target_str);
 
-                        let p_target = answer
-                            .probabilities
-                            .iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
-                            .map(|(_, &v)| v)
-                            .unwrap_or(0.0);
-                        soft_acc_sum += p_target;
+                            if is_correct {
+                                correct_count += 1;
+                            }
+                            ece_confidences.push(winning_probability(answer));
+                            ece_correctness.push(is_correct);
 
-                        let keys: Vec<&String> = answer.probabilities.keys().collect();
-                        if let Some(t_idx) =
-                            keys.iter().position(|k| k.eq_ignore_ascii_case(target_str))
-                        {
-                            let p_vec: Vec<f64> = keys
+                            let p_target = answer
+                                .probabilities
                                 .iter()
-                                .map(|k| answer.probabilities.get(*k).copied().unwrap_or(0.0))
-                                .collect();
-                            all_probs.push(p_vec);
-                            all_targets.push(t_idx);
+                                .find(|(k, _)| k.eq_ignore_ascii_case(target_str))
+                                .map(|(_, &v)| v)
+                                .unwrap_or(0.0);
+                            soft_acc_sum += p_target;
+
+                            let keys: Vec<&String> = answer.probabilities.keys().collect();
+                            if let Some(t_idx) =
+                                keys.iter().position(|k| k.eq_ignore_ascii_case(target_str))
+                            {
+                                let p_vec: Vec<f64> = keys
+                                    .iter()
+                                    .map(|k| answer.probabilities.get(*k).copied().unwrap_or(0.0))
+                                    .collect();
+                                all_probs.push(p_vec);
+                                all_targets.push(t_idx);
+                            }
                         }
                     }
                     QuestionType::Score => {
@@ -116,23 +167,20 @@ impl Evaluator {
                         if is_close {
                             correct_count += 1;
                         }
-                        correctness.push(is_close);
+                        ece_confidences.push(winning_probability(answer));
+                        ece_correctness.push(is_close);
                         soft_acc_sum += 1.0 - (err / 5.0).min(1.0);
                     }
                     QuestionType::Noul => {
                         let pred_noul = answer.noul.unwrap_or(0.5);
-                        let target_bool = target_val.as_bool().unwrap_or_else(|| {
-                            target_val
-                                .as_str()
-                                .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
-                                .unwrap_or(false)
-                        });
+                        let target_bool = parse_noul_ground_truth(target_val).unwrap_or(false);
 
                         let is_correct = (pred_noul >= 0.5) == target_bool;
                         if is_correct {
                             correct_count += 1;
                         }
-                        correctness.push(is_correct);
+                        ece_confidences.push(winning_probability(answer));
+                        ece_correctness.push(is_correct);
 
                         let p_target = if target_bool {
                             pred_noul
@@ -155,7 +203,7 @@ impl Evaluator {
         let accuracy = correct_count as f64 / total_samples as f64;
         let soft_accuracy = soft_acc_sum / total_samples as f64;
         let act_escalate_rate = escalate_count as f64 / total_samples as f64;
-        let ece = calculate_ece(&confidences, &correctness, 10);
+        let ece = calculate_ece(&ece_confidences, &ece_correctness, 10);
         let brier_score = calculate_brier_score(&all_probs, &all_targets);
         let score_mae = if score_count > 0 {
             Some(score_err_sum / score_count as f64)

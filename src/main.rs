@@ -156,10 +156,7 @@ fn load_questions_or_inline(
 }
 
 fn item_text(item: &DataItem) -> Result<String> {
-    match &item.state {
-        serde_json::Value::String(s) => Ok(s.clone()),
-        other => Ok(serde_json::to_string(other)?),
-    }
+    Ok(item.state_text().into_owned())
 }
 
 fn apply_calibrated_config(
@@ -206,16 +203,9 @@ fn apply_calibrated_config(
 }
 
 fn handle_download(args: DownloadArgs) -> Result<()> {
-    let checkpoints: Vec<Checkpoint> = if args.all || args.checkpoint.eq_ignore_ascii_case("all") {
-        vec![
-            Checkpoint::English,
-            Checkpoint::Multilingual,
-            Checkpoint::TypedDecisions,
-            Checkpoint::ModernBertZeroShot,
-            Checkpoint::DebertaV3ZeroShot,
-            Checkpoint::EuroBert,
-            Checkpoint::NeoBert,
-        ]
+    let download_all = args.all || args.checkpoint.eq_ignore_ascii_case("all");
+    let checkpoints: Vec<Checkpoint> = if download_all {
+        Checkpoint::downloadable_checkpoints().to_vec()
     } else {
         vec![parse_checkpoint(&args.checkpoint)?]
     };
@@ -228,10 +218,19 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
         Downloader::detect()?
     };
 
+    let resolve_target_dir = |ckpt: Checkpoint| -> std::path::PathBuf {
+        if download_all && args.target_dir != std::path::Path::new("models/laya") {
+            args.target_dir.join(ckpt.short_name())
+        } else {
+            args.target_dir.clone()
+        }
+    };
+
     if args.verify_only {
         let mut failed = Vec::new();
         for &checkpoint in &checkpoints {
-            let report = downloader.verify_checkpoint(checkpoint, &args.target_dir)?;
+            let target = resolve_target_dir(checkpoint);
+            let report = downloader.verify_checkpoint(checkpoint, &target)?;
             println!(
                 "🔍 Verifying checkpoint {} in {}",
                 checkpoint.repo_id(),
@@ -265,7 +264,8 @@ fn handle_download(args: DownloadArgs) -> Result<()> {
     }
 
     for checkpoint in checkpoints {
-        downloader.download(checkpoint, &args.target_dir, args.dry_run)?;
+        let target = resolve_target_dir(checkpoint);
+        downloader.download(checkpoint, &target, args.dry_run)?;
     }
     Ok(())
 }
@@ -406,22 +406,35 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
     };
 
     let schema_hash = compute_schema_hash(&questions);
-    let mut raw_results = Vec::new();
+    let mut raw_slots: Vec<Option<(String, lemmata::model::DecisionResult)>> =
+        vec![None; items.len()];
+    let mut miss_indices = Vec::new();
+    let mut miss_items = Vec::new();
+    let mut miss_texts = Vec::new();
 
-    for item in &items {
+    for (idx, item) in items.iter().enumerate() {
         let text = item_text(item)?;
         if let Some(res) = cache.as_mut().and_then(|c| c.lookup(&text, &schema_hash)) {
-            raw_results.push((item.id.clone(), res));
-            continue;
+            raw_slots[idx] = Some((item.id.clone(), res));
+        } else {
+            miss_indices.push(idx);
+            miss_items.push(item.clone());
+            miss_texts.push(text);
         }
-
-        let res = classifier.classify(&item.state, &questions)?;
-
-        if let Some(c) = &mut cache {
-            c.insert(&text, &schema_hash, &res);
-        }
-        raw_results.push((item.id.clone(), res));
     }
+
+    if !miss_items.is_empty() {
+        let batch_misses = classifier.classify_batch(&miss_items, &questions)?;
+        for ((idx, text), (id, res)) in miss_indices.into_iter().zip(miss_texts).zip(batch_misses) {
+            if let Some(c) = &mut cache {
+                c.insert(&text, &schema_hash, &res);
+            }
+            raw_slots[idx] = Some((id, res));
+        }
+    }
+
+    let raw_results: Vec<(String, lemmata::model::DecisionResult)> =
+        raw_slots.into_iter().flatten().collect();
 
     if let Some(c) = &cache {
         c.save()?;
@@ -454,18 +467,24 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
         );
     }
 
-    let results: Vec<_> = if args.escalate_only {
-        raw_results
-            .into_iter()
-            .filter(|(_, res)| {
-                res.answers
-                    .values()
-                    .any(|ans| ans.act_probability.unwrap_or(0.0) >= args.escalate_threshold)
-            })
-            .collect()
-    } else {
-        raw_results
-    };
+    let indexed_results: Vec<(usize, (String, lemmata::model::DecisionResult))> =
+        if args.escalate_only {
+            raw_results
+                .into_iter()
+                .enumerate()
+                .filter(|(_, (_, res))| {
+                    res.answers
+                        .values()
+                        .any(|ans| ans.act_probability.unwrap_or(0.0) >= args.escalate_threshold)
+                })
+                .collect()
+        } else {
+            raw_results.into_iter().enumerate().collect()
+        };
+    let results: Vec<(String, lemmata::model::DecisionResult)> = indexed_results
+        .iter()
+        .map(|(_, pair)| pair.clone())
+        .collect();
 
     let mut out_writer = open_output_writer(args.output.as_deref())?;
 
@@ -540,12 +559,9 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
                 Cell::new("Latency").fg(Color::DarkGrey),
             ]);
 
-            let item_map: std::collections::HashMap<&str, &DataItem> =
-                items.iter().map(|it| (it.id.as_str(), it)).collect();
-
-            for (id, res) in &results {
-                let snippet = item_map
-                    .get(id.as_str())
+            for (orig_idx, (id, res)) in &indexed_results {
+                let snippet = items
+                    .get(*orig_idx)
                     .map(|it| it.preview_text(40))
                     .unwrap_or_default();
                 for (qid, ans) in &res.answers {
@@ -553,7 +569,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
                         Some(n) => format!("true: {:.2}%", n * 100.0),
                         None => format_answer_value(ans, ", "),
                     };
-                    let esc_str = if ans.act_probability.unwrap_or(0.0) > 0.5 {
+                    let esc_str = if ans.act_probability.unwrap_or(0.0) >= args.escalate_threshold {
                         "YES (⚠️)"
                     } else {
                         "no"
@@ -633,7 +649,15 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
         list
     };
 
-    let report = ExperimentRunner::run_arena_with_options(
+    let slice_mode = match &args.slice_by {
+        Some(slice_str) => Some(
+            slice_str
+                .parse::<lemmata::engine::SliceBy>()
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        None => None,
+    };
+    let (report, slice_matrix) = ExperimentRunner::run_arena_with_slices(
         &items,
         &questions,
         &checkpoints,
@@ -641,25 +665,8 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
         chunk_strategy,
         args.hypothesis_template.as_deref(),
         args.shortlist_k,
+        slice_mode.as_ref(),
     )?;
-    let slice_matrix = if let Some(slice_str) = &args.slice_by {
-        let mode = slice_str
-            .parse::<lemmata::engine::SliceBy>()
-            .map_err(|e| anyhow::anyhow!(e))?;
-        Some(
-            lemmata::engine::slicing::compute_arena_slice_matrix_with_options(
-                &items,
-                &questions,
-                &checkpoints,
-                &mode,
-                chunk_strategy,
-                args.hypothesis_template.as_deref(),
-                args.shortlist_k,
-            )?,
-        )
-    } else {
-        None
-    };
 
     if args.json {
         if let Some((slices, rows)) = &slice_matrix {
@@ -721,21 +728,6 @@ fn handle_test(args: TestArgs) -> Result<()> {
             cfg.temperature_by_options.clear();
         }
     }
-    let slice_entries = if let Some(slice_str) = &args.slice_by {
-        let mode = slice_str
-            .parse::<lemmata::engine::SliceBy>()
-            .map_err(|e| anyhow::anyhow!(e))?;
-        Some(lemmata::engine::evaluate_slices(
-            &LayaClassifier::new(cfg.clone()),
-            &items,
-            &questions,
-            &mode,
-        )?)
-    } else {
-        None
-    };
-    let evaluator = Evaluator::new(LayaClassifier::new(cfg));
-
     log_status(
         args.json,
         format!(
@@ -744,7 +736,24 @@ fn handle_test(args: TestArgs) -> Result<()> {
             checkpoint.repo_id()
         ),
     );
-    let metrics = evaluator.evaluate(&items, &questions)?;
+    let classifier = LayaClassifier::new(cfg.clone());
+    let batch_results = classifier.classify_batch(&items, &questions)?;
+    let slice_entries = if let Some(slice_str) = &args.slice_by {
+        let mode = slice_str
+            .parse::<lemmata::engine::SliceBy>()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Some(lemmata::engine::evaluate_slices_with_results(
+            &classifier,
+            &items,
+            &questions,
+            &batch_results,
+            &mode,
+        )?)
+    } else {
+        None
+    };
+    let evaluator = Evaluator::new(LayaClassifier::new(cfg));
+    let metrics = evaluator.evaluate_with_results(&items, &questions, &batch_results)?;
 
     if let Some(save_path) = &args.save_baseline {
         write_json_file(save_path, &metrics)?;
@@ -1153,18 +1162,24 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
         .get(qid)
         .ok_or_else(|| anyhow::anyhow!("Question '{}' not found in schema", qid))?;
 
-    let opt_keys: Vec<String> = question
-        .render_options()
-        .iter()
-        .map(|o| {
-            o.split(':')
-                .next()
-                .unwrap_or(o)
-                .trim()
-                .trim_matches('"')
-                .to_string()
-        })
-        .collect();
+    let opt_keys: Vec<String> = match question.qtype {
+        lemmata::model::QuestionType::Score => (0..question.render_options().len())
+            .map(|i| i.to_string())
+            .collect(),
+        lemmata::model::QuestionType::Noul => vec!["false".into(), "true".into()],
+        lemmata::model::QuestionType::Choice => question
+            .render_options()
+            .iter()
+            .map(|o| {
+                o.split(':')
+                    .next()
+                    .unwrap_or(o)
+                    .trim()
+                    .trim_matches('"')
+                    .to_string()
+            })
+            .collect(),
+    };
 
     let classifier = LayaClassifier::with_checkpoint(checkpoint);
     let has_opt = |cand: &str| opt_keys.iter().any(|k| k.eq_ignore_ascii_case(cand));
@@ -1773,10 +1788,12 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
                 risk_threshold,
                 system2_cost_per_call: run_args.system2_cost,
             });
+            let batch = classifier.classify_batch(&items, &questions)?;
             let decisions: Vec<_> = items
                 .iter()
-                .map(|item| router.route(item, &questions, &classifier))
-                .collect::<Result<_>>()?;
+                .zip(batch)
+                .map(|(item, (_, res))| router.route_with_result(item, res))
+                .collect();
 
             if run_args.json || matches!(run_args.format, OutputFormat::Json | OutputFormat::Pretty)
             {
@@ -2176,20 +2193,18 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
         tuner = tuner.with_cost_weights(parse_cost_weights(cw_spec)?);
     }
 
-    let (report, mut calibrated_config) = tuner.fit(&items, &questions, dataset_name)?;
-
-    if args.fit_label_bias {
+    if args.fit_label_bias && checkpoint == Checkpoint::AutoRoute {
         // `route` picks a different model per input, so one bias vector cannot fit them all. On
         // multilingual sentiment it lowered route's accuracy from 57.8% to 54.0%.
-        if checkpoint == Checkpoint::AutoRoute {
-            bail!(
-                "--fit-label-bias needs a fixed checkpoint. `route` picks a different model per input, and one label bias does not fit them all."
-            );
-        }
-        // Fit on top of the calibrated temperatures, which classify applies first.
-        let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
-        lemmata::engine::apply_persisted_calibration(&mut cfg, &calibrated_config);
-        let fit = lemmata::engine::fit_label_bias(&LayaClassifier::new(cfg), &items, &questions)?;
+        bail!(
+            "--fit-label-bias needs a fixed checkpoint. `route` picks a different model per input, and one label bias does not fit them all."
+        );
+    }
+
+    let (report, mut calibrated_config, label_bias_fit) =
+        tuner.fit_full(&items, &questions, dataset_name, args.fit_label_bias)?;
+
+    if let Some(fit) = label_bias_fit {
         for (qid, (n, before, after)) in &fit.questions {
             eprintln!(
                 "🎯 Label bias for '{qid}': accuracy on these {n} samples {:.1}% -> {:.1}%",
@@ -2281,8 +2296,27 @@ fn handle_report(args: ReportArgs) -> Result<()> {
         return Ok(());
     }
 
+    let chunk_strategy = args
+        .chunk_strategy
+        .parse::<lemmata::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
     cfg.escalate_threshold = args.escalate_threshold;
+    cfg.hypothesis_template = args.hypothesis_template.clone();
+    cfg.chunk_strategy = chunk_strategy;
+    cfg.shortlist_k = args.shortlist_k;
+    if let Some(path) = &args.probe {
+        cfg.probe = Some(std::sync::Arc::new(lemmata::engine::Probe::load(path)?));
+    }
+    if let Some(config_path) = &args.config {
+        apply_calibrated_config(&mut cfg, config_path, args.temperature.is_none())?;
+    }
+    if let Some(t) = args.temperature {
+        cfg.temperature = t;
+        if args.config.is_none() {
+            cfg.temperature_by_options.clear();
+        }
+    }
     let classifier = LayaClassifier::new(cfg);
 
     let report = StatsEngine::new(classifier)

@@ -61,12 +61,14 @@ impl ConformalEngine {
         for (item, (_, res)) in items.iter().zip(batch_results.iter()) {
             let ans = &res.answers[qid];
 
+            let prob_sum: f64 = ans.probabilities.values().copied().sum();
+            let norm_denom = if prob_sum > 1e-12 { prob_sum } else { 1.0 };
             let mut sorted_probs: Vec<(String, f64)> = ans
                 .probabilities
                 .iter()
-                .map(|(k, &v)| (k.clone(), v))
+                .map(|(k, &v)| (k.clone(), (v / norm_denom).clamp(0.0, 1.0)))
                 .collect();
-            sorted_probs.sort_by(|a, b| b.1.total_cmp(&a.1));
+            sorted_probs.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
             let gt_label = super::metrics::resolve_ground_truth_for_question(
                 item.ground_truth.as_ref(),
@@ -81,16 +83,29 @@ impl ConformalEngine {
                 _ => None,
             });
 
+            let label_matches = |lbl: &str, target: &str| -> bool {
+                lbl.eq_ignore_ascii_case(target)
+                    || lbl
+                        .split(':')
+                        .next()
+                        .unwrap_or(lbl)
+                        .trim()
+                        .eq_ignore_ascii_case(target)
+            };
+
             let mut score_idx = None;
             if let Some(ref target) = gt_label {
-                let mut cum_p = 0.0;
+                // Strictly-prior cumulative probability mass s(x, y) = \sum_{j < r(y)} \pi_{(j)}(x).
+                // Paired with C(x) = { y : s(x, y) <= q_hat }, this satisfies y \in C(x) <=> s(x, y) <= q_hat
+                // identically, preserving finite-sample marginal coverage while keeping confident sets singleton.
+                let mut prior_cum = 0.0;
                 for (lbl, p) in &sorted_probs {
-                    cum_p += p;
-                    if lbl.eq_ignore_ascii_case(target) {
+                    if label_matches(lbl, target) {
                         score_idx = Some(raw_scores.len());
-                        raw_scores.push(cum_p);
+                        raw_scores.push(prior_cum);
                         break;
                     }
+                    prior_cum += p;
                 }
             }
 
@@ -111,7 +126,7 @@ impl ConformalEngine {
             if raw_rank > n {
                 1.0
             } else if raw_rank == 0 {
-                0.0
+                -1.0
             } else {
                 s[raw_rank - 1]
             }
@@ -141,13 +156,14 @@ impl ConformalEngine {
             };
 
             let mut set = Vec::new();
-            let mut cum_p = 0.0;
+            let mut prior_cum = 0.0;
 
-            if item_q > 0.0 {
+            if item_q >= 0.0 {
                 for (lbl, p) in sorted_probs {
-                    set.push(lbl);
-                    cum_p += p;
-                    if cum_p >= item_q - 1e-9 {
+                    if prior_cum <= item_q + 1e-12 {
+                        set.push(lbl);
+                        prior_cum += p;
+                    } else {
                         break;
                     }
                 }
@@ -165,7 +181,14 @@ impl ConformalEngine {
             }
 
             let is_covered = gt_opt.as_ref().map(|target| {
-                let cov = set.iter().any(|s| s.eq_ignore_ascii_case(target));
+                let cov = set.iter().any(|s| {
+                    s.eq_ignore_ascii_case(target)
+                        || s.split(':')
+                            .next()
+                            .unwrap_or(s)
+                            .trim()
+                            .eq_ignore_ascii_case(target)
+                });
                 if cov {
                     covered_count += 1;
                 }

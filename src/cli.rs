@@ -189,7 +189,7 @@ pub struct DownloadArgs {
 #[derive(Args, Debug)]
 pub struct ClassifyArgs {
     /// Inline text snippet to classify (positional shortcut for --text)
-    #[arg(value_name = "TEXT")]
+    #[arg(value_name = "TEXT", conflicts_with_all = ["text", "file", "stdin", "url"])]
     pub positional_text: Option<String>,
 
     /// Directory to ingest data from (default: data)
@@ -197,15 +197,15 @@ pub struct ClassifyArgs {
     pub data_dir: PathBuf,
 
     /// Specific file to ingest (JSON, JSONL, CSV, TXT)
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["stdin", "text", "url"])]
     pub file: Option<PathBuf>,
 
     /// Read data streamed from standard input
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["text", "url"])]
     pub stdin: bool,
 
     /// Classify inline text snippet directly from command line
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "url")]
     pub text: Option<String>,
 
     /// Target web URL to scrape, extract, and classify directly
@@ -232,7 +232,7 @@ pub struct ClassifyArgs {
     #[arg(short, long, default_value = "billing,technical,sales,other")]
     pub labels: String,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
     #[arg(
         short,
         long,
@@ -318,7 +318,7 @@ pub struct ClassifyArgs {
     #[arg(long)]
     pub hypothesis_template: Option<String>,
 
-    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate-prefix, head-tail, sliding-window)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
@@ -368,7 +368,7 @@ pub struct CompareArgs {
     #[arg(long)]
     pub hypothesis_template: Option<String>,
 
-    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate-prefix, head-tail, sliding-window)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
@@ -395,7 +395,7 @@ pub struct TestArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
     #[arg(
         short,
         long,
@@ -453,7 +453,7 @@ pub struct TestArgs {
     #[arg(long)]
     pub slice_by: Option<String>,
 
-    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate, head-tail, sliding)
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate-prefix, head-tail, sliding-window)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 
@@ -1172,7 +1172,7 @@ pub struct ReportArgs {
     #[arg(short, long)]
     pub schema: PathBuf,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, auto-best, modernbert-zeroshot, deberta-v3, eurobert, neobert)
+    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
     #[arg(
         short,
         long,
@@ -1181,6 +1181,30 @@ pub struct ReportArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Temperature scaling factor
+    #[arg(long)]
+    pub temperature: Option<f64>,
+
+    /// Path to custom JSON model/agent config (e.g. calibrated config with temperature & cost_weights)
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Custom NLI hypothesis or MLM verbalizer template (e.g. "This support ticket is about {label}.")
+    #[arg(long)]
+    pub hypothesis_template: Option<String>,
+
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate-prefix, head-tail, sliding-window)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
+
+    /// Keep only the top-k options by lexical match before model scoring (0 = disabled)
+    #[arg(long, default_value_t = 0)]
+    pub shortlist_k: usize,
+
+    /// Supervised probe from `lemmata probe fit`. It replaces zero-shot scoring for its question
+    #[arg(long)]
+    pub probe: Option<PathBuf>,
 
     /// Number of benchmark passes for timing stability (default: 3)
     #[arg(short, long, default_value_t = 3)]
@@ -1309,10 +1333,16 @@ pub struct ProbeFitArgs {
     pub question: Option<String>,
 
     /// Checkpoint whose embeddings the probe reads
-    #[arg(short, long, visible_alias = "model", default_value = "english")]
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
     pub checkpoint: String,
 
-    /// Long-text strategy for the embeddings (truncate, head-tail, sliding-window)
+    /// Long-context adaptation strategy when input exceeds checkpoint window (truncate-prefix, head-tail, sliding-window)
     #[arg(long, default_value = "truncate")]
     pub chunk_strategy: String,
 

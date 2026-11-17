@@ -68,18 +68,6 @@ pub struct ArenaSliceRow {
     pub overall_accuracy: f64,
 }
 
-fn item_text(item: &DataItem) -> String {
-    match &item.state {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Object(map) if map.len() == 1 => map
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| serde_json::to_string(&item.state).unwrap_or_default()),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
 /// Extract the diagnostic slice label for a single `DataItem`.
 pub fn extract_item_slice(item: &DataItem, mode: &SliceBy) -> String {
     match mode {
@@ -92,11 +80,11 @@ pub fn extract_item_slice(item: &DataItem, mode: &SliceBy) -> String {
             }
             "all".to_string()
         }
-        SliceBy::Script => Checkpoint::detect_script_route(&item_text(item))
+        SliceBy::Script => Checkpoint::detect_script_route(&item.state_text())
             .1
             .to_string(),
         SliceBy::LengthBucket => {
-            let tokens = estimate_tokens(&item_text(item));
+            let tokens = estimate_tokens(&item.state_text());
             if tokens <= 128 {
                 "short (<=128t)".to_string()
             } else if tokens <= 512 {
@@ -109,11 +97,13 @@ pub fn extract_item_slice(item: &DataItem, mode: &SliceBy) -> String {
         }
         SliceBy::Field(key) => {
             let val = item
-                .state
-                .as_object()
-                .and_then(|obj| {
-                    obj.get(key)
-                        .or_else(|| obj.get("metadata").and_then(|m| m.get(key)))
+                .metadata
+                .get(key)
+                .or_else(|| {
+                    item.state.as_object().and_then(|obj| {
+                        obj.get(key)
+                            .or_else(|| obj.get("metadata").and_then(|m| m.get(key)))
+                    })
                 })
                 .or_else(|| item.ground_truth.as_ref().and_then(|gt| gt.get(key)));
             match val {
@@ -136,19 +126,34 @@ pub fn evaluate_slices(
     if items.is_empty() {
         bail!("No items to evaluate for slice breakdown");
     }
+    let batch_results = classifier.classify_batch(items, questions)?;
+    evaluate_slices_with_results(classifier, items, questions, &batch_results, mode)
+}
 
-    let mut grouped: BTreeMap<String, Vec<DataItem>> = BTreeMap::new();
-    for item in items {
-        grouped
-            .entry(extract_item_slice(item, mode))
-            .or_default()
-            .push(item.clone());
+/// Evaluate discovered data slices from pre-computed `classify_batch` results without a second pass.
+pub fn evaluate_slices_with_results(
+    classifier: &LayaClassifier,
+    items: &[DataItem],
+    questions: &BTreeMap<String, Question>,
+    batch_results: &[(String, crate::model::DecisionResult)],
+    mode: &SliceBy,
+) -> Result<Vec<SliceMetricEntry>> {
+    if items.is_empty() {
+        bail!("No items to evaluate for slice breakdown");
     }
 
+    type SliceGroup = (Vec<DataItem>, Vec<(String, crate::model::DecisionResult)>);
+    let mut grouped: BTreeMap<String, SliceGroup> = BTreeMap::new();
+    for (item, res) in items.iter().zip(batch_results.iter()) {
+        let entry = grouped.entry(extract_item_slice(item, mode)).or_default();
+        entry.0.push(item.clone());
+        entry.1.push(res.clone());
+    }
+
+    let eval = Evaluator::new(LayaClassifier::new(classifier.config().clone()));
     let mut entries = Vec::with_capacity(grouped.len());
-    for (slice, slice_items) in grouped {
-        let eval = Evaluator::new(LayaClassifier::new(classifier.config().clone()));
-        if let Ok(metrics) = eval.evaluate(&slice_items, questions) {
+    for (slice, (slice_items, slice_results)) in grouped {
+        if let Ok(metrics) = eval.evaluate_with_results(&slice_items, questions, &slice_results) {
             entries.push(SliceMetricEntry {
                 slice,
                 sample_count: metrics.sample_count,
@@ -225,38 +230,33 @@ pub fn compute_arena_slice_matrix_with_options(
         bail!("At least one checkpoint is required for arena slice matrix");
     }
 
-    let mut grouped: BTreeMap<String, Vec<DataItem>> = BTreeMap::new();
+    let mut slice_set = std::collections::BTreeSet::new();
     for item in items {
-        grouped
-            .entry(extract_item_slice(item, mode))
-            .or_default()
-            .push(item.clone());
+        slice_set.insert(extract_item_slice(item, mode));
     }
-
-    let slices: Vec<String> = grouped.keys().cloned().collect();
+    let slices: Vec<String> = slice_set.into_iter().collect();
     let mut rows = Vec::with_capacity(checkpoints.len());
 
     for &ckpt in checkpoints {
-        let make_cls = || {
-            let mut c = LayaClassifier::with_checkpoint(ckpt)
-                .with_chunk_strategy(chunk_strategy)
-                .with_shortlist_k(shortlist_k);
-            if let Some(tpl) = hypothesis_template {
-                c = c.with_hypothesis_template(tpl);
-            }
-            c
-        };
-        let overall_accuracy = Evaluator::new(make_cls())
-            .evaluate(items, questions)
+        let mut cls = LayaClassifier::with_checkpoint(ckpt)
+            .with_chunk_strategy(chunk_strategy)
+            .with_shortlist_k(shortlist_k);
+        if let Some(tpl) = hypothesis_template {
+            cls = cls.with_hypothesis_template(tpl);
+        }
+        let batch = cls.classify_batch(items, questions)?;
+        let overall_accuracy = Evaluator::new(LayaClassifier::new(cls.config().clone()))
+            .evaluate_with_results(items, questions, &batch)
             .map(|m| m.accuracy)
             .unwrap_or(0.0);
 
         let mut slice_accuracies = BTreeMap::new();
-        for (slice, slice_items) in &grouped {
-            if let Ok(m) = Evaluator::new(make_cls()).evaluate(slice_items, questions) {
-                slice_accuracies.insert(slice.clone(), m.accuracy);
+        if let Ok(entries) = evaluate_slices_with_results(&cls, items, questions, &batch, mode) {
+            for e in entries {
+                slice_accuracies.insert(e.slice, e.accuracy);
             }
         }
+        crate::model::native::release_models();
 
         rows.push(ArenaSliceRow {
             checkpoint: ckpt.repo_id().to_string(),

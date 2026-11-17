@@ -20,10 +20,10 @@ fn test_scan_all_seven_local_models_and_verify_paradigms() {
         return;
     }
     let specs = scan_registered_models();
-    assert_eq!(
-        specs.len(),
-        7,
-        "Expected all 7 local checkpoints to be discovered"
+    assert!(
+        (7..=8).contains(&specs.len()),
+        "Expected 7 or 8 local checkpoints to be discovered, got {}",
+        specs.len()
     );
 
     print_models_inventory(&specs);

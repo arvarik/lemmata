@@ -3,7 +3,7 @@ use comfy_table::{Cell, Color, Table};
 use std::collections::BTreeMap;
 
 use super::classifier::LayaClassifier;
-use crate::model::Question;
+use crate::model::{DecisionAnswer, Question, QuestionType};
 
 #[derive(Debug, Clone)]
 pub struct TokenAttribution {
@@ -49,6 +49,29 @@ impl<'a> AttributionEngine<'a> {
         let mut q_map = BTreeMap::new();
         q_map.insert(qid.to_string(), question.clone());
 
+        let opt_keys: Vec<String> = match question.qtype {
+            QuestionType::Score => (0..question.render_options().len())
+                .map(|i| i.to_string())
+                .collect(),
+            QuestionType::Noul => vec!["false".into(), "true".into()],
+            QuestionType::Choice => question
+                .render_options()
+                .into_iter()
+                .map(|o| o.split(':').next().unwrap_or(&o).trim().to_string())
+                .collect(),
+        };
+        let bkey = self
+            .classifier
+            .get_temperature_bucket(question.qtype, opt_keys.len().max(2));
+        let eff_temp = self
+            .classifier
+            .config()
+            .temperature_by_options
+            .get(&bkey)
+            .copied()
+            .unwrap_or(self.classifier.config().temperature)
+            .max(1e-3);
+
         // Baseline classification
         let state_val = serde_json::Value::String(text.to_string());
         let baseline = self.classifier.classify(&state_val, &q_map)?;
@@ -57,10 +80,13 @@ impl<'a> AttributionEngine<'a> {
             .get(qid)
             .ok_or_else(|| anyhow::anyhow!("Question '{}' missing in results", qid))?;
 
-        let p_target = get_prob_ci(&base_ans.probabilities, target_choice);
-        let p_contrast = get_prob_ci(&base_ans.probabilities, contrast_choice);
-
-        let baseline_margin = (p_target + 1e-9).ln() - (p_contrast + 1e-9).ln();
+        let baseline_margin = contrastive_margin(
+            base_ans,
+            &opt_keys,
+            target_choice,
+            contrast_choice,
+            eff_temp,
+        );
 
         // Leave-one-out token ablation, in parallel on the CPU
         let positions: Vec<usize> = (0..words.len()).collect();
@@ -75,10 +101,13 @@ impl<'a> AttributionEngine<'a> {
                 let pert_res = self.classifier.classify(&pert_state, &q_map)?;
                 let pert_ans = &pert_res.answers[qid];
 
-                let pert_p_target = get_prob_ci(&pert_ans.probabilities, target_choice);
-                let pert_p_contrast = get_prob_ci(&pert_ans.probabilities, contrast_choice);
-
-                let pert_margin = (pert_p_target + 1e-9).ln() - (pert_p_contrast + 1e-9).ln();
+                let pert_margin = contrastive_margin(
+                    pert_ans,
+                    &opt_keys,
+                    target_choice,
+                    contrast_choice,
+                    eff_temp,
+                );
                 let delta = baseline_margin - pert_margin;
 
                 Ok(TokenAttribution {
@@ -150,6 +179,29 @@ impl<'a> AttributionEngine<'a> {
 
         println!("\n{table}\n");
     }
+}
+
+fn contrastive_margin(
+    ans: &DecisionAnswer,
+    opt_keys: &[String],
+    target: &str,
+    contrast: &str,
+    temp: f64,
+) -> f64 {
+    if let Some(logits) = ans.logits.as_ref().filter(|l| l.len() == opt_keys.len()) {
+        let find_idx = |needle: &str| {
+            opt_keys
+                .iter()
+                .position(|k| k == needle)
+                .or_else(|| opt_keys.iter().position(|k| k.eq_ignore_ascii_case(needle)))
+        };
+        if let (Some(t_idx), Some(c_idx)) = (find_idx(target), find_idx(contrast)) {
+            return (logits[t_idx] - logits[c_idx]) / temp.max(1e-3);
+        }
+    }
+    let p_target = get_prob_ci(&ans.probabilities, target);
+    let p_contrast = get_prob_ci(&ans.probabilities, contrast);
+    (p_target + 1e-9).ln() - (p_contrast + 1e-9).ln()
 }
 
 fn get_prob_ci(map: &BTreeMap<String, f64>, target: &str) -> f64 {

@@ -161,7 +161,7 @@ pub fn fingerprint(classifier: &LayaClassifier) -> Result<String> {
         h.update(serde_json::to_vec(probe.as_ref())?);
     }
     let checkpoints = match cfg.checkpoint {
-        Checkpoint::AutoRoute => Checkpoint::laya_checkpoints().to_vec(),
+        Checkpoint::AutoRoute => Checkpoint::downloadable_checkpoints().to_vec(),
         c => vec![c],
     };
     for ckpt in checkpoints {
@@ -169,14 +169,22 @@ pub fn fingerprint(classifier: &LayaClassifier) -> Result<String> {
             Some(path) if ckpt == cfg.checkpoint => path.clone(),
             _ => ckpt.local_dir().join("model.safetensors"),
         };
-        // ponytail: size and modified time stand in for a hash of the weights, which takes seconds.
-        if let Ok(meta) = std::fs::metadata(&file) {
+        if let Ok(hdr_sha) = crate::model::safetensors_header_sha256(&file) {
+            h.update(format!("{}|hdr={}", file.display(), hdr_sha));
+        } else if let Ok(meta) = std::fs::metadata(&file) {
             h.update(format!(
                 "{}|{}|{:?}",
                 file.display(),
                 meta.len(),
                 meta.modified().ok()
             ));
+        }
+        if let Some(parent) = file.parent() {
+            let cal_file =
+                parent.join(crate::engine::model_calibration::MODEL_CALIBRATION_FILENAME);
+            if let Ok(cal_bytes) = std::fs::read(&cal_file) {
+                h.update(&cal_bytes);
+            }
         }
     }
     Ok(to_hex(&h.finalize()))

@@ -75,10 +75,7 @@ pub fn summarize_route_distribution(
 ) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for item in items {
-        let state_text = match &item.state {
-            serde_json::Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
-            other => std::borrow::Cow::Owned(serde_json::to_string(other).unwrap_or_default()),
-        };
+        let state_text = item.state_text();
         let decision = route_auto_best(&state_text, questions);
         *counts
             .entry(decision.selected.repo_id().to_string())

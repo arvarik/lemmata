@@ -1079,34 +1079,31 @@ fn test_stats_engine_export_file() {
 
     let report = stats_engine.evaluate(&items, &questions).unwrap();
 
-    let json_path = Path::new("target/integration_stats_export.json");
-    if json_path.exists() {
-        let _ = std::fs::remove_file(json_path);
-    }
-    StatsEngine::export_report(&report, json_path).unwrap();
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let json_path = tmp_dir.join(format!("lemmata_integration_stats_export_{pid}.json"));
+    let _ = std::fs::remove_file(&json_path);
+    StatsEngine::export_report(&report, &json_path).unwrap();
     assert!(json_path.exists());
-    let json_content = std::fs::read_to_string(json_path).unwrap();
+    let json_content = std::fs::read_to_string(&json_path).unwrap();
     let decoded: SystemStatsReport = serde_json::from_str(&json_content).unwrap();
     assert_eq!(decoded.dataset_items, items.len());
+    let _ = std::fs::remove_file(&json_path);
 
-    let csv_path = Path::new("target/integration_stats_export.csv");
-    if csv_path.exists() {
-        let _ = std::fs::remove_file(csv_path);
-    }
-    StatsEngine::export_report(&report, csv_path).unwrap();
+    let csv_path = tmp_dir.join(format!("lemmata_integration_stats_export_{pid}.csv"));
+    let _ = std::fs::remove_file(&csv_path);
+    StatsEngine::export_report(&report, &csv_path).unwrap();
     assert!(csv_path.exists());
-    let csv_content = std::fs::read_to_string(csv_path).unwrap();
+    let csv_content = std::fs::read_to_string(&csv_path).unwrap();
     assert!(csv_content.contains("latency_p50"));
+    let _ = std::fs::remove_file(&csv_path);
 }
 
 #[test]
 fn test_web_scraper_html_extraction_and_classification() {
-    unsafe {
-        std::env::set_var("LEMMATA_OFFLINE", "1");
-    }
-
-    let scraper =
-        lemmata::datasource::WebScraper::new(lemmata::datasource::ScrapeOptions::default());
+    let scraper = lemmata::datasource::WebScraper::new(
+        lemmata::datasource::ScrapeOptions::default().with_offline(true),
+    );
     let doc = scraper.scrape("https://example.com/ai-article").unwrap();
 
     assert_eq!(doc.title, "Fast Non-Autoregressive Decision Encoders");
@@ -1148,16 +1145,14 @@ fn test_web_scraper_html_extraction_and_classification() {
 
 #[test]
 fn test_web_source_parallel_read_items() {
-    unsafe {
-        std::env::set_var("LEMMATA_OFFLINE", "1");
-    }
-
     let urls = vec![
         "https://example.com/page1".to_string(),
         "https://example.com/page2".to_string(),
     ];
-    let web_source =
-        lemmata::datasource::WebSource::new(urls, lemmata::datasource::ScrapeOptions::default());
+    let web_source = lemmata::datasource::WebSource::new(
+        urls,
+        lemmata::datasource::ScrapeOptions::default().with_offline(true),
+    );
     let items = web_source.read_items().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id, "https://example.com/page1");

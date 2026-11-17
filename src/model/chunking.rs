@@ -80,12 +80,49 @@ pub fn chunk_text_for_window<'a>(
 
     let spans = word_byte_spans(text);
     if spans.len() <= 4 {
-        let cut = text
-            .char_indices()
-            .nth(ctx_window.max(4))
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        return vec![Cow::Borrowed(&text[..cut])];
+        let char_indices: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        let total_chars = char_indices.len();
+        let max_chars = ctx_window.max(4).min(total_chars);
+        if max_chars >= total_chars {
+            return vec![Cow::Borrowed(text)];
+        }
+        return match strategy {
+            ChunkStrategy::TruncatePrefix => {
+                let end_byte = char_indices[max_chars];
+                vec![Cow::Borrowed(&text[..end_byte])]
+            }
+            ChunkStrategy::HeadTail => {
+                let head_chars = (max_chars / 4).max(1);
+                let tail_chars = max_chars.saturating_sub(head_chars + 1).max(1);
+                let head_end = char_indices[head_chars.min(total_chars - 1)];
+                let tail_start = char_indices[total_chars.saturating_sub(tail_chars)];
+                vec![Cow::Owned(format!(
+                    "{} ... {}",
+                    &text[..head_end],
+                    &text[tail_start..]
+                ))]
+            }
+            ChunkStrategy::SlidingWindow => {
+                let stride = (max_chars * 2 / 3).max(1);
+                let mut windows = Vec::new();
+                let mut start_char = 0usize;
+                while start_char < total_chars {
+                    let end_char = (start_char + max_chars).min(total_chars);
+                    let start_byte = char_indices[start_char];
+                    let end_byte = if end_char == total_chars {
+                        text.len()
+                    } else {
+                        char_indices[end_char]
+                    };
+                    windows.push(Cow::Borrowed(&text[start_byte..end_byte]));
+                    if end_char == total_chars {
+                        break;
+                    }
+                    start_char += stride;
+                }
+                windows
+            }
+        };
     }
 
     let max_words = (ctx_window.saturating_sub(1) * 3 / 4)

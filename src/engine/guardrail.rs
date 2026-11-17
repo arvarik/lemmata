@@ -128,7 +128,7 @@ impl GuardrailEngine {
         }
 
         // Generate cryptographic hash and audit ID
-        let state_str = serde_json::to_string(&item.state).unwrap_or_default();
+        let state_str = item.state_text();
         let input_hash = format!(
             "{:016x}",
             crate::engine::metrics::fnv1a64(state_str.as_bytes())
