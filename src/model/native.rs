@@ -78,7 +78,8 @@ pub fn device() -> Result<Device> {
     };
     Ok(DEVICE.get_or_init(|| device).clone())
 }
-static MODELS: OnceLock<Mutex<HashMap<PathBuf, Arc<NativeModel>>>> = OnceLock::new();
+type ModelCacheKey = (PathBuf, Option<PathBuf>);
+static MODELS: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<NativeModel>>>> = OnceLock::new();
 
 pub fn set_backend(backend: Backend) {
     BACKEND.store(backend as u8, Ordering::Relaxed);
@@ -186,44 +187,91 @@ pub fn runnable_checkpoints() -> Vec<Checkpoint> {
     ready
 }
 
+fn open_model_vb(
+    dir: &Path,
+    adapter_dir: Option<&Path>,
+    device: &Device,
+) -> Result<(
+    VarBuilder<'static>,
+    Option<Arc<super::adapter::PeftBackend>>,
+)> {
+    let st_path = dir.join("model.safetensors");
+    if let Some(adir) = adapter_dir {
+        let peft = Arc::new(super::adapter::PeftBackend::open(&st_path, adir)?);
+        let vb = peft.into_var_builder(DType::F32, device);
+        Ok((vb, Some(peft)))
+    } else {
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[st_path], DType::F32, device)? };
+        Ok((vb, None))
+    }
+}
+
 /// Load the model in `dir` once per process and share it across threads.
 pub fn shared(ckpt: Checkpoint, dir: &Path) -> Result<Arc<NativeModel>> {
+    shared_with_adapter(ckpt, dir, None)
+}
+
+/// Load the model in `dir` (optionally with a PEFT `adapter_dir` merged in F32 at load time)
+/// once per `(dir, adapter_dir)` pair and share it across threads.
+pub fn shared_with_adapter(
+    ckpt: Checkpoint,
+    dir: &Path,
+    adapter_dir: Option<&Path>,
+) -> Result<Arc<NativeModel>> {
     if !has_native_impl(ckpt) {
         bail!(
             "lemmata has no native inference for {ckpt}. Run with --backend auto or mock to simulate it."
         );
     }
+    let key = (dir.to_path_buf(), adapter_dir.map(Path::to_path_buf));
     // ponytail: one lock covers loading, so a second checkpoint waits while the first loads.
     let mut models = MODELS
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| anyhow!("native model cache lock poisoned"))?;
-    if let Some(m) = models.get(dir) {
+    if let Some(m) = models.get(&key) {
         return Ok(m.clone());
     }
     let started = Instant::now();
     let model = match ckpt {
         Checkpoint::English | Checkpoint::Multilingual | Checkpoint::TypedDecisions => {
-            LayaModel::load(dir).map(|m| NativeModel::Laya(Box::new(m)))
+            LayaModel::load_with_adapter(dir, adapter_dir).map(|m| NativeModel::Laya(Box::new(m)))
         }
         Checkpoint::EuroBert | Checkpoint::NeoBert => {
-            MlmModel::load(ckpt, dir).map(|m| NativeModel::Mlm(Box::new(m)))
+            MlmModel::load_with_adapter(ckpt, dir, adapter_dir)
+                .map(|m| NativeModel::Mlm(Box::new(m)))
         }
-        _ => NliModel::load(dir).map(|m| NativeModel::Nli(Box::new(m))),
+        _ => NliModel::load_with_adapter(dir, adapter_dir).map(|m| NativeModel::Nli(Box::new(m))),
     }
     .with_context(|| {
-        format!(
-            "Failed to load {ckpt} from {}. Run `lemmata download --checkpoint {ckpt}` first, or pass `--backend mock` to simulate it.",
-            dir.display()
-        )
+        match adapter_dir {
+            Some(adir) => format!(
+                "Failed to load {ckpt} from {} with adapter {}",
+                dir.display(),
+                adir.display()
+            ),
+            None => format!(
+                "Failed to load {ckpt} from {}. Run `lemmata download --checkpoint {ckpt}` first, or pass `--backend mock` to simulate it.",
+                dir.display()
+            ),
+        }
     })?;
-    eprintln!(
-        "🔧 Loaded {ckpt} from {} in {:.0} ms",
-        dir.display(),
-        started.elapsed().as_secs_f64() * 1000.0
-    );
+    match adapter_dir {
+        Some(adir) => eprintln!(
+            "🔧 Loaded {ckpt} from {} + adapter {} in {:.0} ms",
+            dir.display(),
+            adir.display(),
+            started.elapsed().as_secs_f64() * 1000.0
+        ),
+        None => eprintln!(
+            "🔧 Loaded {ckpt} from {} in {:.0} ms",
+            dir.display(),
+            started.elapsed().as_secs_f64() * 1000.0
+        ),
+    }
     let model = Arc::new(model);
-    models.insert(dir.to_path_buf(), model.clone());
+    models.insert(key, model.clone());
     Ok(model)
 }
 
@@ -489,13 +537,38 @@ fn encoder_config(raw: &serde_json::Value) -> Result<EncoderConfig> {
 impl LayaModel {
     /// Load a checkpoint directory laid out like `convaiinnovations/laya`.
     pub fn load(dir: &Path) -> Result<Self> {
-        let agent_cfg = read_json(&dir.join("rl_agent_config.json"))?;
-        let enc_raw = read_json(&dir.join("encoder/config.json"))?;
-        let tok_cfg = read_json(&dir.join("tokenizer/tokenizer_config.json"))?;
+        Self::load_with_adapter(dir, None)
+    }
+
+    /// Load a Laya checkpoint directory (supporting both nested `encoder/`/`tokenizer/` and flat
+    /// layouts) with an optional PEFT `adapter_dir`.
+    pub fn load_with_adapter(dir: &Path, adapter_dir: Option<&Path>) -> Result<Self> {
+        let agent_cfg_path = adapter_dir
+            .map(|a| a.join("rl_agent_config.json"))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| dir.join("rl_agent_config.json"));
+        let agent_cfg = read_json(&agent_cfg_path)?;
+        let enc_cfg_path = if dir.join("encoder/config.json").exists() {
+            dir.join("encoder/config.json")
+        } else {
+            dir.join("config.json")
+        };
+        let enc_raw = read_json(&enc_cfg_path)?;
+        let tok_cfg_path = if dir.join("tokenizer/tokenizer_config.json").exists() {
+            dir.join("tokenizer/tokenizer_config.json")
+        } else {
+            dir.join("tokenizer_config.json")
+        };
+        let tok_cfg = read_json(&tok_cfg_path)?;
         let enc_cfg = encoder_config(&enc_raw)?;
         let d = enc_cfg.hidden_size;
 
-        let tokenizer = load_tokenizer(&dir.join("tokenizer/tokenizer.json"))?;
+        let tok_path = if dir.join("tokenizer/tokenizer.json").exists() {
+            dir.join("tokenizer/tokenizer.json")
+        } else {
+            dir.join("tokenizer.json")
+        };
+        let tokenizer = load_tokenizer(&tok_path)?;
         let special = |key: &str| -> Result<(String, u32)> {
             let tok = tok_cfg
                 .get(key)
@@ -512,14 +585,7 @@ impl LayaModel {
         let (_, pad_id) = special("pad_token")?;
 
         let device = device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[dir.join("model.safetensors")],
-                DType::F32,
-                &device,
-            )?
-        };
+        let (vb, peft) = open_model_vb(dir, adapter_dir, &device)?;
         // candle names the encoder weights `model.*`. Laya stores them as `encoder.*`.
         let encoder = ModernBert::load(
             vb.clone()
@@ -529,17 +595,37 @@ impl LayaModel {
         let head = (0..json_usize(&agent_cfg, "head_layers")?)
             .map(|i| HeadLayer::load(vb.pp(format!("head.layers.{i}")), d))
             .collect::<candle_core::Result<Vec<_>>>()?;
+        let type_emb = candle_nn::embedding(3, d, vb.pp("type_emb"))?;
+        let scorer_norm = candle_nn::layer_norm(d, 1e-5, vb.pp("scorer.0"))?;
+        let scorer_hidden = candle_nn::linear(d, d, vb.pp("scorer.1"))?;
+        let scorer_out = candle_nn::linear(d, 1, vb.pp("scorer.3"))?;
+
+        if let Some(p) = peft {
+            p.verify_all_consumed()?;
+        }
+
+        let manifest = adapter_dir
+            .and_then(super::adapter::TrainingManifest::load_opt)
+            .or_else(|| super::adapter::TrainingManifest::load_opt(dir));
+        let max_len = manifest
+            .as_ref()
+            .and_then(|m| m.base_model.max_len)
+            .unwrap_or(json_usize(&agent_cfg, "max_len")?);
+        let head_max_len = manifest
+            .as_ref()
+            .and_then(|m| m.base_model.head_max_len)
+            .unwrap_or(json_usize(&agent_cfg, "head_max_len")?);
 
         Ok(Self {
             tokenizer,
             encoder,
             head,
-            type_emb: candle_nn::embedding(3, d, vb.pp("type_emb"))?,
-            scorer_norm: candle_nn::layer_norm(d, 1e-5, vb.pp("scorer.0"))?,
-            scorer_hidden: candle_nn::linear(d, d, vb.pp("scorer.1"))?,
-            scorer_out: candle_nn::linear(d, 1, vb.pp("scorer.3"))?,
-            max_len: json_usize(&agent_cfg, "max_len")?,
-            head_max_len: json_usize(&agent_cfg, "head_max_len")?,
+            type_emb,
+            scorer_norm,
+            scorer_hidden,
+            scorer_out,
+            max_len,
+            head_max_len,
             cls_id,
             sep_id,
             mask_id,
@@ -930,7 +1016,16 @@ pub struct NliModel {
 impl NliModel {
     /// Load a Hugging Face `*ForSequenceClassification` NLI directory (ModernBERT or DeBERTa-v2/v3).
     pub fn load(dir: &Path) -> Result<Self> {
-        let cfg = read_json(&dir.join("config.json"))?;
+        Self::load_with_adapter(dir, None)
+    }
+
+    /// Load a `*ForSequenceClassification` NLI directory with an optional PEFT `adapter_dir`.
+    pub fn load_with_adapter(dir: &Path, adapter_dir: Option<&Path>) -> Result<Self> {
+        let cfg_path = adapter_dir
+            .map(|a| a.join("config.json"))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| dir.join("config.json"));
+        let cfg = read_json(&cfg_path)?;
         let tok_cfg = read_json(&dir.join("tokenizer_config.json"))?;
         let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
         let special = |key: &str| -> Result<u32> {
@@ -959,14 +1054,7 @@ impl NliModel {
             .ok_or_else(|| anyhow!("id2label needs a second label"))?;
 
         let device = device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[dir.join("model.safetensors")],
-                DType::F32,
-                &device,
-            )?
-        };
+        let (vb, peft) = open_model_vb(dir, adapter_dir, &device)?;
         let backbone = match cfg.get("model_type").and_then(|v| v.as_str()) {
             Some("modernbert") => {
                 let enc_cfg = encoder_config(&cfg)?;
@@ -995,6 +1083,24 @@ impl NliModel {
             other => bail!("unsupported NLI model_type {other:?}"),
         };
 
+        if let Some(p) = peft {
+            p.verify_all_consumed()?;
+        }
+
+        let manifest_max_len = adapter_dir
+            .and_then(super::adapter::TrainingManifest::load_opt)
+            .or_else(|| super::adapter::TrainingManifest::load_opt(dir))
+            .and_then(|m| m.base_model.max_len);
+
+        let max_len = manifest_max_len.unwrap_or_else(|| {
+            tok_cfg
+                .get("model_max_length")
+                .and_then(|v| v.as_u64())
+                .map_or(DEFAULT_NLI_MAX_LEN, |n| {
+                    (n as usize).min(DEFAULT_NLI_MAX_LEN)
+                })
+        });
+
         Ok(Self {
             backbone,
             entail,
@@ -1002,12 +1108,7 @@ impl NliModel {
             cls_id: special("cls_token")?,
             sep_id: special("sep_token")?,
             pad_id: special("pad_token")?,
-            max_len: tok_cfg
-                .get("model_max_length")
-                .and_then(|v| v.as_u64())
-                .map_or(DEFAULT_NLI_MAX_LEN, |n| {
-                    (n as usize).min(DEFAULT_NLI_MAX_LEN)
-                }),
+            max_len,
             tokenizer,
             device,
         })
@@ -1215,6 +1316,14 @@ pub struct MlmModel {
 
 impl MlmModel {
     pub fn load(ckpt: Checkpoint, dir: &Path) -> Result<Self> {
+        Self::load_with_adapter(ckpt, dir, None)
+    }
+
+    pub fn load_with_adapter(
+        ckpt: Checkpoint,
+        dir: &Path,
+        adapter_dir: Option<&Path>,
+    ) -> Result<Self> {
         let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
         let cfg = read_json(&dir.join("config.json"))?;
         let mask_token = read_json(&dir.join("tokenizer_config.json"))?
@@ -1238,11 +1347,20 @@ impl MlmModel {
             .position(|w| w == bare)
             .ok_or_else(|| anyhow!("cannot locate the text inside a special-token encoding"))?;
 
+        let device = device()?;
+        let (vb, peft) = open_model_vb(dir, adapter_dir, &device)?;
         let encoder = match ckpt {
-            Checkpoint::EuroBert => MlmEncoder::EuroBert(super::eurobert::EuroBertMlm::load(dir)?),
-            Checkpoint::NeoBert => MlmEncoder::NeoBert(super::neobert::NeoBertMlm::load(dir)?),
+            Checkpoint::EuroBert => {
+                MlmEncoder::EuroBert(super::eurobert::EuroBertMlm::load_with_vb(dir, vb, device)?)
+            }
+            Checkpoint::NeoBert => {
+                MlmEncoder::NeoBert(super::neobert::NeoBertMlm::load_with_vb(dir, vb, device)?)
+            }
             other => bail!("{other} is not a masked-LM checkpoint"),
         };
+        if let Some(p) = peft {
+            p.verify_all_consumed()?;
+        }
         let positions = ["max_position_embeddings", "max_length"]
             .iter()
             .find_map(|k| cfg.get(*k).and_then(|v| v.as_u64()))

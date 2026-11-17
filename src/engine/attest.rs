@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::datasource::DataItem;
 use crate::engine::guardrail::GuardAction;
 use crate::engine::metrics::{fnv1a64, format_utc_iso8601};
-use crate::model::{DecisionResult, Question};
+use crate::model::{DecisionResult, ModelSpec, Question};
 
 /// Receipt format this build writes and verifies: SHA-256 digests and HMAC-SHA256 signatures.
 pub const RECEIPT_VERSION: &str = "trace-2026.2";
@@ -40,6 +40,19 @@ fn hmac(secret_key: &str) -> Hmac<Sha256> {
 /// SHA-256 of the serialized question schema, for receipts.
 pub fn schema_digest(questions: &BTreeMap<String, Question>) -> Result<String> {
     Ok(sha256_hex(serde_json::to_string(questions)?.as_bytes()))
+}
+
+/// Portable cryptographic model provenance tag combining [`ModelSpec::display_model_id`] with
+/// the base safetensors-header + PEFT adapter SHA-256 fingerprint.
+pub fn model_provenance_id(spec: &ModelSpec) -> Result<String> {
+    let fp = spec.portable_fingerprint()?;
+    let short = &fp[..12.min(fp.len())];
+    let id = spec.display_model_id();
+    if id.ends_with(&format!("@{short}")) {
+        Ok(id)
+    } else {
+        Ok(format!("{id}@{short}"))
+    }
 }
 
 /// A tamper-evident decision receipt: a SHA-256 digest, an HMAC-SHA256 signature, and a hash

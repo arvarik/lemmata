@@ -92,12 +92,6 @@ pub struct NeoBertMlm {
 impl NeoBertMlm {
     /// Load `dir` (config.json + model.safetensors), F32 on CPU.
     pub fn load(dir: &Path) -> Result<Self> {
-        let path = dir.join("config.json");
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        let cfg: Config = serde_json::from_str(&text)
-            .with_context(|| format!("Malformed NeoBERT config in {}", path.display()))?;
-
         let device = crate::model::native::device()?;
         // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
         let vb = unsafe {
@@ -107,6 +101,17 @@ impl NeoBertMlm {
                 &device,
             )?
         };
+        Self::load_with_vb(dir, vb, device)
+    }
+
+    /// Load `NeoBertMlm` from `dir/config.json` using a caller-supplied `VarBuilder` (e.g. `PeftBackend`).
+    pub fn load_with_vb(dir: &Path, vb: VarBuilder<'_>, device: Device) -> Result<Self> {
+        let path = dir.join("config.json");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let cfg: Config = serde_json::from_str(&text)
+            .with_context(|| format!("Malformed NeoBERT config in {}", path.display()))?;
+
         let blocks = (0..cfg.num_hidden_layers)
             .map(|i| Block::load(vb.pp(format!("model.transformer_encoder.{i}")), &cfg))
             .collect::<candle_core::Result<Vec<_>>>()?;

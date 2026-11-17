@@ -202,6 +202,7 @@ pub struct CalibratedAgentConfig {
 /// Automated temperature tuner optimizing per-bucket calibration parameters.
 pub struct CalibrationTuner {
     checkpoint: Checkpoint,
+    model_spec: crate::model::ModelSpec,
     loss: CalibrationLoss,
     bins: usize,
     enable_qats: bool,
@@ -212,8 +213,13 @@ pub struct CalibrationTuner {
 
 impl CalibrationTuner {
     pub fn new(checkpoint: Checkpoint) -> Self {
+        Self::with_model_spec(&crate::model::ModelSpec::from_checkpoint(checkpoint))
+    }
+
+    pub fn with_model_spec(spec: &crate::model::ModelSpec) -> Self {
         Self {
-            checkpoint,
+            checkpoint: spec.family,
+            model_spec: spec.clone(),
             loss: CalibrationLoss::Nll,
             bins: 10,
             enable_qats: false,
@@ -285,7 +291,7 @@ impl CalibrationTuner {
         }
 
         let start_time = Instant::now();
-        let classifier = LayaClassifier::with_checkpoint(self.checkpoint);
+        let classifier = LayaClassifier::with_model_spec(&self.model_spec);
 
         type ChoiceBiasEntry = (Vec<String>, String, Vec<(Vec<f64>, usize)>);
         let mut bucket_samples: BTreeMap<String, Vec<ValidationSample>> = BTreeMap::new();
@@ -445,8 +451,16 @@ impl CalibrationTuner {
             );
         }
 
-        let default_qtype_temps = self.checkpoint.default_temperatures();
-        let default_bucket_temps = self.checkpoint.default_temperature_by_options();
+        let default_qtype_temps = if self.model_spec.is_custom_or_adapted() {
+            [1.0, 1.0, 1.0]
+        } else {
+            self.checkpoint.default_temperatures()
+        };
+        let default_bucket_temps = if self.model_spec.is_custom_or_adapted() {
+            std::collections::HashMap::new()
+        } else {
+            self.checkpoint.default_temperature_by_options()
+        };
         let std_buckets = [
             ("choice:2", 0usize),
             ("choice:3-5", 0),

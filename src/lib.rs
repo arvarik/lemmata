@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod cli;
 pub mod datasource;
 pub mod engine;
+pub mod finetune;
 pub mod model;
 
 use anyhow::{Context, Result, bail};

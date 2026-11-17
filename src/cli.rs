@@ -130,9 +130,30 @@ pub enum Commands {
     /// Head-to-head System 1 model arena comparing accuracy, agreement, Cohen's kappa, McNemar's chi2, and speedup
     #[command(
         visible_alias = "arena",
-        after_help = "Examples:\n  lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json"
+        after_help = "Examples:\n  lemmata compare --file data/system1_golden_benchmark.jsonl --schema schema/system1_benchmark_questions.json\n  lemmata compare -c english,english+runs/ft_v1/artifacts --file splits/test.jsonl --schema schema/questions.json"
     )]
     Compare(CompareArgs),
+
+    /// Canonicalize datasets, create leakage-safe splits, and run 5-stage preflight verification
+    #[command(
+        visible_alias = "data",
+        after_help = "Examples:\n  lemmata dataset import --file raw/tickets.csv --schema schema/questions.json --output data/canonical.jsonl\n  lemmata dataset split --file data/canonical.jsonl --schema schema/questions.json --out-dir splits\n  lemmata dataset verify --split-dir splits --schema schema/questions.json"
+    )]
+    Dataset(DatasetArgs),
+
+    /// Generate external-GPU fine-tuning bundles, verify PEFT artifacts, merge weights, and sync runs
+    #[command(
+        visible_alias = "ft",
+        after_help = "Examples:\n  lemmata finetune prepare --split-dir splits --schema schema/questions.json -c english --method lora --out runs/ft_v1\n  lemmata finetune push --run runs/ft_v1 --remote ubuntu@gpu-box:~/ft/ft_v1 --dry-run\n  lemmata finetune verify --artifact runs/ft_v1/artifacts --split-dir splits\n  lemmata finetune merge --adapter runs/ft_v1/artifacts --output models/laya-ft"
+    )]
+    Finetune(FinetuneArgs),
+
+    /// Paired base-vs-candidate statistical experimentation with McNemar mid-p, BCa bootstrap CIs, and zero-leakage guards
+    #[command(
+        visible_alias = "ab",
+        after_help = "Examples:\n  lemmata experiment --base english --candidate runs/ft_v1/artifacts --split-dir splits --schema schema/questions.json\n  lemmata experiment --candidate runs/ft_v1/artifacts --file splits/test.jsonl --cal-file splits/cal.jsonl --schema schema/questions.json --format md"
+    )]
+    Experiment(ExperimentArgs),
 
     /// Interactive 5-phase System 1 mastery curriculum, live concept labs, glossary, and Socratic quizzes
     #[command(visible_alias = "educate", alias = "tutorial", alias = "course")]
@@ -232,7 +253,7 @@ pub struct ClassifyArgs {
     #[arg(short, long, default_value = "billing,technical,sales,other")]
     pub labels: String,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
+    /// Model checkpoint slug or local checkpoint directory (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert, or `<DIR>`)
     #[arg(
         short,
         long,
@@ -241,6 +262,10 @@ pub struct ClassifyArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Path to a fine-tuned PEFT adapter directory (`adapter_config.json` + `adapter_model.safetensors`) folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 
     /// Temperature scaling factor
     #[arg(long, default_value_t = 1.0)]
@@ -395,7 +420,7 @@ pub struct TestArgs {
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
+    /// Model checkpoint slug or local checkpoint directory (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert, or `<DIR>`)
     #[arg(
         short,
         long,
@@ -404,6 +429,10 @@ pub struct TestArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Path to a fine-tuned PEFT adapter directory (`adapter_config.json` + `adapter_model.safetensors`) folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 
     /// Temperature scaling factor during evaluation
     #[arg(long)]
@@ -464,6 +493,10 @@ pub struct TestArgs {
     /// Supervised probe from `lemmata probe fit`. It replaces zero-shot scoring for its question
     #[arg(long)]
     pub probe: Option<PathBuf>,
+
+    /// Override hard failure when evaluating a fine-tuned adapter on items that overlap with its training split
+    #[arg(long)]
+    pub allow_leakage: bool,
 }
 
 #[derive(Args, Debug)]
@@ -509,6 +542,10 @@ pub struct BenchArgs {
     /// Do not recursively traverse subdirectories
     #[arg(long)]
     pub no_recursive: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -598,6 +635,10 @@ pub struct ExplainArgs {
     /// Output explanation report as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -635,6 +676,10 @@ pub struct ConformalArgs {
     /// Output report as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -830,6 +875,10 @@ pub struct DeferFitArgs {
     /// Output the fit as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -875,6 +924,10 @@ pub struct DeferRunArgs {
     /// Output decisions as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1003,6 +1056,10 @@ pub struct TaxonomyRunArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1078,6 +1135,10 @@ pub struct TaxonomyBenchArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1148,6 +1209,10 @@ pub struct CalibrateArgs {
     /// Output calibration report as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1172,7 +1237,7 @@ pub struct ReportArgs {
     #[arg(short, long)]
     pub schema: PathBuf,
 
-    /// Model checkpoint (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert)
+    /// Model checkpoint slug or local checkpoint directory (english, multilingual, typed-decisions, route, modernbert-zeroshot, modernbert-nli, deberta-v3, eurobert, neobert, or `<DIR>`)
     #[arg(
         short,
         long,
@@ -1181,6 +1246,10 @@ pub struct ReportArgs {
         default_value = "english"
     )]
     pub checkpoint: String,
+
+    /// Path to a fine-tuned PEFT adapter directory (`adapter_config.json` + `adapter_model.safetensors`) folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
 
     /// Temperature scaling factor
     #[arg(long)]
@@ -1233,6 +1302,10 @@ pub struct ReportArgs {
     /// Also write the report to this file: .csv, .md, or JSON for any other extension
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Override hard failure when evaluating a fine-tuned adapter on items that overlap with its training split
+    #[arg(long)]
+    pub allow_leakage: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1349,4 +1422,605 @@ pub struct ProbeFitArgs {
     /// File to write the probe to
     #[arg(short, long)]
     pub output: PathBuf,
+
+    /// Path to a fine-tuned PEFT adapter directory folded at load time
+    #[arg(long, value_name = "DIR")]
+    pub adapter: Option<PathBuf>,
+}
+
+// ============================================================================
+// Dataset Lifecycle Commands (`lemmata dataset` / `lemmata data`)
+// ============================================================================
+
+#[derive(Args, Debug)]
+pub struct DatasetArgs {
+    #[command(subcommand)]
+    pub action: DatasetCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DatasetCommands {
+    /// Import and canonicalize CSV, TSV, JSON/JSONL, Parquet, directory, or Hugging Face Hub datasets
+    Import(Box<DatasetImportArgs>),
+
+    /// Partition canonical JSONL into deterministic, leakage-safe train/val/cal/test splits
+    Split(DatasetSplitArgs),
+
+    /// Run 5-stage preflight verification (schema bijection, MinHash leakage, sample floors, tokenizer budgets)
+    Verify(DatasetVerifyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct DatasetImportArgs {
+    /// Input file path (.jsonl, .json, .csv, .tsv, .parquet)
+    #[arg(short, long, conflicts_with_all = ["dir", "hf"])]
+    pub file: Option<PathBuf>,
+
+    /// Input directory containing dataset files
+    #[arg(long, conflicts_with_all = ["file", "hf"])]
+    pub dir: Option<PathBuf>,
+
+    /// Hugging Face Hub dataset repository ID (e.g. `PolyAI/banking77`)
+    #[arg(long, value_name = "REPO_ID", conflicts_with_all = ["file", "dir"])]
+    pub hf: Option<String>,
+
+    /// Hugging Face dataset subset/configuration name
+    #[arg(long)]
+    pub subset: Option<String>,
+
+    /// Hugging Face dataset split name (e.g. `train`, `test`)
+    #[arg(long)]
+    pub split: Option<String>,
+
+    /// Hugging Face Git revision or commit SHA
+    #[arg(long)]
+    pub revision: Option<String>,
+
+    /// Cache directory for downloaded Hugging Face Parquet shards
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Print the Hugging Face download command without fetching remote files
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output canonical `.jsonl` file path
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Optional question schema JSON file for label domain & integer ClassLabel validation
+    #[arg(short, long)]
+    pub schema: Option<PathBuf>,
+
+    /// Explicit record ID column name
+    #[arg(long)]
+    pub id_col: Option<String>,
+
+    /// Explicit model-visible text column name
+    #[arg(long)]
+    pub text_col: Option<String>,
+
+    /// Comma-separated structured state column names
+    #[arg(long)]
+    pub state_cols: Option<String>,
+
+    /// Comma-separated non-model metadata column names (excluded from encoder input text)
+    #[arg(long)]
+    pub meta_cols: Option<String>,
+
+    /// Repeatable `<question_id>=<source_column>` ground-truth column mapping
+    #[arg(long, value_name = "QID=COL")]
+    pub label_map: Vec<String>,
+
+    /// Repeatable `<question_id>:<raw>=<canonical>` label value remapping
+    #[arg(long, value_name = "QID:RAW=CANON")]
+    pub value_map: Vec<String>,
+
+    /// Map integer ClassLabel indices (`0..K-1`) to schema choice keys in schema order
+    #[arg(long)]
+    pub int_labels_from_schema: bool,
+
+    /// Additive offset applied to numeric `score` targets (e.g. `-1` for `1..5 -> 0..4`)
+    #[arg(long, default_value_t = 0)]
+    pub score_offset: i64,
+
+    /// Delimiter character splitting string multi-label targets into arrays (e.g. `;` or `|`)
+    #[arg(long)]
+    pub multi_label_sep: Option<char>,
+
+    /// Normalize line endings, strip UTF-8 BOM/NULs, and compose decomposed accents
+    #[arg(long)]
+    pub normalize_nfc: bool,
+
+    /// Strip quoted email reply headers, `>` quote lines, and legal disclaimers
+    #[arg(long)]
+    pub clean_email: bool,
+
+    /// Drop records whose model-visible state is blank
+    #[arg(long)]
+    pub drop_empty: bool,
+
+    /// Fail immediately on malformed rows, duplicate IDs, or out-of-domain schema labels
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Comma-separated file extensions when importing from `--dir`
+    #[arg(long)]
+    pub extensions: Option<String>,
+
+    /// Do not recursively traverse subdirectories when importing from `--dir`
+    #[arg(long)]
+    pub no_recursive: bool,
+
+    /// Emit import summary report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DatasetSplitArgs {
+    /// Input dataset file (.jsonl, .json, .csv, .tsv, .parquet)
+    #[arg(short, long, visible_alias = "data", visible_alias = "input")]
+    pub file: PathBuf,
+
+    /// Question schema JSON file used for multi-label iterative stratification
+    #[arg(short, long)]
+    pub schema: PathBuf,
+
+    /// Output split directory where `{train,val,cal,test}.jsonl` and `dataset_manifest.json` are written
+    #[arg(
+        short,
+        long,
+        visible_alias = "output",
+        visible_alias = "out",
+        default_value = "splits"
+    )]
+    pub out_dir: PathBuf,
+
+    /// Comma-separated split ratios `train,val,cal,test` (or 3-way `train,val,test`)
+    #[arg(long, default_value = "0.70,0.10,0.10,0.10")]
+    pub ratios: String,
+
+    /// Omit the `cal.jsonl` split (`0.80,0.10,0.0,0.10` when `--ratios` is at default)
+    #[arg(long)]
+    pub no_cal: bool,
+
+    /// Deterministic PRNG seed for Xoshiro256** and MinHash LSH permutations
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Metadata or state column locking records (e.g. `customer_id`, `thread_id`) into the same split
+    #[arg(long)]
+    pub group_col: Option<String>,
+
+    /// MinHash 5-gram Jaccard similarity threshold in `(0.0, 1.0]` for near-duplicate grouping
+    #[arg(long, default_value_t = 0.85)]
+    pub dedup_sim: f64,
+
+    /// Exact duplicate handling before splitting: `group` or `drop-exact`
+    #[arg(long, default_value = "group")]
+    pub dedup_action: String,
+
+    /// Emit `dataset_manifest.json` summary as JSON to stdout
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DatasetVerifyArgs {
+    /// Split directory containing `{train,val,cal,test}.jsonl` and optional `dataset_manifest.json`
+    #[arg(long, visible_alias = "dir", conflicts_with = "file")]
+    pub split_dir: Option<PathBuf>,
+
+    /// Single dataset file to verify prior to splitting
+    #[arg(short, long, visible_alias = "data", conflicts_with = "split_dir")]
+    pub file: Option<PathBuf>,
+
+    /// Question schema JSON file
+    #[arg(short, long)]
+    pub schema: PathBuf,
+
+    /// Target checkpoint for context-window and head-budget preflight checks
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
+    pub checkpoint: String,
+
+    /// Long-context chunking strategy (`truncate`, `head-tail`, `sliding-window`)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
+
+    /// Validate ground-truth targets under multi-label semantics
+    #[arg(long)]
+    pub multi_label: bool,
+
+    /// Target conformal error rate `alpha` for calibration sample-size checks
+    #[arg(long, default_value_t = 0.05)]
+    pub alpha: f64,
+
+    /// Target deferral accuracy for calibration sample-size checks
+    #[arg(long, default_value_t = 0.95)]
+    pub target_accuracy: f64,
+
+    /// Deferral certification confidence level
+    #[arg(long, default_value_t = 0.95)]
+    pub confidence: f64,
+
+    /// Cross-split MinHash Jaccard similarity threshold
+    #[arg(long, default_value_t = 0.85)]
+    pub dedup_sim: f64,
+
+    /// Allow unlabeled or partially labeled items without failing Stage 1
+    #[arg(long)]
+    pub allow_partial_gt: bool,
+
+    /// Require local Hugging Face `tokenizer.json` instead of heuristic token estimation
+    #[arg(long)]
+    pub require_tokenizer: bool,
+
+    /// Treat preflight warnings as hard failures
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Emit preflight verification report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+// ============================================================================
+// External-GPU Fine-Tuning Commands (`lemmata finetune` / `lemmata ft`)
+// ============================================================================
+
+#[derive(Args, Debug)]
+pub struct FinetuneArgs {
+    #[command(subcommand)]
+    pub action: FinetuneCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FinetuneCommands {
+    /// Validate splits & schema locally and generate a self-bootstrapping PEP 723 `uv run` GPU bundle
+    #[command(visible_alias = "bundle")]
+    Prepare(Box<FinetunePrepareArgs>),
+
+    /// Run 5-layer local integrity & zero-leakage verification on a pulled fine-tuning artifact
+    Verify(FinetuneVerifyArgs),
+
+    /// Merge a PEFT LoRA/DoRA adapter into a standalone local Safetensors checkpoint in Rust
+    Merge(FinetuneMergeArgs),
+
+    /// Push a lightweight fine-tuning bundle (`bundle/`) to an SSH host or S3 URI
+    Push(FinetuneSyncArgs),
+
+    /// Pull adapter weights, calibration, and manifests back from an SSH host or S3 URI
+    Pull(FinetuneSyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct FinetunePrepareArgs {
+    /// Split directory containing `train.jsonl`, `val.jsonl`, optional `cal.jsonl`, and locked `test.jsonl`
+    #[arg(long, visible_alias = "splits")]
+    pub split_dir: Option<PathBuf>,
+
+    /// Explicit training split JSONL/CSV file (when not using `--split-dir`)
+    #[arg(long)]
+    pub train: Option<PathBuf>,
+
+    /// Explicit validation split JSONL/CSV file (when not using `--split-dir`)
+    #[arg(long)]
+    pub val: Option<PathBuf>,
+
+    /// Optional post-training temperature calibration split file
+    #[arg(long)]
+    pub cal: Option<PathBuf>,
+
+    /// Locked evaluation test split file to guard against overlap (NEVER copied into `bundle/`)
+    #[arg(long)]
+    pub forbid_test: Option<PathBuf>,
+
+    /// Question schema JSON file
+    #[arg(short, long)]
+    pub schema: PathBuf,
+
+    /// Base checkpoint to fine-tune (`english`, `multilingual`, `typed-decisions`, `modernbert-zeroshot`, `modernbert-nli`, `deberta-v3`, `eurobert`, `neobert`)
+    #[arg(
+        short,
+        long,
+        short_alias = 'm',
+        visible_alias = "model",
+        default_value = "english"
+    )]
+    pub checkpoint: String,
+
+    /// Fine-tuning adaptation strategy: `lora` (rsLoRA), `dora`, or `full`
+    #[arg(long, default_value = "lora")]
+    pub method: String,
+
+    /// LoRA / DoRA rank `r`
+    #[arg(short = 'r', long, default_value_t = 16)]
+    pub rank: usize,
+
+    /// LoRA / DoRA scaling numerator `lora_alpha`
+    #[arg(long, default_value_t = 32.0)]
+    pub alpha: f64,
+
+    /// Disable rank-stabilized scaling (`alpha / sqrt(r)`) and use classic `alpha / r`
+    #[arg(long)]
+    pub no_rslora: bool,
+
+    /// LoRA dropout probability
+    #[arg(long, default_value_t = 0.05)]
+    pub lora_dropout: f64,
+
+    /// Fully unfreeze Laya's `head.layers.*` (`in_proj_weight`) via `modules_to_save` alongside `type_emb` + `scorer`
+    #[arg(long)]
+    pub unfreeze_laya_head: bool,
+
+    /// Number of training epochs
+    #[arg(long, default_value_t = 4)]
+    pub epochs: usize,
+
+    /// Explicit encoder learning rate override (defaults to family-tuned 2026 recipe)
+    #[arg(long)]
+    pub lr: Option<f64>,
+
+    /// Per-device micro-batch size
+    #[arg(long, default_value_t = 8)]
+    pub batch_size: usize,
+
+    /// Gradient accumulation steps
+    #[arg(long, default_value_t = 2)]
+    pub grad_accum: usize,
+
+    /// Mild cross-entropy label smoothing (`0.0` to disable; Keep small to avoid post-hoc ECE inflation)
+    #[arg(long, default_value_t = 0.02)]
+    pub label_smoothing: f64,
+
+    /// NEFTune uniform embedding noise `alpha` (`0.0` to disable)
+    #[arg(long, default_value_t = 5.0)]
+    pub neftune_alpha: f64,
+
+    /// Optional R-Drop symmetric KL regularization weight (`0.0` disabled; e.g. `0.5` for `<2k` rows)
+    #[arg(long, default_value_t = 0.0)]
+    pub rdrop_alpha: f64,
+
+    /// Train `choice` questions with independent `BCEWithLogitsLoss` for multi-label classification
+    #[arg(long)]
+    pub multi_label: bool,
+
+    /// PyTorch wheel index target written into PEP 723 metadata (`cu126`, `cu128`, or `cpu`)
+    #[arg(long, default_value = "cu126")]
+    pub cuda: String,
+
+    /// Random seed for reproducible training
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Also emit a single-file `<out>/bundle.tar.gz` archive
+    #[arg(long)]
+    pub tar: bool,
+
+    /// Output run directory where `bundle/` is created
+    #[arg(
+        short,
+        long,
+        visible_alias = "out-dir",
+        visible_alias = "output",
+        default_value = "runs/ft_latest"
+    )]
+    pub out: PathBuf,
+
+    /// Emit bundle summary as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct FinetuneVerifyArgs {
+    /// Pulled fine-tuning `artifacts/` directory (containing `training_manifest.json` & `adapter_model.safetensors`)
+    #[arg(long, visible_alias = "adapter", visible_alias = "dir")]
+    pub artifact: PathBuf,
+
+    /// Optional local split directory to cross-verify `train`/`val`/`cal` digests and `test.jsonl` zero-leakage
+    #[arg(long, visible_alias = "splits")]
+    pub split_dir: Option<PathBuf>,
+
+    /// Explicit evaluation test file to check against `trained_inputs.sha256.bin`
+    #[arg(short = 'f', long, visible_alias = "file")]
+    pub test_file: Option<PathBuf>,
+
+    /// Optional question schema JSON file to verify `schema_sha256` parity
+    #[arg(short, long)]
+    pub schema: Option<PathBuf>,
+
+    /// Optional local base checkpoint directory to verify Safetensors header SHA-256 parity
+    #[arg(long)]
+    pub base_dir: Option<PathBuf>,
+
+    /// Downgrade train/test overlap from hard error to warning
+    #[arg(long)]
+    pub allow_leakage: bool,
+
+    /// Emit verification report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct FinetuneMergeArgs {
+    /// Fine-tuned PEFT adapter directory (`adapter_config.json` + `adapter_model.safetensors`)
+    #[arg(long, visible_alias = "artifact")]
+    pub adapter: PathBuf,
+
+    /// Optional base checkpoint slug or local directory (auto-inferred from adapter metadata if omitted)
+    #[arg(short, long, short_alias = 'm', visible_alias = "model")]
+    pub checkpoint: Option<String>,
+
+    /// Destination directory for standalone merged `model.safetensors` + configs + tokenizer
+    #[arg(short, long, visible_alias = "out-dir", visible_alias = "out")]
+    pub output: PathBuf,
+
+    /// Overwrite destination directory if `model.safetensors` already exists
+    #[arg(long)]
+    pub force: bool,
+
+    /// Upcast merged Safetensors weights to F32 instead of preserving base precision
+    #[arg(long)]
+    pub f32: bool,
+
+    /// Emit merge report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct FinetuneSyncArgs {
+    /// Local fine-tuning run directory (containing `bundle/` and `artifacts/`)
+    #[arg(long, visible_alias = "dir")]
+    pub run: PathBuf,
+
+    /// Remote SSH destination (`user@host:~/path`) or S3 URI (`s3://bucket/prefix`)
+    #[arg(long)]
+    pub remote: String,
+
+    /// Print the `rsync` or `aws s3 sync` command without executing it
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+// ============================================================================
+// Paired Model Experimentation (`lemmata experiment` / `lemmata ab`)
+// ============================================================================
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExperimentFormat {
+    Table,
+    Json,
+    #[value(alias = "markdown")]
+    Md,
+}
+
+#[derive(Args, Debug)]
+pub struct ExperimentArgs {
+    /// Base model checkpoint slug, local checkpoint dir, or `base+adapter` spec (auto-inferred from `--candidate` if omitted)
+    #[arg(short, long)]
+    pub base: Option<String>,
+
+    /// Candidate model(s): PEFT adapter dir (`runs/ft1/artifacts`), run dir (`runs/ft1`), `base+adapter`, or local checkpoint dir
+    #[arg(
+        short = 'k',
+        long,
+        visible_alias = "adapter",
+        required = true,
+        num_args = 1..
+    )]
+    pub candidate: Vec<String>,
+
+    /// Split directory convenience flag (auto-resolves `<DIR>/test.jsonl`, `<DIR>/cal.jsonl`, and `<DIR>/dataset_manifest.json`)
+    #[arg(long, visible_alias = "splits")]
+    pub split_dir: Option<PathBuf>,
+
+    /// Locked test split file (`.jsonl`, `.json`, `.csv`, `.parquet`)
+    #[arg(short, long, visible_alias = "test-data", visible_alias = "test-file")]
+    pub file: Option<PathBuf>,
+
+    /// Disjoint calibration split file for fair post-hoc temperature, conformal, and deferral fitting
+    #[arg(long, visible_alias = "cal-data")]
+    pub cal_file: Option<PathBuf>,
+
+    /// Explicit `dataset_manifest.json` path for cryptographic split verification
+    #[arg(long)]
+    pub dataset_manifest: Option<PathBuf>,
+
+    /// Question schema JSON file
+    #[arg(short, long)]
+    pub schema: Option<PathBuf>,
+
+    /// Calibration evaluation protocol: `raw`, `calibrated`, or `both` (default: `both`)
+    #[arg(long, default_value = "both")]
+    pub calibration_mode: String,
+
+    /// Number of paired cluster-bootstrap resamples for 95% BCa confidence intervals
+    #[arg(long, default_value_t = 2000)]
+    pub bootstrap_samples: usize,
+
+    /// Number of paired sign-flip permutations for exact Phipson-Smyth p-values
+    #[arg(long, default_value_t = 5000)]
+    pub permutations: usize,
+
+    /// Confidence level for bootstrap CIs and deferral bounds
+    #[arg(long, default_value_t = 0.95)]
+    pub confidence: f64,
+
+    /// Significance threshold `alpha` for hypothesis tests and conformal sets
+    #[arg(long, default_value_t = 0.05)]
+    pub alpha: f64,
+
+    /// Target accuracy for System 1 / System 2 deferral coverage comparison
+    #[arg(long, default_value_t = 0.95)]
+    pub target_accuracy: f64,
+
+    /// System 2 fallback cost per deferred item in USD
+    #[arg(long, default_value_t = 0.005)]
+    pub system2_cost: f64,
+
+    /// Deterministic PRNG seed for bootstrap and permutation resamples
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Disaggregate paired accuracy deltas by diagnostic slice (`auto`, `prefix`, `script`, `length`, or `field:<name>`)
+    #[arg(long)]
+    pub slice_by: Option<String>,
+
+    /// Warmup passes before ABBA interleaved latency timing
+    #[arg(long, default_value_t = 1)]
+    pub warmup: usize,
+
+    /// ABBA interleaved timing passes over `test`
+    #[arg(short, long, default_value_t = 1)]
+    pub iterations: usize,
+
+    /// Long-context chunking strategy (`truncate`, `head-tail`, `sliding-window`)
+    #[arg(long, default_value = "truncate")]
+    pub chunk_strategy: String,
+
+    /// Custom NLI hypothesis or MLM verbalizer template
+    #[arg(long)]
+    pub hypothesis_template: Option<String>,
+
+    /// Lexical option shortlist size (`0` = disabled)
+    #[arg(long, default_value_t = 0)]
+    pub shortlist_k: usize,
+
+    /// Enable multi-label sigmoid scoring for both models
+    #[arg(long)]
+    pub multi_label: bool,
+
+    /// Multi-label sigmoid probability threshold
+    #[arg(long, default_value_t = 0.40)]
+    pub multi_label_threshold: f64,
+
+    /// Override hard failure when train/val/cal leakage is detected in `test`
+    #[arg(long)]
+    pub allow_leakage: bool,
+
+    /// Exit with non-zero status if any candidate receives a `REGRESSED` verdict
+    #[arg(long)]
+    pub fail_on_regression: bool,
+
+    /// Output format (`table`, `md`, or `json`)
+    #[arg(long, value_enum, default_value_t = ExperimentFormat::Table)]
+    pub format: ExperimentFormat,
+
+    /// Export paired experiment report to file (`.md` for Markdown, `.json` for JSON)
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Emit paired experiment report as JSON to stdout
+    #[arg(long)]
+    pub json: bool,
 }

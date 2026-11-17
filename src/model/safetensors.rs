@@ -4,16 +4,30 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_HEADER_BYTES: u64 = 100 * 1024 * 1024;
 
-fn read_safetensors_header_bytes(path: &Path) -> Result<(u64, u64, Vec<u8>)> {
-    let resolved = if path.is_dir() {
-        path.join("model.safetensors")
+fn resolve_safetensors_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        let model_st = path.join("model.safetensors");
+        if model_st.exists() {
+            model_st
+        } else {
+            let adapter_st = path.join("adapter_model.safetensors");
+            if adapter_st.exists() {
+                adapter_st
+            } else {
+                model_st
+            }
+        }
     } else {
         path.to_path_buf()
-    };
+    }
+}
+
+fn read_safetensors_header_bytes(path: &Path) -> Result<(u64, u64, Vec<u8>)> {
+    let resolved = resolve_safetensors_path(path);
     let mut file = File::open(&resolved)
         .with_context(|| format!("Cannot open Safetensors file: {}", resolved.display()))?;
 
@@ -46,6 +60,8 @@ fn read_safetensors_header_bytes(path: &Path) -> Result<(u64, u64, Vec<u8>)> {
 
     let mut header_buf = vec![0u8; header_len as usize];
     file.read_exact(&mut header_buf)?;
+    let _: serde_json::Value = serde_json::from_slice(&header_buf)
+        .context("Failed to parse JSON metadata in Safetensors header")?;
     Ok((file_size, header_len, header_buf))
 }
 
@@ -78,6 +94,7 @@ pub struct SafetensorsReport {
     pub total_parameters: u64,
     pub dtypes: BTreeMap<String, usize>,
     pub tensor_shapes: BTreeMap<String, Vec<usize>>,
+    pub tensor_dtypes: BTreeMap<String, String>,
     pub architecture: String,
     pub is_laya_compatible: bool,
     pub has_classifier_head: bool,
@@ -100,6 +117,7 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
     let mut total_parameters = 0u64;
     let mut dtypes: BTreeMap<String, usize> = BTreeMap::new();
     let mut tensor_shapes = BTreeMap::new();
+    let mut tensor_dtypes = BTreeMap::new();
     let mut has_act_head = false;
     let mut has_decision_scorer = false;
     let mut has_nli_classifier = false;
@@ -151,7 +169,7 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
         total_parameters = total_parameters
             .checked_add(num_elements)
             .ok_or_else(|| anyhow::anyhow!("Safetensors total parameter count overflow"))?;
-        *dtypes.entry(info.dtype).or_default() += 1;
+        *dtypes.entry(info.dtype.clone()).or_default() += 1;
 
         if name.contains("act_head") {
             has_act_head = true;
@@ -178,6 +196,7 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
             is_neobert = true;
         }
 
+        tensor_dtypes.insert(name.clone(), info.dtype);
         tensor_shapes.insert(name, info.shape);
     }
 
@@ -197,13 +216,15 @@ pub fn inspect_safetensors(path: &Path) -> Result<SafetensorsReport> {
         "Encoder Sequence Classifier".to_string()
     } else {
         "Pretrained Transformer Encoder".to_string()
-    };
+    }
+    .to_string();
 
     Ok(SafetensorsReport {
         total_tensors: tensor_shapes.len(),
         total_parameters,
         dtypes,
         tensor_shapes,
+        tensor_dtypes,
         architecture,
         is_laya_compatible: is_laya,
         has_classifier_head,

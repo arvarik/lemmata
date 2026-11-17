@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod checkpoint;
 pub mod chunking;
 pub mod downloader;
@@ -10,6 +11,11 @@ pub mod registry;
 pub mod safetensors;
 pub mod schema;
 
+pub use adapter::{
+    AdapterConfig, MergeReport, ModelSpec, PeftBackend, TRAINING_MANIFEST_VERSION,
+    TrainingManifest, detect_checkpoint_family, infer_base_checkpoint_from_adapter,
+    merge_adapter_to_dir, sha256_file, validate_adapter_directory,
+};
 pub use checkpoint::{Checkpoint, DecisionModel};
 pub use chunking::{ChunkStrategy, chunk_text_for_window, pool_window_logits};
 pub use downloader::{Downloader, VerificationReport};

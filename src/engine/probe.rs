@@ -51,6 +51,9 @@ pub struct Probe {
     /// learns how far to trust the zero-shot head, which a residual probe cannot rescale.
     #[serde(default)]
     pub stacked: bool,
+    /// Portable SHA-256 fingerprint of the base weights + optional PEFT adapter used when fitting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fingerprint: Option<String>,
 }
 
 impl Probe {
@@ -192,6 +195,25 @@ pub fn fit_probe(
     q: &Question,
     strategy: ChunkStrategy,
 ) -> Result<Probe> {
+    fit_probe_with_spec(
+        &crate::model::ModelSpec::from_checkpoint(ckpt),
+        items,
+        qid,
+        q,
+        strategy,
+    )
+}
+
+/// Fit a probe for choice question `qid` on labelled `items`, using `spec`'s base weights and
+/// optional PEFT adapter.
+pub fn fit_probe_with_spec(
+    spec: &crate::model::ModelSpec,
+    items: &[DataItem],
+    qid: &str,
+    q: &Question,
+    strategy: ChunkStrategy,
+) -> Result<Probe> {
+    let ckpt = spec.family;
     if q.qtype != QuestionType::Choice {
         bail!("probes support choice questions, and '{qid}' is not one");
     }
@@ -201,7 +223,11 @@ pub fn fit_probe(
         .enumerate()
         .map(|(i, l)| (l.to_lowercase(), i))
         .collect();
-    let model = crate::model::native::shared(ckpt, &ckpt.local_dir())?;
+    let model = crate::model::native::shared_with_adapter(
+        ckpt,
+        &spec.base_weights_dir(),
+        spec.adapter_dir.as_deref(),
+    )?;
     let questions = BTreeMap::from([(qid.to_string(), q.clone())]);
 
     let mut matched: Vec<(&DataItem, usize)> = Vec::new();
@@ -236,7 +262,7 @@ pub fn fit_probe(
 
     // Zero-shot logits for every item: the residual probe's base, and the baseline to beat.
     let zero_shot =
-        crate::engine::LayaClassifier::with_checkpoint(ckpt).with_chunk_strategy(strategy);
+        crate::engine::LayaClassifier::with_model_spec(spec).with_chunk_strategy(strategy);
     let zs_batch = zero_shot.classify_batch(&kept_items, &questions)?;
     let mut zs_logits = Vec::with_capacity(kept_items.len());
     let mut zs_hit = Vec::with_capacity(kept_items.len());
@@ -299,6 +325,7 @@ pub fn fit_probe(
         zero_shot_validation_accuracy: zs_correct as f64 / valid.len().max(1) as f64,
         residual,
         stacked,
+        model_fingerprint: spec.portable_fingerprint().ok(),
     })
 }
 
@@ -558,6 +585,7 @@ mod tests {
             zero_shot_validation_accuracy: 0.0,
             residual: false,
             stacked: true,
+            model_fingerprint: None,
         };
         assert_eq!(probe.embedding_dim(), 1);
         assert_eq!(probe.logits(&[5.0], Some(&[0.25, -1.0])), [0.25, -1.0]);
@@ -616,6 +644,7 @@ mod tests {
             zero_shot_validation_accuracy: 0.5,
             residual: false,
             stacked: true, // invalid: mean.len() == 2 <= labels.len() == 3
+            model_fingerprint: None,
         };
         std::fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();
         assert!(Probe::load(&path).is_err());

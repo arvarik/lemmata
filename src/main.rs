@@ -9,19 +9,24 @@ use std::str::FromStr;
 use lemmata::benchmark::BenchmarkRunner;
 use lemmata::cli::{
     AttestArgs, AttestCommands, BenchArgs, CacheArgs, CacheCommands, CalibrateArgs, Cli, Commands,
-    CompareArgs, CompletionsArgs, ConformalArgs, DeferArgs, DeferCommands, DownloadArgs,
-    EnsembleArgs, ExplainArgs, GuideArgs, InfoArgs, InspectArgs, LearnArgs, OutputFormat,
+    CompareArgs, CompletionsArgs, ConformalArgs, DatasetArgs, DatasetCommands, DeferArgs,
+    DeferCommands, DownloadArgs, EnsembleArgs, ExperimentArgs, ExperimentFormat, ExplainArgs,
+    FinetuneArgs, FinetuneCommands, GuideArgs, InfoArgs, InspectArgs, LearnArgs, OutputFormat,
     ReportArgs, ReportFormat, SchemaArgs, SchemaCommands, SchemaInferArgs, SchemaOptimizeArgs,
     SchemaValidateArgs, TaxonomyCommands, TestArgs,
 };
 use lemmata::datasource::{DataItem, DataSource};
 use lemmata::engine::{
-    AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationTuner, CascadeConfig,
-    CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine, DecisionCache, Evaluator,
-    ExperimentRunner, HierarchicalRouter, LayaClassifier, SchemaKnapsackOptimizer,
-    SchemaSynthesizer, StatsEngine, compute_schema_hash, parse_cost_weights,
+    AttestationEngine, AttributionEngine, CalibrationLoss, CalibrationMode, CalibrationTuner,
+    CascadeConfig, CascadeRouter, ClassifierConfig, ConformalEngine, ConsensusEngine,
+    DatasetImporter, DatasetSplitter, DatasetVerifier, DatasetVerifyConfig, DecisionCache,
+    DedupAction, Evaluator, ExperimentParticipant, ExperimentRunner, ExperimentVerdict,
+    HierarchicalRouter, ImportConfig, ImportSource, LayaClassifier, PairedExperimentConfig,
+    PairedExperimentRunner, SchemaKnapsackOptimizer, SchemaSynthesizer, SplitConfig, SplitRatios,
+    StatsEngine, compute_schema_hash, infer_base_checkpoint_from_artifact, parse_cost_weights,
+    parse_key_val_pairs, parse_value_map_specs, read_dataset_items,
 };
-use lemmata::model::{Checkpoint, Downloader, HierarchicalSchema, inspect_safetensors};
+use lemmata::model::{Checkpoint, Downloader, HierarchicalSchema, ModelSpec, inspect_safetensors};
 use lemmata::{
     create_inline_question, load_questions_from_file, resolve_data_source,
     resolve_data_source_filtered,
@@ -64,6 +69,9 @@ fn run(cli: Cli) -> Result<()> {
             lemmata::cli::ProbeCommands::Fit(fit) => handle_probe_fit(fit),
         },
         Commands::Report(args) => handle_report(args),
+        Commands::Dataset(args) => handle_dataset(args),
+        Commands::Finetune(args) => handle_finetune(args),
+        Commands::Experiment(args) => handle_experiment(args),
         Commands::Learn(args) => handle_learn(args),
         Commands::Guide(args) => handle_guide(args),
         Commands::Completions(args) => handle_completions(args),
@@ -104,6 +112,10 @@ fn log_status(quiet: bool, msg: impl std::fmt::Display) {
 
 fn parse_checkpoint(s: &str) -> Result<Checkpoint> {
     Checkpoint::from_str(s).map_err(|e| anyhow::anyhow!(e))
+}
+
+fn resolve_model_spec(checkpoint: &str, adapter: Option<&std::path::Path>) -> Result<ModelSpec> {
+    ModelSpec::resolve(checkpoint, adapter)
 }
 
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
@@ -321,7 +333,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
     if args.receipts.is_some() && args.attest_key.as_deref().unwrap_or_default().is_empty() {
         bail!("--receipts needs a signing key. Set LEMMATA_ATTEST_KEY.");
     }
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let inline_text = args.text.as_deref().or(args.positional_text.as_deref());
 
     let source: Box<dyn DataSource> = if let Some(url_str) = &args.url {
@@ -344,7 +356,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
         return run_taxonomy_classification(
             hier_path,
             source,
-            checkpoint,
+            &spec,
             args.beam,
             args.path_threshold,
             args.cache,
@@ -373,7 +385,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
         .chunk_strategy
         .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut config = ClassifierConfig::with_checkpoint(checkpoint);
+    let mut config = ClassifierConfig::with_model_spec(&spec);
     config.multi_label = args.multi_label;
     config.multi_label_threshold = args.multi_label_threshold;
     config.escalate_threshold = args.escalate_threshold;
@@ -591,7 +603,7 @@ fn handle_classify(args: lemmata::cli::ClassifyArgs) -> Result<()> {
                 "\n{table}\n\nClassified {} items across {} questions using {} checkpoint.\n",
                 results.len(),
                 questions.len(),
-                checkpoint.repo_id()
+                spec.display_model_id()
             )?;
         }
     }
@@ -633,20 +645,13 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
         bail!("No data items found for Model Arena comparison.");
     }
 
-    let checkpoints: Vec<Checkpoint> = if args.checkpoints.eq_ignore_ascii_case("all") {
+    let specs: Vec<ModelSpec> = if args.checkpoints.eq_ignore_ascii_case("all") {
         lemmata::model::native::runnable_checkpoints()
+            .into_iter()
+            .map(ModelSpec::from_checkpoint)
+            .collect()
     } else {
-        let list: Vec<Checkpoint> = args
-            .checkpoints
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(parse_checkpoint)
-            .collect::<Result<_>>()?;
-        if list.is_empty() {
-            bail!("At least one checkpoint must be specified for comparison");
-        }
-        list
+        ModelSpec::parse_list(&args.checkpoints)?
     };
 
     let slice_mode = match &args.slice_by {
@@ -657,10 +662,10 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
         ),
         None => None,
     };
-    let (report, slice_matrix) = ExperimentRunner::run_arena_with_slices(
+    let (report, slice_matrix) = ExperimentRunner::run_arena_specs_with_slices(
         &items,
         &questions,
-        &checkpoints,
+        &specs,
         args.top_disagreements,
         chunk_strategy,
         args.hypothesis_template.as_deref(),
@@ -691,7 +696,7 @@ fn handle_compare(args: CompareArgs) -> Result<()> {
 }
 
 fn handle_test(args: TestArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions = load_questions_or_inline(args.schema.as_deref(), "Classify topic")?;
     let items = resolve_data_source_filtered(
         &args.data_dir,
@@ -708,11 +713,19 @@ fn handle_test(args: TestArgs) -> Result<()> {
         return Ok(());
     }
 
+    lemmata::finetune::guard_eval_against_training_leakage(
+        &spec,
+        args.file.as_deref(),
+        &items,
+        &questions,
+        args.allow_leakage,
+    )?;
+
     let chunk_strategy = args
         .chunk_strategy
         .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+    let mut cfg = ClassifierConfig::with_model_spec(&spec);
     cfg.hypothesis_template = args.hypothesis_template.clone();
     cfg.chunk_strategy = chunk_strategy;
     cfg.shortlist_k = args.shortlist_k;
@@ -733,7 +746,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
         format!(
             "🔬 Evaluating {} items against ground truth with checkpoint {}...",
             items.len(),
-            checkpoint.repo_id()
+            spec.display_model_id()
         ),
     );
     let classifier = LayaClassifier::new(cfg.clone());
@@ -841,7 +854,7 @@ fn handle_test(args: TestArgs) -> Result<()> {
 }
 
 fn handle_bench(args: BenchArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions =
         load_questions_or_inline(args.schema.as_deref(), "Classify department and priority")?;
     let items = resolve_data_source_filtered(
@@ -859,7 +872,7 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
         return Ok(());
     }
 
-    let runner = BenchmarkRunner::new(LayaClassifier::with_checkpoint(checkpoint))
+    let runner = BenchmarkRunner::new(LayaClassifier::with_model_spec(&spec))
         .with_warmup(args.warmup)
         .with_silent(args.json);
     let report = runner.run(&items, &questions, args.iterations)?;
@@ -1129,7 +1142,7 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
                 "Input text is required for `lemmata explain`. Pass `<TEXT>` positionally or via `--text <TEXT>`."
             )
         })?;
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions = match &args.schema {
         Some(path) => load_questions_from_file(path)?,
         None => create_inline_question("choice", "Classify department", &args.labels)?,
@@ -1181,7 +1194,7 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
             .collect(),
     };
 
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
+    let classifier = LayaClassifier::with_model_spec(&spec);
     let has_opt = |cand: &str| opt_keys.iter().any(|k| k.eq_ignore_ascii_case(cand));
 
     let (raw_target, raw_contrast, user_specified) = match (&args.target, &args.contrast) {
@@ -1267,7 +1280,7 @@ fn handle_explain(args: ExplainArgs) -> Result<()> {
 }
 
 fn handle_conformal(args: ConformalArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions = load_questions_or_inline(args.schema.as_deref(), "Classify department")?;
     let items =
         resolve_data_source(&args.data_dir, args.file.as_deref(), false, None)?.read_items()?;
@@ -1283,7 +1296,7 @@ fn handle_conformal(args: ConformalArgs) -> Result<()> {
             .unwrap_or_else(|| questions.iter().next().unwrap())
     };
 
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
+    let classifier = LayaClassifier::with_model_spec(&spec);
     let (report, prediction_items) =
         ConformalEngine::evaluate(&classifier, &items, qid, question, args.alpha)?;
 
@@ -1658,10 +1671,10 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 }
 
 fn handle_defer_fit(args: lemmata::cli::DeferFitArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions = load_questions_from_file(&args.schema)?;
     let items = lemmata::datasource::FileSource::new(&args.val_data).read_items()?;
-    let classifier = LayaClassifier::with_checkpoint(checkpoint);
+    let classifier = LayaClassifier::with_model_spec(&spec);
     log_status(
         args.json,
         format!(
@@ -1751,16 +1764,18 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
     match args.action {
         DeferCommands::Fit(fit_args) => handle_defer_fit(fit_args)?,
         DeferCommands::Run(run_args) => {
-            let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
+            let spec = resolve_model_spec(&run_args.checkpoint, run_args.adapter.as_deref())?;
             let risk_threshold = match (&run_args.policy, run_args.risk_threshold) {
                 (Some(path), _) => {
                     let policy: lemmata::engine::DeferPolicy =
                         serde_json::from_reader(std::fs::File::open(path)?)?;
-                    if policy.checkpoint != checkpoint.repo_id() {
+                    if policy.checkpoint != spec.family.repo_id()
+                        && policy.checkpoint != spec.display_model_id()
+                    {
                         eprintln!(
                             "⚠️  The policy was fitted for {}, not {}. Its accuracy bound does not carry over.",
                             policy.checkpoint,
-                            checkpoint.repo_id()
+                            spec.display_model_id()
                         );
                     }
                     policy.threshold
@@ -1783,7 +1798,7 @@ fn handle_defer(args: DeferArgs) -> Result<()> {
                 bail!("No items found to route");
             }
 
-            let classifier = LayaClassifier::with_checkpoint(checkpoint);
+            let classifier = LayaClassifier::with_model_spec(&spec);
             let router = CascadeRouter::new(CascadeConfig {
                 risk_threshold,
                 system2_cost_per_call: run_args.system2_cost,
@@ -1914,7 +1929,7 @@ fn handle_attest(args: AttestArgs) -> Result<()> {
 fn run_taxonomy_classification(
     schema_path: &std::path::Path,
     source: Box<dyn DataSource>,
-    checkpoint: Checkpoint,
+    spec: &ModelSpec,
     beam: usize,
     path_threshold: f64,
     cache_enabled: bool,
@@ -1933,7 +1948,7 @@ fn run_taxonomy_classification(
         return Ok(());
     }
 
-    let classifier = LayaClassifier::new(ClassifierConfig::with_checkpoint(checkpoint));
+    let classifier = LayaClassifier::new(ClassifierConfig::with_model_spec(spec));
     let cache = if cache_enabled {
         Some(std::sync::Arc::new(std::sync::Mutex::new(
             DecisionCache::open(&classifier)?,
@@ -1982,7 +1997,7 @@ fn run_taxonomy_classification(
 fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
     match args.command {
         TaxonomyCommands::Run(run_args) => {
-            let checkpoint = parse_checkpoint(&run_args.checkpoint)?;
+            let spec = resolve_model_spec(&run_args.checkpoint, run_args.adapter.as_deref())?;
             let source = resolve_data_source(
                 &run_args.data_dir,
                 run_args.file.as_deref(),
@@ -1992,7 +2007,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
             run_taxonomy_classification(
                 &run_args.schema,
                 source,
-                checkpoint,
+                &spec,
                 run_args.beam,
                 run_args.path_threshold,
                 run_args.cache,
@@ -2053,7 +2068,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
             }
         }
         TaxonomyCommands::Bench(bench_args) => {
-            let checkpoint = parse_checkpoint(&bench_args.checkpoint)?;
+            let spec = resolve_model_spec(&bench_args.checkpoint, bench_args.adapter.as_deref())?;
             let schema = HierarchicalSchema::load_from_file(&bench_args.schema)?;
             let items = resolve_data_source(
                 &bench_args.data_dir,
@@ -2068,7 +2083,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
 
             let router = HierarchicalRouter::new(
                 schema,
-                LayaClassifier::new(ClassifierConfig::with_checkpoint(checkpoint)),
+                LayaClassifier::new(ClassifierConfig::with_model_spec(&spec)),
             )
             .with_beam(bench_args.beam)
             .with_path_threshold(bench_args.path_threshold);
@@ -2076,7 +2091,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
             if !bench_args.json {
                 println!(
                     "\n⚡ Benchmarking Taxonomy Router...\n   Checkpoint: {} | Samples: {} | Iterations: {}\n{}\n",
-                    checkpoint.repo_id(),
+                    spec.display_model_id(),
                     items.len(),
                     bench_args.iterations,
                     "=".repeat(70)
@@ -2084,7 +2099,7 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
             } else {
                 eprintln!(
                     "⚡ Benchmarking Taxonomy Router ({}, {} samples)...",
-                    checkpoint.repo_id(),
+                    spec.display_model_id(),
                     items.len()
                 );
             }
@@ -2111,7 +2126,8 @@ fn handle_taxonomy(args: lemmata::cli::TaxonomyArgs) -> Result<()> {
 }
 
 fn handle_probe_fit(args: lemmata::cli::ProbeFitArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
+    let checkpoint = spec.family;
     if checkpoint == Checkpoint::AutoRoute {
         bail!("A probe reads one model's embeddings. Choose a checkpoint other than route.");
     }
@@ -2142,11 +2158,11 @@ fn handle_probe_fit(args: lemmata::cli::ProbeFitArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Question '{qid}' is not in the schema"))?;
     let items = resolve_data_source(std::path::Path::new("data"), Some(&args.data), false, None)?
         .read_items()?;
-    let probe = lemmata::engine::fit_probe(checkpoint, &items, &qid, q, strategy)?;
+    let probe = lemmata::engine::fit_probe_with_spec(&spec, &items, &qid, q, strategy)?;
     write_json_file(&args.output, &probe)?;
     println!(
         "🧭 Probe for '{qid}' on {}: {} kind, {} labels, {} training items, L2 {}. Held-out accuracy: probe {:.1}%, zero-shot {:.1}%. Saved to {}",
-        checkpoint.repo_id(),
+        spec.display_model_id(),
         probe.mode(),
         probe.labels.len(),
         probe.train_samples,
@@ -2164,7 +2180,8 @@ fn handle_probe_fit(args: lemmata::cli::ProbeFitArgs) -> Result<()> {
 }
 
 fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
+    let checkpoint = spec.family;
     let loss = args
         .loss
         .parse::<CalibrationLoss>()
@@ -2183,7 +2200,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
         .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
         .unwrap_or("validation_dataset");
 
-    let mut tuner = CalibrationTuner::new(checkpoint)
+    let mut tuner = CalibrationTuner::with_model_spec(&spec)
         .with_loss(loss)
         .with_bins(args.bins)
         .with_min_bucket_samples(args.min_bucket_samples)
@@ -2218,7 +2235,15 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
     }
 
     if args.persist_to_model {
-        let saved = lemmata::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?;
+        let saved = if spec.is_custom_or_adapted() {
+            let dest = spec
+                .active_config_dir()
+                .join(lemmata::engine::MODEL_CALIBRATION_FILENAME);
+            lemmata::engine::save_checkpoint_calibration_at(&dest, &calibrated_config)?;
+            dest
+        } else {
+            lemmata::engine::save_checkpoint_calibration(checkpoint, &calibrated_config)?
+        };
         eprintln!(
             "💾 Auto-persisted checkpoint calibration profile to: {}",
             saved.display()
@@ -2280,7 +2305,7 @@ fn handle_calibrate(args: CalibrateArgs) -> Result<()> {
 }
 
 fn handle_report(args: ReportArgs) -> Result<()> {
-    let checkpoint = parse_checkpoint(&args.checkpoint)?;
+    let spec = resolve_model_spec(&args.checkpoint, args.adapter.as_deref())?;
     let questions = load_questions_from_file(&args.schema)?;
     let items = resolve_data_source_filtered(
         &args.data_dir,
@@ -2296,11 +2321,19 @@ fn handle_report(args: ReportArgs) -> Result<()> {
         return Ok(());
     }
 
+    lemmata::finetune::guard_eval_against_training_leakage(
+        &spec,
+        args.file.as_deref(),
+        &items,
+        &questions,
+        args.allow_leakage,
+    )?;
+
     let chunk_strategy = args
         .chunk_strategy
         .parse::<lemmata::model::ChunkStrategy>()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let mut cfg = ClassifierConfig::with_checkpoint(checkpoint);
+    let mut cfg = ClassifierConfig::with_model_spec(&spec);
     cfg.escalate_threshold = args.escalate_threshold;
     cfg.hypothesis_template = args.hypothesis_template.clone();
     cfg.chunk_strategy = chunk_strategy;
@@ -2519,6 +2552,515 @@ fn handle_guide(args: GuideArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&filtered)?);
     } else {
         lemmata::engine::print_workflow_guide(args.topic.as_deref());
+    }
+    Ok(())
+}
+
+fn parse_csv_list(opt: &Option<String>) -> Vec<String> {
+    opt.as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn handle_dataset(args: DatasetArgs) -> Result<()> {
+    match args.action {
+        DatasetCommands::Import(imp) => {
+            let source = if let Some(file) = &imp.file {
+                ImportSource::File(file.clone())
+            } else if let Some(dir) = &imp.dir {
+                let exts = imp.extensions.as_ref().map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().trim_start_matches('.').to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                });
+                ImportSource::Directory {
+                    path: dir.clone(),
+                    recursive: !imp.no_recursive,
+                    extensions: exts,
+                }
+            } else if let Some(repo_id) = &imp.hf {
+                ImportSource::HuggingFace {
+                    repo_id: repo_id.clone(),
+                    subset: imp.subset.clone(),
+                    split: imp.split.clone(),
+                    revision: imp.revision.clone(),
+                    cache_dir: imp.cache_dir.clone(),
+                    dry_run: imp.dry_run,
+                }
+            } else {
+                bail!(
+                    "Specify an import source: `--file <PATH>`, `--dir <DIR>`, or `--hf <REPO_ID>`"
+                );
+            };
+
+            let schema = match &imp.schema {
+                Some(p) => Some(load_questions_from_file(p)?),
+                None => None,
+            };
+            let cfg = ImportConfig {
+                schema,
+                id_col: imp.id_col,
+                text_col: imp.text_col,
+                state_cols: parse_csv_list(&imp.state_cols),
+                meta_cols: parse_csv_list(&imp.meta_cols),
+                label_map: parse_key_val_pairs(&imp.label_map)?,
+                value_map: parse_value_map_specs(&imp.value_map)?,
+                int_labels_from_schema: imp.int_labels_from_schema,
+                score_offset: imp.score_offset,
+                multi_label_sep: imp.multi_label_sep,
+                normalize_nfc: imp.normalize_nfc,
+                clean_email: imp.clean_email,
+                drop_empty: imp.drop_empty,
+                strict: imp.strict,
+            };
+
+            let (_, report) = DatasetImporter::import(&cfg, &source, imp.output.as_deref())?;
+            if imp.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", DatasetImporter::format_table(&report));
+            }
+            Ok(())
+        }
+        DatasetCommands::Split(sp) => {
+            let questions = load_questions_from_file(&sp.schema)?;
+            let ratios = if sp.no_cal && sp.ratios.trim() == "0.70,0.10,0.10,0.10" {
+                SplitRatios::three_way_no_cal()
+            } else {
+                let mut r = SplitRatios::from_csv_str(&sp.ratios)?;
+                if sp.no_cal && r.cal > 0.0 {
+                    r.train += r.cal;
+                    r.cal = 0.0;
+                    r = r.validated()?;
+                }
+                r
+            };
+            let dedup_action = sp.dedup_action.parse::<DedupAction>()?;
+            let cfg = SplitConfig {
+                ratios,
+                seed: sp.seed,
+                group_col: sp.group_col,
+                dedup_sim: sp.dedup_sim,
+                dedup_action,
+            };
+            let manifest = DatasetSplitter::split_to_dir(&cfg, &sp.file, &questions, &sp.out_dir)?;
+            if sp.json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else {
+                print!("{}", DatasetSplitter::format_table(&manifest));
+            }
+            Ok(())
+        }
+        DatasetCommands::Verify(ver) => {
+            let questions = load_questions_from_file(&ver.schema)?;
+            let checkpoint = parse_checkpoint(&ver.checkpoint)?;
+            let chunk_strategy = ver
+                .chunk_strategy
+                .parse::<lemmata::model::ChunkStrategy>()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let cfg = DatasetVerifyConfig {
+                checkpoint,
+                chunk_strategy,
+                multi_label: ver.multi_label,
+                alpha: ver.alpha,
+                target_accuracy: ver.target_accuracy,
+                defer_confidence: ver.confidence,
+                dedup_sim: ver.dedup_sim,
+                allow_partial_gt: ver.allow_partial_gt,
+                require_tokenizer: ver.require_tokenizer,
+                strict: ver.strict,
+            };
+            let report = if let Some(sdir) = &ver.split_dir {
+                DatasetVerifier::verify_dir(&cfg, sdir, &questions)?
+            } else if let Some(fpath) = &ver.file {
+                DatasetVerifier::verify_file(&cfg, fpath, &questions)?
+            } else {
+                bail!("Specify either `--split-dir <DIR>` or `--file <PATH>` for `dataset verify`");
+            };
+
+            if ver.json {
+                println!("{}", DatasetVerifier::format_json(&report)?);
+            } else {
+                print!("{}", DatasetVerifier::format_table(&report));
+            }
+            if !report.ready {
+                bail!(
+                    "Dataset preflight verification failed ({} failure(s), {} warning(s))",
+                    report.fail_count,
+                    report.warn_count
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn handle_finetune(args: FinetuneArgs) -> Result<()> {
+    match args.action {
+        FinetuneCommands::Prepare(prep) => {
+            let checkpoint = parse_checkpoint(&prep.checkpoint)?;
+            let method = prep.method.parse::<lemmata::finetune::FinetuneMethod>()?;
+            let cuda = prep.cuda.parse::<lemmata::finetune::CudaBackend>()?;
+            let opts = lemmata::finetune::PrepareOptions {
+                split_dir: prep.split_dir,
+                train_file: prep.train,
+                val_file: prep.val,
+                cal_file: prep.cal,
+                forbid_test_file: prep.forbid_test,
+                schema_path: prep.schema,
+                checkpoint,
+                method,
+                rank: prep.rank,
+                alpha: prep.alpha,
+                use_rslora: !prep.no_rslora,
+                lora_dropout: prep.lora_dropout,
+                unfreeze_laya_head: prep.unfreeze_laya_head,
+                epochs: prep.epochs,
+                lr: prep.lr,
+                batch_size: prep.batch_size,
+                grad_accum: prep.grad_accum,
+                label_smoothing: prep.label_smoothing,
+                neftune_alpha: prep.neftune_alpha,
+                rdrop_alpha: prep.rdrop_alpha,
+                multi_label: prep.multi_label,
+                cuda,
+                seed: prep.seed,
+                create_tar: prep.tar,
+                out_dir: prep.out,
+            };
+            let report = lemmata::finetune::prepare_bundle(&opts)?;
+            if prep.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "\n📦 Fine-Tuning Bundle Ready: `{}`\n   • Checkpoint : {} ({})\n   • Method     : {}\n   • Splits     : {} train | {} val | {} cal (test.jsonl excluded)\n   • Bundle Dir : {} ({:.1} KB)",
+                    report.run_id,
+                    report.checkpoint,
+                    report.paradigm,
+                    report.method,
+                    report.train_rows,
+                    report.val_rows,
+                    report.cal_rows,
+                    report.bundle_dir.display(),
+                    report.bundle_bytes as f64 / 1024.0
+                );
+                if let Some(tar) = &report.tar_path {
+                    println!("   • Archive    : {}", tar.display());
+                }
+                for w in &report.warnings {
+                    println!("   ⚠️  {w}");
+                }
+                println!(
+                    "   • Next Step  : see `{}` or run `uv run {}/train.py`\n",
+                    report.bundle_dir.join("RUN.md").display(),
+                    report.bundle_dir.display()
+                );
+            }
+            Ok(())
+        }
+        FinetuneCommands::Verify(ver) => {
+            let opts = lemmata::finetune::VerifyArtifactOptions {
+                artifact_dir: ver.artifact,
+                split_dir: ver.split_dir,
+                test_file: ver.test_file,
+                schema_path: ver.schema,
+                base_dir: ver.base_dir,
+            };
+            let report = lemmata::finetune::verify_artifact(&opts)?;
+            if ver.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", lemmata::finetune::format_verification_table(&report));
+            }
+            if !report.valid && !ver.allow_leakage {
+                bail!(
+                    "Fine-tuning artifact verification failed: {}",
+                    report.errors.join("; ")
+                );
+            }
+            Ok(())
+        }
+        FinetuneCommands::Merge(m) => {
+            let report = lemmata::finetune::merge_finetuned_adapter_with_options(
+                &m.adapter,
+                m.checkpoint.as_deref(),
+                &m.output,
+                m.force,
+                m.f32,
+            )?;
+            if m.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "\n🔗 Merged PEFT Adapter into Standalone Checkpoint\n   • Base Dir    : {}\n   • Adapter Dir : {}\n   • Output Dir  : {} ({:.2} MB)\n   • Tensors     : {} total ({} LoRA/DoRA folded, {} overrides)\n   • Header SHA  : {}\n",
+                    report.base_dir.display(),
+                    report.adapter_dir.display(),
+                    report.output_dir.display(),
+                    report.merged_file_bytes as f64 / 1_048_576.0,
+                    report.total_tensors_written,
+                    report.lora_tensors_merged,
+                    report.override_tensors_applied,
+                    report.merged_header_sha256
+                );
+            }
+            Ok(())
+        }
+        FinetuneCommands::Push(sync) => {
+            let plan = lemmata::finetune::push_bundle(&sync.run, &sync.remote, sync.dry_run)?;
+            if sync.dry_run {
+                println!("[dry-run] {}", plan.command_line());
+            } else {
+                println!("✅ {}", plan.description);
+            }
+            Ok(())
+        }
+        FinetuneCommands::Pull(sync) => {
+            let plan = lemmata::finetune::pull_artifacts(&sync.run, &sync.remote, sync.dry_run)?;
+            if sync.dry_run {
+                println!("[dry-run] {}", plan.command_line());
+            } else {
+                println!("✅ {}", plan.description);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn normalize_candidate_arg(raw: &str) -> String {
+    let p = std::path::Path::new(raw.trim());
+    if p.is_dir() {
+        let nested = p.join("artifacts");
+        if nested.is_dir()
+            && (nested.join("adapter_config.json").exists()
+                || nested.join("model.safetensors").exists()
+                || nested.join("training_manifest.json").exists())
+        {
+            return nested.to_string_lossy().into_owned();
+        }
+    }
+    raw.trim().to_string()
+}
+
+fn resolve_experiment_candidate(
+    raw: &str,
+    explicit_base: Option<&str>,
+) -> Result<(ModelSpec, Option<std::path::PathBuf>)> {
+    let norm = normalize_candidate_arg(raw);
+    let p = std::path::Path::new(&norm);
+    let spec = if p.is_dir()
+        && p.join("adapter_config.json").exists()
+        && !p.join("model.safetensors").exists()
+    {
+        if let Some(base_str) = explicit_base.filter(|b| !b.contains('+')) {
+            ModelSpec::resolve(base_str, Some(p))?
+        } else {
+            ModelSpec::resolve(&norm, None)?
+        }
+    } else {
+        ModelSpec::resolve(&norm, None)?
+    };
+    let artifact_dir = spec.adapter_dir.clone().or_else(|| spec.model_dir.clone());
+    Ok((spec, artifact_dir))
+}
+
+fn handle_experiment(args: ExperimentArgs) -> Result<()> {
+    let test_path = match (&args.file, &args.split_dir) {
+        (Some(f), _) => f.clone(),
+        (None, Some(sdir)) => {
+            let p = sdir.join("test.jsonl");
+            if !p.exists() {
+                bail!(
+                    "No `test.jsonl` found inside `--split-dir {}`. Pass `--file <PATH>` explicitly.",
+                    sdir.display()
+                );
+            }
+            p
+        }
+        (None, None) => bail!(
+            "Specify `--file <TEST_FILE>` or `--split-dir <SPLITS_DIR>` for `lemmata experiment`"
+        ),
+    };
+    let cal_path = args.cal_file.clone().or_else(|| {
+        args.split_dir
+            .as_ref()
+            .map(|d| d.join("cal.jsonl"))
+            .filter(|p| p.exists())
+    });
+    let dm_path = args.dataset_manifest.clone().or_else(|| {
+        args.split_dir
+            .as_ref()
+            .map(|d| d.join("dataset_manifest.json"))
+            .filter(|p| p.exists())
+    });
+
+    let mut resolved_candidates = Vec::with_capacity(args.candidate.len());
+    for raw_c in &args.candidate {
+        resolved_candidates.push(resolve_experiment_candidate(raw_c, args.base.as_deref())?);
+    }
+
+    let base_spec = if let Some(base_str) = &args.base {
+        ModelSpec::resolve(base_str, None)?
+    } else if let Some((_, Some(art_dir))) = resolved_candidates.first()
+        && let Some(inferred) = infer_base_checkpoint_from_artifact(art_dir)
+    {
+        ModelSpec::resolve(&inferred, None)?
+    } else {
+        ModelSpec::from_checkpoint(resolved_candidates[0].0.family)
+    };
+
+    // Resolve schema from `--schema`, candidate run's `bundle/schema.json`, or `schema/questions.json`.
+    let inferred_bundle_schema = resolved_candidates
+        .first()
+        .and_then(|(_, art)| art.as_ref())
+        .and_then(|art| art.parent())
+        .map(|run_dir| run_dir.join("bundle/schema.json"))
+        .filter(|p| p.exists());
+    let questions = if let Some(s) = &args.schema {
+        load_questions_from_file(s)?
+    } else if let Some(bs) = &inferred_bundle_schema {
+        load_questions_from_file(bs)?
+    } else {
+        load_schema_or_default(None)?
+    };
+
+    let test_items = read_dataset_items(&test_path)?;
+    let cal_items = match &cal_path {
+        Some(cp) => Some(read_dataset_items(cp)?),
+        None => None,
+    };
+
+    let chunk_strategy = args
+        .chunk_strategy
+        .parse::<lemmata::model::ChunkStrategy>()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let calibration_mode = args.calibration_mode.parse::<CalibrationMode>()?;
+    let slice_by = match &args.slice_by {
+        Some(s) => Some(
+            s.parse::<lemmata::engine::SliceBy>()
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        None => None,
+    };
+
+    let configure_cls = |spec: &ModelSpec| -> LayaClassifier {
+        let mut cfg = ClassifierConfig::with_model_spec(spec);
+        cfg.chunk_strategy = chunk_strategy;
+        cfg.hypothesis_template = args.hypothesis_template.clone();
+        cfg.shortlist_k = args.shortlist_k;
+        cfg.multi_label = args.multi_label;
+        cfg.multi_label_threshold = args.multi_label_threshold;
+        LayaClassifier::new(cfg)
+    };
+
+    let base_participant =
+        ExperimentParticipant::new(base_spec.display_model_id(), configure_cls(&base_spec));
+
+    let exp_cfg = PairedExperimentConfig {
+        calibration_mode,
+        bootstrap_samples: args.bootstrap_samples,
+        permutations: args.permutations,
+        confidence: args.confidence,
+        alpha: args.alpha,
+        target_accuracy: args.target_accuracy,
+        system2_cost: args.system2_cost,
+        seed: args.seed,
+        slice_by,
+        warmup_runs: args.warmup,
+        timing_iterations: args.iterations,
+        allow_leakage: args.allow_leakage,
+        top_regressions: 5,
+    };
+
+    let mut reports = Vec::with_capacity(resolved_candidates.len());
+    for (cand_spec, art_dir) in &resolved_candidates {
+        let mut cand_participant =
+            ExperimentParticipant::new(cand_spec.display_model_id(), configure_cls(cand_spec));
+        if let Some(dir) = art_dir {
+            cand_participant = cand_participant.with_artifact_dir(dir);
+        }
+        let report = PairedExperimentRunner::run_paired(
+            &exp_cfg,
+            &base_participant,
+            &cand_participant,
+            &test_items,
+            cal_items.as_deref(),
+            &questions,
+            Some(&test_path),
+            dm_path.as_deref(),
+        )?;
+        reports.push(report);
+    }
+
+    let want_json = args.json || args.format == ExperimentFormat::Json;
+    if reports.len() == 1 {
+        let report = &reports[0];
+        if let Some(out_path) = &args.output {
+            PairedExperimentRunner::export_report(report, out_path)?;
+            log_status(
+                want_json,
+                format!("💾 Experiment report written to: {}", out_path.display()),
+            );
+        }
+        if want_json {
+            println!("{}", PairedExperimentRunner::format_json(report)?);
+        } else if args.format == ExperimentFormat::Md {
+            print!("{}", PairedExperimentRunner::format_markdown(report));
+        } else {
+            print!("{}", PairedExperimentRunner::format_table(report));
+        }
+    } else {
+        if let Some(out_path) = &args.output {
+            ensure_parent_dir(out_path)?;
+            let ext = out_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let body = if ext == "md" || ext == "markdown" {
+                reports
+                    .iter()
+                    .map(PairedExperimentRunner::format_markdown)
+                    .collect::<Vec<_>>()
+                    .join("\n---\n\n")
+            } else {
+                serde_json::to_string_pretty(&reports)?
+            };
+            std::fs::write(out_path, body)?;
+        }
+        if want_json {
+            println!("{}", serde_json::to_string_pretty(&reports)?);
+        } else if args.format == ExperimentFormat::Md {
+            for (idx, r) in reports.iter().enumerate() {
+                if idx > 0 {
+                    println!("\n---\n");
+                }
+                print!("{}", PairedExperimentRunner::format_markdown(r));
+            }
+        } else {
+            for r in &reports {
+                print!("{}", PairedExperimentRunner::format_table(r));
+            }
+        }
+    }
+
+    if args.fail_on_regression
+        && let Some(reg) = reports
+            .iter()
+            .find(|r| r.verdict == ExperimentVerdict::Regressed)
+    {
+        bail!(
+            "Candidate '{}' regressed relative to '{}': {}",
+            reg.candidate_label,
+            reg.base_label,
+            reg.verdict_reasons.join("; ")
+        );
     }
     Ok(())
 }
