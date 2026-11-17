@@ -198,6 +198,28 @@ impl LayaClassifier {
         questions: &BTreeMap<String, Question>,
     ) -> (Checkpoint, &'static str) {
         if self.config.checkpoint == Checkpoint::AutoRoute {
+            if self.config.shortlist_k > 0 {
+                let adjusted: BTreeMap<String, Question> = questions
+                    .iter()
+                    .map(|(k, q)| {
+                        if q.qtype == QuestionType::Choice {
+                            let opts = q.render_options();
+                            if opts.len() > self.config.shortlist_k {
+                                let mut q2 = q.clone();
+                                q2.criteria = Some(serde_json::Value::Array(
+                                    opts.into_iter()
+                                        .take(self.config.shortlist_k)
+                                        .map(serde_json::Value::String)
+                                        .collect(),
+                                ));
+                                return (k.clone(), q2);
+                            }
+                        }
+                        (k.clone(), q.clone())
+                    })
+                    .collect();
+                return Self::route_auto(state_text, &adjusted);
+            }
             Self::route_auto(state_text, questions)
         } else {
             (self.config.checkpoint, "configured")
@@ -283,10 +305,7 @@ impl LayaClassifier {
             bail!("No questions provided for classification");
         }
 
-        let state_text = match state {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string(other)?,
-        };
+        let state_text = crate::datasource::DataItem::state_to_text(state);
 
         let blank = |v: &serde_json::Value| match v {
             serde_json::Value::String(s) => s.trim().is_empty(),

@@ -56,6 +56,8 @@ fn canonical_model_id(dir: &Path) -> Option<&'static str> {
         Some("convaiinnovations/laya")
     } else if trimmed.ends_with("models/modernbert-zeroshot") {
         Some("MoritzLaurer/ModernBERT-large-zeroshot-v2.0")
+    } else if trimmed.ends_with("models/modernbert-nli") {
+        Some("tasksource/ModernBERT-large-nli")
     } else if trimmed.ends_with("models/deberta-v3") {
         Some("MoritzLaurer/deberta-v3-large-zeroshot-v2.0")
     } else if trimmed.ends_with("models/eurobert") {
@@ -268,6 +270,7 @@ pub fn scan_registered_models() -> Vec<DynamicModelSpec> {
         "models/laya/multilingual",
         "models/laya/typed-decisions",
         "models/modernbert-zeroshot",
+        "models/modernbert-nli",
         "models/deberta-v3",
         "models/eurobert",
         "models/neobert",

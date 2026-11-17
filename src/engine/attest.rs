@@ -54,6 +54,8 @@ pub struct DecisionReceipt {
     pub schema_digest: String,
     pub input_digest: String,
     pub decisions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selected_labels: BTreeMap<String, Vec<String>>,
     pub confidences: BTreeMap<String, f64>,
     pub act_probabilities: BTreeMap<String, f64>,
     pub policy_rule: Option<String>,
@@ -62,33 +64,45 @@ pub struct DecisionReceipt {
     pub signature: String,
 }
 
+fn canonical_f64_bits(v: f64) -> Option<u64> {
+    if v.is_nan() {
+        None
+    } else if v == 0.0 {
+        Some(0.0_f64.to_bits())
+    } else {
+        Some(v.to_bits())
+    }
+}
+
 impl DecisionReceipt {
     pub fn canonical_payload(&self) -> String {
-        let conf_bits: BTreeMap<&str, u64> = self
+        let conf_bits: BTreeMap<&str, Option<u64>> = self
             .confidences
             .iter()
-            .map(|(k, v)| (k.as_str(), ((v * 10000.0).round() as i64) as u64))
+            .map(|(k, v)| (k.as_str(), canonical_f64_bits(*v)))
             .collect();
-        let act_bits: BTreeMap<&str, u64> = self
+        let act_bits: BTreeMap<&str, Option<u64>> = self
             .act_probabilities
             .iter()
-            .map(|(k, v)| (k.as_str(), ((v * 10000.0).round() as i64) as u64))
+            .map(|(k, v)| (k.as_str(), canonical_f64_bits(*v)))
             .collect();
-        format!(
-            "v={}|id={}|parent={}|model={}|schema={}|input={}|rule={:?}|act={:?}|dec={:?}|conf={:?}|act_p={:?}|ts={}",
-            self.version,
-            self.receipt_id,
-            self.parent_hash,
-            self.model_id,
-            self.schema_digest,
-            self.input_digest,
-            self.policy_rule,
-            self.action,
-            self.decisions,
-            conf_bits,
-            act_bits,
-            self.timestamp
-        )
+        // Deterministic JSON array prevents delimiter-collision attacks and preserves exact IEEE-754 bits.
+        serde_json::to_string(&(
+            &self.version,
+            &self.receipt_id,
+            &self.parent_hash,
+            &self.model_id,
+            &self.schema_digest,
+            &self.input_digest,
+            &self.policy_rule,
+            &self.action,
+            &self.decisions,
+            &self.selected_labels,
+            &conf_bits,
+            &act_bits,
+            &self.timestamp,
+        ))
+        .expect("DecisionReceipt canonical JSON serialization cannot fail")
     }
 
     fn compute_digest(&self) -> String {
@@ -167,10 +181,7 @@ impl AttestationEngine {
         if self.secret_key.is_empty() {
             bail!("Attestation needs a signing key. Set LEMMATA_ATTEST_KEY or pass the key flag.");
         }
-        let input_text = match &item.state {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string(other)?,
-        };
+        let input_text = item.state_text();
 
         let input_digest = sha256_hex(input_text.as_bytes());
         let receipt_id = format!(
@@ -179,11 +190,17 @@ impl AttestationEngine {
         );
 
         let mut decisions = BTreeMap::new();
+        let mut selected_labels = BTreeMap::new();
         let mut confidences = BTreeMap::new();
         let mut act_probabilities = BTreeMap::new();
 
         for (qid, ans) in &decision.answers {
-            let pred = if let Some(c) = &ans.choice {
+            if let Some(sel) = &ans.selected_labels {
+                selected_labels.insert(qid.clone(), sel.clone());
+            }
+            let pred = if let Some(sel) = &ans.selected_labels {
+                sel.join(",")
+            } else if let Some(c) = &ans.choice {
                 c.clone()
             } else if let Some(s) = ans.score {
                 format!("{:.2}", s)
@@ -209,6 +226,7 @@ impl AttestationEngine {
             schema_digest: schema_digest.to_string(),
             input_digest,
             decisions,
+            selected_labels,
             confidences,
             act_probabilities,
             policy_rule: policy_rule.map(|s| s.to_string()),

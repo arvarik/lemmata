@@ -53,6 +53,35 @@ impl ExperimentRunner {
         hypothesis_template: Option<&str>,
         shortlist_k: usize,
     ) -> Result<ModelArenaReport> {
+        let (report, _) = Self::run_arena_with_slices(
+            items,
+            questions,
+            checkpoints,
+            top_disagreements,
+            chunk_strategy,
+            hypothesis_template,
+            shortlist_k,
+            None,
+        )?;
+        Ok(report)
+    }
+
+    /// Single-pass Head-to-Head Model Arena that optionally computes the Checkpoint × Slice accuracy
+    /// matrix from the exact same `classify_batch` results before releasing each checkpoint's weights.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn run_arena_with_slices(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        checkpoints: &[Checkpoint],
+        top_disagreements: usize,
+        chunk_strategy: crate::model::ChunkStrategy,
+        hypothesis_template: Option<&str>,
+        shortlist_k: usize,
+        slice_by: Option<&super::slicing::SliceBy>,
+    ) -> Result<(
+        ModelArenaReport,
+        Option<(Vec<String>, Vec<super::slicing::ArenaSliceRow>)>,
+    )> {
         if items.is_empty() {
             bail!("No items provided for Model Arena comparison");
         }
@@ -62,6 +91,16 @@ impl ExperimentRunner {
 
         let mut model_preds: Vec<Vec<(String, String, bool, f64)>> = Vec::new(); // per model: (key, pred, is_correct, conf)
         let mut raw_entries = Vec::new();
+        let has_any_ground_truth = items
+            .iter()
+            .any(|it| it.ground_truth.as_ref().is_some_and(|gt| !gt.is_empty()));
+        let mut slice_names_set = std::collections::BTreeSet::new();
+        if let Some(mode) = slice_by {
+            for item in items {
+                slice_names_set.insert(super::slicing::extract_item_slice(item, mode));
+            }
+        }
+        let mut slice_rows = Vec::new();
 
         for &ckpt in checkpoints {
             let mut cls = LayaClassifier::with_checkpoint(ckpt)
@@ -73,7 +112,24 @@ impl ExperimentRunner {
             let t0 = std::time::Instant::now();
             let batch = cls.classify_batch(items, questions)?;
             let avg_lat = (t0.elapsed().as_secs_f64() * 1000.0) / items.len().max(1) as f64;
-            let eval_metrics = Evaluator::new(cls).evaluate(items, questions).ok();
+            let eval_metrics = Evaluator::new(LayaClassifier::new(cls.config().clone()))
+                .evaluate_with_results(items, questions, &batch)
+                .ok();
+            if let Some(mode) = slice_by {
+                let mut slice_accuracies = BTreeMap::new();
+                if let Ok(entries) = super::slicing::evaluate_slices_with_results(
+                    &cls, items, questions, &batch, mode,
+                ) {
+                    for e in entries {
+                        slice_accuracies.insert(e.slice, e.accuracy);
+                    }
+                }
+                slice_rows.push(super::slicing::ArenaSliceRow {
+                    checkpoint: ckpt.repo_id().to_string(),
+                    slice_accuracies,
+                    overall_accuracy: eval_metrics.as_ref().map(|m| m.accuracy).unwrap_or(0.0),
+                });
+            }
             // The arena runs one checkpoint at a time. Keeping all nine models loaded took 14.6 GB.
             crate::model::native::release_models();
 
@@ -83,7 +139,13 @@ impl ExperimentRunner {
                     let Some(ans) = res.answers.get(qid) else {
                         continue;
                     };
-                    let pred_str = if let Some(c) = &ans.choice {
+                    let pred_str = if let Some(sel) = &ans.selected_labels {
+                        let mut sorted: Vec<String> =
+                            sel.iter().map(|s| s.trim().to_lowercase()).collect();
+                        sorted.sort();
+                        sorted.dedup();
+                        sorted.join(",")
+                    } else if let Some(c) = &ans.choice {
                         c.to_lowercase()
                     } else if let Some(s) = ans.score {
                         format!("{:.0}", s.round())
@@ -103,14 +165,40 @@ impl ExperimentRunner {
                                 questions.len(),
                             )
                         })
-                        .is_some_and(|tv| {
-                            let target_s = tv
-                                .as_str()
-                                .map(str::to_lowercase)
-                                .or_else(|| tv.as_bool().map(|b| b.to_string()))
-                                .or_else(|| tv.as_f64().map(|n| format!("{:.0}", n.round())))
-                                .unwrap_or_default();
-                            pred_str == target_s
+                        .is_some_and(|tv| match q.qtype {
+                            crate::model::QuestionType::Choice => {
+                                if let Some(target_set) =
+                                    super::metrics::extract_multi_label_targets(tv)
+                                {
+                                    let mut pred_set: Vec<String> =
+                                        if let Some(sel) = &ans.selected_labels {
+                                            sel.iter().map(|s| s.trim().to_lowercase()).collect()
+                                        } else if let Some(c) = &ans.choice {
+                                            vec![c.trim().to_lowercase()]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                    pred_set.sort();
+                                    pred_set.dedup();
+                                    pred_set == target_set
+                                } else {
+                                    tv.as_str()
+                                        .is_some_and(|s| pred_str.eq_ignore_ascii_case(s))
+                                }
+                            }
+                            crate::model::QuestionType::Score => {
+                                let target_num = tv
+                                    .as_f64()
+                                    .or_else(|| tv.as_str().and_then(|s| s.parse::<f64>().ok()));
+                                target_num
+                                    .zip(ans.score)
+                                    .is_some_and(|(t, s)| (s - t).abs() < 0.5)
+                            }
+                            crate::model::QuestionType::Noul => {
+                                super::metrics::parse_noul_ground_truth(tv)
+                                    .zip(ans.noul)
+                                    .is_some_and(|(t, p)| (p >= 0.5) == t)
+                            }
                         });
                     preds.push((
                         format!("{}:{qid}", item.id),
@@ -184,7 +272,7 @@ impl ExperimentRunner {
                 agreement_with_ref: (p_o * 10000.0).round() / 10000.0,
                 cohens_kappa: (kappa * 10000.0).round() / 10000.0,
                 mcnemar_chi2: (mcnemar_chi2 * 1000.0).round() / 1000.0,
-                significant_diff: mcnemar_chi2 >= 3.841,
+                significant_diff: has_any_ground_truth && mcnemar_chi2 >= 3.841,
             });
         }
 
@@ -225,12 +313,17 @@ impl ExperimentRunner {
             disagreements.truncate(top_disagreements);
         }
 
-        Ok(ModelArenaReport {
-            reference_model: checkpoints[0].repo_id().to_string(),
-            sample_count: items.len(),
-            models: entries,
-            top_disagreements: disagreements,
-        })
+        let slice_matrix = slice_by.map(|_| (slice_names_set.into_iter().collect(), slice_rows));
+
+        Ok((
+            ModelArenaReport {
+                reference_model: checkpoints[0].repo_id().to_string(),
+                sample_count: items.len(),
+                models: entries,
+                top_disagreements: disagreements,
+            },
+            slice_matrix,
+        ))
     }
 
     pub fn print_arena_report(report: &ModelArenaReport) {
@@ -259,7 +352,12 @@ impl ExperimentRunner {
                 .ece
                 .map(|e| format!("{:.4}", e))
                 .unwrap_or_else(|| "N/A".into());
-            let sig = if m.significant_diff { "*" } else { "" };
+            let mcnemar_s = if m.accuracy.is_some() {
+                let sig = if m.significant_diff { "*" } else { "" };
+                format!("{:.2}{sig}", m.mcnemar_chi2)
+            } else {
+                "N/A".into()
+            };
             table.add_row(vec![
                 Cell::new(&m.checkpoint),
                 Cell::new(&m.backbone),
@@ -267,7 +365,7 @@ impl ExperimentRunner {
                 Cell::new(ece_s),
                 Cell::new(format!("{:.1}%", m.agreement_with_ref * 100.0)),
                 Cell::new(format!("{:.3}", m.cohens_kappa)),
-                Cell::new(format!("{:.2}{}", m.mcnemar_chi2, sig)),
+                Cell::new(mcnemar_s),
                 Cell::new(format!(
                     "{:.2} ms ({:.2}x)",
                     m.avg_latency_ms, m.speedup_vs_ref

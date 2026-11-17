@@ -260,6 +260,23 @@ impl CalibrationTuner {
         questions: &BTreeMap<String, Question>,
         dataset_name: &str,
     ) -> Result<(CalibrationReport, CalibratedAgentConfig)> {
+        let (report, config, _) = self.fit_full(items, questions, dataset_name, false)?;
+        Ok((report, config))
+    }
+
+    /// Single-pass temperature calibration that optionally also fits per-label log-biases
+    /// from the exact same collected option logits without a second forward pass.
+    pub fn fit_full(
+        &self,
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        dataset_name: &str,
+        include_label_bias: bool,
+    ) -> Result<(
+        CalibrationReport,
+        CalibratedAgentConfig,
+        Option<LabelBiasFit>,
+    )> {
         if items.is_empty() {
             bail!("Validation dataset cannot be empty for calibration");
         }
@@ -270,37 +287,43 @@ impl CalibrationTuner {
         let start_time = Instant::now();
         let classifier = LayaClassifier::with_checkpoint(self.checkpoint);
 
+        type ChoiceBiasEntry = (Vec<String>, String, Vec<(Vec<f64>, usize)>);
         let mut bucket_samples: BTreeMap<String, Vec<ValidationSample>> = BTreeMap::new();
+        let mut choice_bias_inputs: BTreeMap<String, ChoiceBiasEntry> = BTreeMap::new();
         let mut class_features: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
         let mut item_features: Vec<Vec<f64>> = Vec::new();
         let mut total_samples_collected = 0;
 
-        for item in items {
-            let Some(gt_map) = &item.ground_truth else {
-                continue;
-            };
-            let state_text = match &item.state {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other)?,
-            };
-            let feat_vec = self.enable_qats.then(|| vectorize_text(&state_text));
-            if let Some(ref fv) = feat_vec {
-                item_features.push(fv.clone());
-            }
+        let labeled_items: Vec<&DataItem> = items
+            .iter()
+            .filter(|it| it.ground_truth.is_some())
+            .collect();
+        let per_item_scored =
+            crate::model::native::map_items(&labeled_items, |&item| -> Result<_> {
+                let gt_map = item.ground_truth.as_ref().unwrap();
+                let state_text = item.state_text();
+                let feat_vec = self.enable_qats.then(|| vectorize_text(&state_text));
+                let mut item_qs = Vec::new();
 
-            for (qid, q) in questions {
-                let Some(target_val) = gt_map.get(qid).or_else(|| gt_map.get("default")) else {
-                    continue;
-                };
-                let options = q.render_options();
-                let k = options.len().max(2);
-                let bucket_key = classifier.get_temperature_bucket(q.qtype, k);
-                let raw_logits = classifier.compute_option_logits(&state_text, q, &options)?;
+                for (qid, q) in questions {
+                    let Some(target_val) = super::metrics::resolve_ground_truth_for_question(
+                        Some(gt_map),
+                        qid,
+                        q,
+                        questions.len(),
+                    ) else {
+                        continue;
+                    };
+                    let options = q.render_options();
+                    let k = options.len().max(2);
+                    let bucket_key = classifier.get_temperature_bucket(q.qtype, k);
+                    let raw_logits = classifier.compute_option_logits(&state_text, q, &options)?;
 
-                let (target_idx, target_label, option_weights) = match q.qtype {
-                    QuestionType::Choice => {
-                        let keys: Vec<String> =
-                            if let Some(serde_json::Value::Object(map)) = &q.criteria {
+                    let (target_idx, target_label, option_weights, choice_keys) = match q.qtype {
+                        QuestionType::Choice => {
+                            let keys: Vec<String> = if let Some(serde_json::Value::Object(map)) =
+                                &q.criteria
+                            {
                                 map.keys().cloned().collect()
                             } else if let Some(serde_json::Value::Array(arr)) = &q.criteria {
                                 arr.iter()
@@ -316,80 +339,102 @@ impl CalibrationTuner {
                                     .map(|s| s.split(':').next().unwrap_or(s).trim().to_string())
                                     .collect()
                             };
-                        let target_str = target_val.as_str().unwrap_or("");
-                        let opt_idx = keys
-                            .iter()
-                            .position(|k| k.eq_ignore_ascii_case(target_str))
-                            .or_else(|| {
-                                options
-                                    .iter()
-                                    .position(|opt| opt.eq_ignore_ascii_case(target_str))
-                            });
-                        let weights: Vec<f64> = keys
-                            .iter()
-                            .map(|k| {
-                                self.cost_weights
-                                    .get(&k.to_lowercase())
-                                    .copied()
-                                    .unwrap_or(1.0)
-                            })
-                            .collect();
-                        match opt_idx {
-                            Some(idx) => (idx, target_str.to_string(), weights),
-                            None => continue,
+                            let target_str = target_val.as_str().unwrap_or("");
+                            let opt_idx = keys
+                                .iter()
+                                .position(|k| k.eq_ignore_ascii_case(target_str))
+                                .or_else(|| {
+                                    options
+                                        .iter()
+                                        .position(|opt| opt.eq_ignore_ascii_case(target_str))
+                                });
+                            let weights: Vec<f64> = keys
+                                .iter()
+                                .map(|k| {
+                                    self.cost_weights
+                                        .get(&k.to_lowercase())
+                                        .copied()
+                                        .unwrap_or(1.0)
+                                })
+                                .collect();
+                            match opt_idx {
+                                Some(idx) => (idx, target_str.to_string(), weights, Some(keys)),
+                                None => continue,
+                            }
                         }
-                    }
-                    QuestionType::Score => {
-                        let score_val = target_val
-                            .as_u64()
-                            .or_else(|| target_val.as_str().and_then(|s| s.parse::<u64>().ok()))
-                            .unwrap_or(0) as usize;
-                        let clamped = score_val.min(raw_logits.len().saturating_sub(1));
-                        (clamped, clamped.to_string(), vec![1.0; raw_logits.len()])
-                    }
-                    QuestionType::Noul => {
-                        let b = target_val
-                            .as_bool()
-                            .or_else(|| {
-                                target_val
-                                    .as_str()
-                                    .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
-                            })
-                            .or_else(|| target_val.as_u64().map(|n| n != 0))
-                            .unwrap_or(false);
-                        let w_false = self.cost_weights.get("false").copied().unwrap_or(1.0);
-                        let w_true = self
-                            .cost_weights
-                            .get("true")
-                            .or_else(|| self.cost_weights.get(&qid.to_lowercase()))
-                            .copied()
-                            .unwrap_or(1.0);
-                        (
-                            usize::from(b),
-                            if b { "true" } else { "false" }.into(),
-                            vec![w_false, w_true],
-                        )
-                    }
-                };
+                        QuestionType::Score => {
+                            let score_val = target_val
+                                .as_u64()
+                                .or_else(|| target_val.as_str().and_then(|s| s.parse::<u64>().ok()))
+                                .unwrap_or(0) as usize;
+                            let clamped = score_val.min(raw_logits.len().saturating_sub(1));
+                            (
+                                clamped,
+                                clamped.to_string(),
+                                vec![1.0; raw_logits.len()],
+                                None,
+                            )
+                        }
+                        QuestionType::Noul => {
+                            let Some(b) = super::metrics::parse_noul_ground_truth(target_val)
+                            else {
+                                continue;
+                            };
+                            let w_false = self.cost_weights.get("false").copied().unwrap_or(1.0);
+                            let w_true = self
+                                .cost_weights
+                                .get("true")
+                                .or_else(|| self.cost_weights.get(&qid.to_lowercase()))
+                                .copied()
+                                .unwrap_or(1.0);
+                            (
+                                usize::from(b),
+                                if b { "true" } else { "false" }.into(),
+                                vec![w_false, w_true],
+                                None,
+                            )
+                        }
+                    };
 
+                    item_qs.push((
+                        qid.clone(),
+                        bucket_key,
+                        choice_keys,
+                        ValidationSample {
+                            raw_logits,
+                            target_index: target_idx,
+                            target_label,
+                            option_weights,
+                        },
+                    ));
+                }
+                Ok((feat_vec, item_qs))
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        for (feat_vec, item_qs) in per_item_scored {
+            if let Some(ref fv) = feat_vec {
+                item_features.push(fv.clone());
+            }
+            for (qid, bucket_key, choice_keys, sample) in item_qs {
                 if let Some(ref fv) = feat_vec
-                    && !target_label.is_empty()
+                    && !sample.target_label.is_empty()
                 {
                     class_features
-                        .entry(format!("{qid}:{target_label}"))
+                        .entry(format!("{qid}:{}", sample.target_label))
                         .or_default()
                         .push(fv.clone());
                 }
-
-                bucket_samples
-                    .entry(bucket_key)
-                    .or_default()
-                    .push(ValidationSample {
-                        raw_logits,
-                        target_index: target_idx,
-                        target_label,
-                        option_weights,
-                    });
+                if include_label_bias && let Some(keys) = choice_keys {
+                    let entry = choice_bias_inputs
+                        .entry(qid.clone())
+                        .or_insert_with(|| (keys, bucket_key.clone(), Vec::new()));
+                    entry
+                        .2
+                        .push((sample.raw_logits.clone(), sample.target_index));
+                }
+                bucket_samples.entry(bucket_key).or_default().push(sample);
                 total_samples_collected += 1;
             }
         }
@@ -400,23 +445,33 @@ impl CalibrationTuner {
             );
         }
 
-        let baseline_temps: BTreeMap<String, f64> = [
-            ("choice:2", 1.906),
-            ("choice:3-5", 1.760),
-            ("choice:6-10", 1.000),
-            ("choice:11+", MIN_TEMPERATURE), // upstream fits 0.101, below the safe range
-            ("score:2", 1.500),
-            ("score:3-5", 1.251),
-            ("score:6-10", 1.000),
-            ("score:11+", 0.800),
-            ("noul:2", 1.983),
-            ("noul:3-5", 1.500),
-            ("noul:6-10", 1.000),
-            ("noul:11+", 0.800),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+        let default_qtype_temps = self.checkpoint.default_temperatures();
+        let default_bucket_temps = self.checkpoint.default_temperature_by_options();
+        let std_buckets = [
+            ("choice:2", 0usize),
+            ("choice:3-5", 0),
+            ("choice:6-10", 0),
+            ("choice:11+", 0),
+            ("score:2", 1),
+            ("score:3-5", 1),
+            ("score:6-10", 1),
+            ("score:11+", 1),
+            ("noul:2", 2),
+            ("noul:3-5", 2),
+            ("noul:6-10", 2),
+            ("noul:11+", 2),
+        ];
+        let baseline_temps: BTreeMap<String, f64> = std_buckets
+            .into_iter()
+            .map(|(k, q_idx)| {
+                let raw = default_bucket_temps
+                    .get(k)
+                    .copied()
+                    .unwrap_or(default_qtype_temps[q_idx])
+                    .clamp(MIN_TEMPERATURE, MAX_TEMPERATURE);
+                (k.to_string(), (raw * 1000.0).round() / 1000.0)
+            })
+            .collect();
 
         let mut bucket_reports = Vec::new();
         let mut fitted_temperatures = BTreeMap::new();
@@ -424,7 +479,8 @@ impl CalibrationTuner {
         let mut cal_cost_sum = 0.0;
 
         for (bucket_name, samples) in &bucket_samples {
-            let (raw_ece, raw_nll, raw_brier) = compute_bucket_metrics(samples, 1.0, self.bins);
+            let prior_t = baseline_temps.get(bucket_name).copied().unwrap_or(1.0);
+            let (raw_ece, raw_nll, raw_brier) = compute_bucket_metrics(samples, prior_t, self.bins);
 
             let (optimal_t, iterations) = if samples.len() >= self.min_bucket_samples {
                 // Evaluate a log-spaced grid over the safe range to handle non-smooth ECE step plateaus
@@ -435,6 +491,7 @@ impl CalibrationTuner {
                     .map(|i| (ln_min + (ln_max - ln_min) * (i as f64 / (grid_n - 1) as f64)).exp())
                     .collect();
                 grid.push(1.0);
+                grid.push(prior_t);
                 grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
                 let mut best_grid_idx = 0;
@@ -466,9 +523,9 @@ impl CalibrationTuner {
                 grid.push(full_gss_t);
 
                 // Select candidate minimizing target loss without degrading raw ECE
-                let mut best_t = 1.0;
+                let mut best_t = prior_t;
                 let mut best_tuple = (
-                    compute_bucket_loss(samples, 1.0, self.loss, self.bins),
+                    compute_bucket_loss(samples, prior_t, self.loss, self.bins),
                     raw_ece,
                 );
                 for cand in grid {
@@ -491,13 +548,12 @@ impl CalibrationTuner {
                     samples.len(),
                     self.min_bucket_samples
                 );
-                let fallback = baseline_temps.get(bucket_name).copied().unwrap_or(1.0);
-                ((fallback * 1000.0).round() / 1000.0, 0)
+                (prior_t, 0)
             };
 
             let (cal_ece, cal_nll, cal_brier) =
                 compute_bucket_metrics(samples, optimal_t, self.bins);
-            raw_cost_sum += compute_expected_asymmetric_cost(samples, 1.0, false);
+            raw_cost_sum += compute_expected_asymmetric_cost(samples, prior_t, false);
             cal_cost_sum += compute_expected_asymmetric_cost(samples, optimal_t, true);
             let improvement_pct = if raw_ece > 1e-6 {
                 ((raw_ece - cal_ece) / raw_ece) * 100.0
@@ -509,7 +565,7 @@ impl CalibrationTuner {
             bucket_reports.push(BucketCalibrationReport {
                 bucket: bucket_name.clone(),
                 sample_count: samples.len(),
-                raw_temperature: 1.0,
+                raw_temperature: prior_t,
                 raw_ece,
                 raw_nll,
                 raw_brier,
@@ -526,14 +582,22 @@ impl CalibrationTuner {
             fitted_temperatures.entry(std_b.clone()).or_insert(def_t);
         }
 
-        let total_b = bucket_reports.len() as f64;
-        let avg_raw_ece = if total_b > 0.0 {
-            bucket_reports.iter().map(|b| b.raw_ece).sum::<f64>() / total_b
+        let total_sample_weight: usize = bucket_reports.iter().map(|b| b.sample_count).sum();
+        let avg_raw_ece = if total_sample_weight > 0 {
+            bucket_reports
+                .iter()
+                .map(|b| b.raw_ece * b.sample_count as f64)
+                .sum::<f64>()
+                / total_sample_weight as f64
         } else {
             0.0
         };
-        let avg_cal_ece = if total_b > 0.0 {
-            bucket_reports.iter().map(|b| b.calibrated_ece).sum::<f64>() / total_b
+        let avg_cal_ece = if total_sample_weight > 0 {
+            bucket_reports
+                .iter()
+                .map(|b| b.calibrated_ece * b.sample_count as f64)
+                .sum::<f64>()
+                / total_sample_weight as f64
         } else {
             0.0
         };
@@ -599,17 +663,21 @@ impl CalibrationTuner {
         };
 
         let tuning_duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-        let avg_raw_brier = if total_b > 0.0 {
-            bucket_reports.iter().map(|b| b.raw_brier).sum::<f64>() / total_b
+        let avg_raw_brier = if total_sample_weight > 0 {
+            bucket_reports
+                .iter()
+                .map(|b| b.raw_brier * b.sample_count as f64)
+                .sum::<f64>()
+                / total_sample_weight as f64
         } else {
             0.0
         };
-        let avg_cal_brier = if total_b > 0.0 {
+        let avg_cal_brier = if total_sample_weight > 0 {
             bucket_reports
                 .iter()
-                .map(|b| b.calibrated_brier)
+                .map(|b| b.calibrated_brier * b.sample_count as f64)
                 .sum::<f64>()
-                / total_b
+                / total_sample_weight as f64
         } else {
             0.0
         };
@@ -628,6 +696,53 @@ impl CalibrationTuner {
                 }
             })
             .collect();
+
+        let label_bias_fit = include_label_bias.then(|| {
+            let mut fit = LabelBiasFit {
+                weights: BTreeMap::new(),
+                questions: BTreeMap::new(),
+            };
+            for (qid, (labels, bkey, raw_vec)) in choice_bias_inputs {
+                if raw_vec.is_empty() || labels.is_empty() {
+                    continue;
+                }
+                let t = fitted_temperatures
+                    .get(&bkey)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .clamp(MIN_TEMPERATURE, MAX_TEMPERATURE);
+                let samples: Vec<(Vec<f64>, usize)> = raw_vec
+                    .into_iter()
+                    .map(|(raw_logits, target_idx)| {
+                        let scaled: Vec<f64> = raw_logits
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &z)| {
+                                let w = labels
+                                    .get(i)
+                                    .and_then(|l| self.cost_weights.get(&l.to_lowercase()))
+                                    .copied()
+                                    .unwrap_or(1.0)
+                                    .max(1e-9);
+                                z / t + w.ln()
+                            })
+                            .collect();
+                        let max_s = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let lse = max_s
+                            + scaled
+                                .iter()
+                                .map(|&v| (v - max_s).exp())
+                                .sum::<f64>()
+                                .max(1e-12)
+                                .ln();
+                        let log_p = scaled.into_iter().map(|v| v - lse).collect();
+                        (log_p, target_idx)
+                    })
+                    .collect();
+                record_label_bias_question(&mut fit, &qid, &labels, &samples);
+            }
+            fit
+        });
 
         let n_samp = total_samples_collected.max(1) as f64;
         let raw_expected_cost = ((raw_cost_sum / n_samp) * 10000.0).round() / 10000.0;
@@ -679,7 +794,7 @@ impl CalibrationTuner {
             cost_weights: self.cost_weights.clone(),
         };
 
-        Ok((report, config))
+        Ok((report, config, label_bias_fit))
     }
 
     /// Format calibration report as a readable ASCII table.
@@ -856,12 +971,8 @@ fn compute_bucket_metrics(samples: &[ValidationSample], t: f64, bins: usize) -> 
             .collect();
 
         let mut best_idx = 0;
-        let mut max_p = -1.0;
         let mut best_weighted = -1.0;
         for (i, &p) in probs.iter().enumerate() {
-            if p > max_p {
-                max_p = p;
-            }
             let w = s.option_weights.get(i).copied().unwrap_or(1.0);
             if p * w > best_weighted {
                 best_weighted = p * w;
@@ -869,13 +980,9 @@ fn compute_bucket_metrics(samples: &[ValidationSample], t: f64, bins: usize) -> 
             }
         }
 
-        let k = probs.len().max(2);
-        let conf = if k > 1 {
-            ((max_p - (1.0 - max_p) / (k as f64 - 1.0)).max(0.0) * 10000.0).round() / 10000.0
-        } else {
-            max_p
-        };
-        confs.push(conf);
+        // Top-label ECE requires the predicted probability of the selected class `best_idx`.
+        let p_win = probs.get(best_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        confs.push(p_win);
         corr.push(best_idx == s.target_index);
 
         let sample_w = s.option_weights.get(s.target_index).copied().unwrap_or(1.0);
@@ -983,6 +1090,42 @@ fn argmax(v: &[f64]) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
+fn record_label_bias_question(
+    fit: &mut LabelBiasFit,
+    qid: &str,
+    labels: &[String],
+    samples: &[(Vec<f64>, usize)],
+) {
+    if samples.is_empty() || labels.is_empty() {
+        return;
+    }
+    let k = labels.len();
+    let n = samples.len() as f64;
+    let bias = fit_bias(samples, k);
+    let zero = vec![0.0; k];
+    let accuracy = |b: &[f64]| {
+        samples
+            .iter()
+            .filter(|(log_p, t)| argmax(&softmax_with_bias(log_p, b)) == *t)
+            .count() as f64
+            / n
+    };
+    fit.questions.insert(
+        qid.to_string(),
+        (samples.len(), accuracy(&zero), accuracy(&bias)),
+    );
+    for (label, b) in labels.iter().zip(&bias) {
+        let key = label.to_lowercase();
+        if fit.weights.contains_key(&key) {
+            eprintln!(
+                "⚠️  Label '{label}' appears in more than one choice question. Its bias comes from the first one."
+            );
+            continue;
+        }
+        fit.weights.insert(key, b.exp());
+    }
+}
+
 /// Fit one log-bias per choice label that maximizes the likelihood of the labelled answers
 /// (vector scaling with a bias term, Guo et al. 2017), with L2 regularization. Zero-shot models
 /// favor some label words regardless of the text, and the bias removes that prior. The result
@@ -1002,6 +1145,20 @@ pub fn fit_label_bias(
         if q.qtype != QuestionType::Choice {
             continue;
         }
+        let option_keys: Vec<String> = q
+            .render_options()
+            .into_iter()
+            .map(|o| o.split(':').next().unwrap_or(&o).trim().to_string())
+            .collect();
+        let bkey = classifier.get_temperature_bucket(q.qtype, option_keys.len().max(2));
+        let temp = classifier
+            .config()
+            .temperature_by_options
+            .get(&bkey)
+            .copied()
+            .unwrap_or(classifier.config().temperature)
+            .clamp(MIN_TEMPERATURE, MAX_TEMPERATURE);
+
         let mut labels: Vec<String> = Vec::new();
         let mut samples: Vec<(Vec<f64>, usize)> = Vec::new();
         for (item, (_, res)) in items.iter().zip(&results) {
@@ -1009,7 +1166,15 @@ pub fn fit_label_bias(
                 continue;
             };
             if labels.is_empty() {
-                labels = ans.probabilities.keys().cloned().collect();
+                labels = if ans
+                    .logits
+                    .as_ref()
+                    .is_some_and(|l| l.len() == option_keys.len())
+                {
+                    option_keys.clone()
+                } else {
+                    ans.probabilities.keys().cloned().collect()
+                };
             }
             let truth = crate::engine::metrics::resolve_ground_truth_for_question(
                 item.ground_truth.as_ref(),
@@ -1023,49 +1188,47 @@ pub fn fit_label_bias(
             else {
                 continue;
             };
-            // Probabilities are rounded to 4 decimals, so floor them before the log.
-            let log_p = labels
-                .iter()
-                .map(|l| {
-                    ans.probabilities
-                        .get(l)
-                        .copied()
-                        .unwrap_or(0.0)
-                        .max(1e-6)
-                        .ln()
-                })
-                .collect();
+            let log_p: Vec<f64> =
+                if let Some(logits) = ans.logits.as_ref().filter(|l| l.len() == labels.len()) {
+                    let scaled: Vec<f64> = logits
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &z)| {
+                            let w = classifier
+                                .config()
+                                .cost_weights
+                                .get(&labels[i].to_lowercase())
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(1e-9);
+                            z / temp + w.ln()
+                        })
+                        .collect();
+                    let max_s = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    let lse = max_s
+                        + scaled
+                            .iter()
+                            .map(|&v| (v - max_s).exp())
+                            .sum::<f64>()
+                            .max(1e-12)
+                            .ln();
+                    scaled.into_iter().map(|v| v - lse).collect()
+                } else {
+                    labels
+                        .iter()
+                        .map(|l| {
+                            ans.probabilities
+                                .get(l)
+                                .copied()
+                                .unwrap_or(0.0)
+                                .max(1e-6)
+                                .ln()
+                        })
+                        .collect()
+                };
             samples.push((log_p, target));
         }
-        if samples.is_empty() {
-            continue;
-        }
-
-        let k = labels.len();
-        let n = samples.len() as f64;
-        let bias = fit_bias(&samples, k);
-        let zero = vec![0.0; k];
-        let accuracy = |b: &[f64]| {
-            samples
-                .iter()
-                .filter(|(log_p, t)| argmax(&softmax_with_bias(log_p, b)) == *t)
-                .count() as f64
-                / n
-        };
-        fit.questions.insert(
-            qid.clone(),
-            (samples.len(), accuracy(&zero), accuracy(&bias)),
-        );
-        for (label, b) in labels.iter().zip(&bias) {
-            let key = label.to_lowercase();
-            if fit.weights.contains_key(&key) {
-                eprintln!(
-                    "⚠️  Label '{label}' appears in more than one choice question. Its bias comes from the first one."
-                );
-                continue;
-            }
-            fit.weights.insert(key, b.exp());
-        }
+        record_label_bias_question(&mut fit, qid, &labels, &samples);
     }
     Ok(fit)
 }
@@ -1118,6 +1281,23 @@ mod tests {
         assert!(ece >= 0.0);
         assert!(nll > 0.0);
         assert!(brier >= 0.0);
+
+        // Perfectly calibrated binary predictions ([0.60, 0.40] with 60% empirical accuracy)
+        // must yield top-label ECE == 0.0 (not 0.40!).
+        let logit_60 = (0.6_f64 / 0.4_f64).ln();
+        let cal_samples: Vec<ValidationSample> = (0..10)
+            .map(|i| ValidationSample {
+                raw_logits: vec![logit_60, 0.0],
+                target_index: if i < 6 { 0 } else { 1 },
+                target_label: if i < 6 { "a".into() } else { "b".into() },
+                option_weights: vec![1.0, 1.0],
+            })
+            .collect();
+        let (cal_ece, _, _) = compute_bucket_metrics(&cal_samples, 1.0, 10);
+        assert!(
+            cal_ece < 1e-9,
+            "Perfectly calibrated 60% binary predictions should have ECE ~ 0.0, got {cal_ece}"
+        );
     }
 
     #[test]

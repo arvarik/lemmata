@@ -704,6 +704,21 @@ impl LayaModel {
                 groups.push(vec![i]);
             }
         }
+        // Avoid a solo 1-option trailing group when the previous group has room to share one option,
+        // so Laya's cross-option self-attention always compares at least two options per round.
+        if groups.len() >= 2 && groups.last().is_some_and(|g| g.len() == 1) {
+            let prev_idx = groups.len() - 2;
+            if groups[prev_idx].len() >= 3
+                && let Some(&moved) = groups[prev_idx].last()
+            {
+                let mut new_last = vec![moved];
+                new_last.extend_from_slice(&groups[prev_idx + 1]);
+                if fits(&new_last) {
+                    groups[prev_idx].pop();
+                    groups[prev_idx + 1] = new_last;
+                }
+            }
+        }
         let round = |group: &[usize]| -> Vec<String> {
             group.iter().map(|&i| req.options[i].clone()).collect()
         };
@@ -720,8 +735,15 @@ impl LayaModel {
             .zip(self.score_fitting(&first.iter().collect::<Vec<_>>())?)
         {
             input_tokens += scored.input_tokens;
+            // Mean-center each round-1 group's logits so cross-group finalist ranking is invariant
+            // to group-size baseline shifts.
+            let mean = if scored.logits.is_empty() {
+                0.0
+            } else {
+                scored.logits.iter().sum::<f64>() / scored.logits.len() as f64
+            };
             for (&i, z) in group.iter().zip(scored.logits) {
-                r1[i] = z;
+                r1[i] = z - mean;
             }
         }
 
@@ -733,7 +755,7 @@ impl LayaModel {
             let mut next = finalists.clone();
             next.push(i);
             if !fits(&next) {
-                break;
+                continue;
             }
             finalists = next;
         }
@@ -1133,7 +1155,9 @@ impl NliModel {
             for z in self.forward_batch(&pairs)? {
                 let (ent, not) = (z[self.entail], z[self.not_entail]);
                 if q.qtype == QuestionType::Noul && !noul_pair {
-                    scores.extend([not, ent]);
+                    // Marginalize all non-entailment classes (`contradiction + neutral` on 3-class
+                    // NLI heads; identical to `not` on 2-class zero-shot heads).
+                    scores.extend([non_entail_lse(&z, self.entail), ent]);
                 } else if req.multi_label {
                     scores.push(ent - not);
                 } else {
@@ -1265,9 +1289,9 @@ impl MlmModel {
         &self,
         context: &[u32],
         question: &[u32],
+        end: &[u32],
         labels: &[Vec<u32>],
     ) -> Result<(Vec<f64>, usize)> {
-        let end = self.encode(".")?;
         let mut scores = vec![0.0; labels.len()];
         let mut tokens = 0;
         // One forward pass per distinct label length, with that many masks.
@@ -1280,7 +1304,7 @@ impl MlmModel {
             ids.extend_from_slice(question);
             let first_mask = ids.len();
             ids.extend(std::iter::repeat_n(self.mask_id, n));
-            ids.extend_from_slice(&end);
+            ids.extend_from_slice(end);
             ids.extend_from_slice(&self.suffix);
             tokens += ids.len();
             let positions: Vec<usize> = (first_mask..first_mask + n).collect();
@@ -1313,16 +1337,26 @@ impl MlmModel {
         let q = req.question;
         let words = Self::label_words(q, req.options);
         let ins = q.instructions.trim();
-        let question = if q.qtype == QuestionType::Noul && ins.ends_with('?') {
-            format!("\nQuestion: {ins}\nAnswer:")
+        let custom_tpl = req
+            .hypothesis_template
+            .or(q.hypothesis_template.as_deref())
+            .filter(|s| !s.trim().is_empty());
+        let (question_str, end_str) = if let Some(tpl) = custom_tpl {
+            split_mlm_template(tpl, ins)
+        } else if q.qtype == QuestionType::Noul && ins.ends_with('?') {
+            (format!("\nQuestion: {ins}\nAnswer:"), ".".to_string())
         } else if q.qtype == QuestionType::Noul {
-            format!("\nStatement: {ins}\nIs the statement true? Answer:")
+            (
+                format!("\nStatement: {ins}\nIs the statement true? Answer:"),
+                ".".to_string(),
+            )
         } else {
             // No options list: with one, the model copies the only option that fits the number of
             // masks (for example the 3-token "Sci/Tech"), whatever the text says.
-            format!("\nQuestion: {ins}\nAnswer:")
+            (format!("\nQuestion: {ins}\nAnswer:"), ".".to_string())
         };
-        let question = self.encode(&question)?;
+        let question = self.encode(&question_str)?;
+        let end = self.encode(&end_str)?;
         let labels = words
             .iter()
             .map(|w| {
@@ -1335,12 +1369,13 @@ impl MlmModel {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let key = format!("{question:?}{labels:?}");
+        let key = format!("{question:?}{end:?}{labels:?}");
         let cached = self.priors.lock().ok().and_then(|p| p.get(&key).cloned());
         let prior = match cached {
             Some(prior) => prior,
             None => {
-                let (prior, _) = self.label_log_probs(&self.encode("N/A")?, &question, &labels)?;
+                let (prior, _) =
+                    self.label_log_probs(&self.encode("N/A")?, &question, &end, &labels)?;
                 if let Ok(mut priors) = self.priors.lock() {
                     priors.insert(key, prior.clone());
                 }
@@ -1349,12 +1384,12 @@ impl MlmModel {
         };
 
         let longest = labels.iter().map(Vec::len).max().unwrap_or(1);
-        let overhead = self.prefix.len() + question.len() + longest + 1 + self.suffix.len();
+        let overhead = self.prefix.len() + question.len() + longest + end.len() + self.suffix.len();
         let state = self.encode(req.state)?;
         let mut input_tokens = 0;
         let mut per_window = Vec::new();
         for window in state_windows(&state, self.max_len.saturating_sub(overhead), req.strategy) {
-            let (lp, tokens) = self.label_log_probs(&window, &question, &labels)?;
+            let (lp, tokens) = self.label_log_probs(&window, &question, &end, &labels)?;
             input_tokens += tokens;
             per_window.push(lp.iter().zip(&prior).map(|(l, p)| l - p).collect());
         }
@@ -1363,6 +1398,54 @@ impl MlmModel {
             input_tokens,
         })
     }
+}
+
+/// Log-sum-exp of all NLI head logits except `entail`.
+///
+/// For 2-class heads (`[not_entail, entail]`), this equals `z[not_entail]` identically.
+/// For 3-class heads (`[contradiction, neutral, entailment]`), `softmax([non_entail_lse, ent])[1]`
+/// equals the exact 3-way `P(entailment)`.
+fn non_entail_lse(z: &[f64], entail: usize) -> f64 {
+    let mut max_other = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    for (idx, &val) in z.iter().enumerate() {
+        if idx != entail {
+            if val > max_other {
+                max_other = val;
+            }
+            count += 1;
+        }
+    }
+    if count == 0 || !max_other.is_finite() {
+        return max_other;
+    }
+    if count == 1 {
+        return max_other;
+    }
+    let sum_exp: f64 = z
+        .iter()
+        .enumerate()
+        .filter(|&(idx, _)| idx != entail)
+        .map(|(_, &val)| (val - max_other).exp())
+        .sum();
+    max_other + sum_exp.ln()
+}
+
+/// Split a custom MLM verbalizer template around `{label}`, `[MASK]`, or `{}` into `(prefix, suffix)`.
+fn split_mlm_template(tpl: &str, instructions: &str) -> (String, String) {
+    let expanded = tpl.replace("{description}", instructions);
+    for marker in ["{label}", "[MASK]", "<mask>", "{}"] {
+        if let Some((before, after)) = expanded.split_once(marker) {
+            let prefix = format!("\n{}", before.trim_end());
+            let suffix = if after.is_empty() {
+                ".".to_string()
+            } else {
+                after.to_string()
+            };
+            return (prefix, suffix);
+        }
+    }
+    (format!("\n{}", expanded.trim_end()), ".".to_string())
 }
 
 fn log_softmax(row: &[f32]) -> Vec<f64> {
@@ -1437,5 +1520,34 @@ mod tests {
         assert_eq!(windows.first().unwrap(), &(0..8).collect::<Vec<_>>());
         assert_eq!(windows.last().unwrap().last(), Some(&19));
         assert!(windows.iter().all(|w| w.len() <= 8));
+    }
+
+    #[test]
+    fn three_class_nli_bare_noul_preserves_neutral_mass() {
+        // [contradiction = -3.0, neutral = 5.0, entailment = -1.0]
+        let z = [-3.0_f64, 5.0, -1.0];
+        let not_ent = non_entail_lse(&z, 2);
+        let ent = z[2];
+        let max_s = not_ent.max(ent);
+        let p_ent = (ent - max_s).exp() / ((not_ent - max_s).exp() + (ent - max_s).exp());
+        let denom_3way = (-3.0_f64).exp() + 5.0_f64.exp() + (-1.0_f64).exp();
+        let exact_p_ent = (-1.0_f64).exp() / denom_3way;
+        assert!((p_ent - exact_p_ent).abs() < 1e-12);
+        assert!(p_ent < 0.01);
+
+        // 2-class head is bit-for-bit identical to z[not_entail]
+        let z2 = [1.25_f64, -0.75];
+        assert_eq!(non_entail_lse(&z2, 1), 1.25);
+    }
+
+    #[test]
+    fn mlm_template_splits_cleanly() {
+        let (p1, s1) = split_mlm_template("This ticket is about {label}!", "Dept");
+        assert_eq!(p1, "\nThis ticket is about");
+        assert_eq!(s1, "!");
+
+        let (p2, s2) = split_mlm_template("Category: [MASK]", "Dept");
+        assert_eq!(p2, "\nCategory:");
+        assert_eq!(s2, ".");
     }
 }

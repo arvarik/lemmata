@@ -136,9 +136,10 @@ jobs:
           subject-path: target/x86_64-unknown-linux-musl/release/lemmata
 
   # crates.io versions cannot be deleted, so publish only after every other job succeeds.
-  # cargo binstall also needs the release archives to exist.
+  # Gated on CARGO_PUBLISH_ENABLED because the `lemmata` name on crates.io is owned by an unrelated project.
   publish-crate:
     name: Publish to crates.io
+    if: vars.CARGO_PUBLISH_ENABLED == 'true'
     needs: [upload-assets, publish-ghcr-package]
     runs-on: ubuntu-latest
     environment: release

@@ -76,7 +76,7 @@ pub use probe::{PROBE_KIND, Probe, choice_labels, fit_probe};
 pub use shortlist::{ShortlistResult, expand_shortlisted_logits, shortlist_options};
 pub use slicing::{
     ArenaSliceRow, SliceBy, SliceMetricEntry, compute_arena_slice_matrix, evaluate_slices,
-    extract_item_slice, print_arena_slice_matrix, print_slice_report,
+    evaluate_slices_with_results, extract_item_slice, print_arena_slice_matrix, print_slice_report,
 };
 pub use stats::{
     AccuracyStats, ConfusedPair, CoveragePoint, LabelStats, PerformanceStats, QuestionStats,

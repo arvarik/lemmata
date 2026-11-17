@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::model::{Checkpoint, Question, QuestionType};
+use crate::model::{Checkpoint, Question, QuestionType, estimate_tokens};
 
 /// Inferred schema report with token budget analysis.
 #[derive(Debug, Clone)]
@@ -138,13 +138,13 @@ impl SchemaSynthesizer {
                 let est_tokens = q
                     .render_options()
                     .iter()
-                    .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                    .map(|o| estimate_tokens(o) + 1)
                     .sum();
                 return (q, est_tokens);
             }
         }
 
-        // 2. Check for ordinal rubric -> Score
+        // 2. Check for ordinal rubric -> Score (0-indexed integer scale 0..=max)
         let all_integers =
             !unique_labels.is_empty() && unique_labels.iter().all(|l| l.parse::<i64>().is_ok());
         if all_integers && unique_labels.len() <= 6 {
@@ -153,15 +153,20 @@ impl SchemaSynthesizer {
                 .filter_map(|l| l.parse::<i64>().ok())
                 .collect();
             int_vals.sort();
-            let levels: Vec<String> = int_vals.into_iter().map(|v| v.to_string()).collect();
-            let instructions = format!("Rate {} on ordinal rubric", target_col.replace('_', " "));
-            let q = Question::new_score(instructions, levels);
-            let est_tokens = q
-                .render_options()
-                .iter()
-                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                .sum();
-            return (q, est_tokens);
+            let min_val = *int_vals.first().unwrap_or(&0);
+            let max_val = *int_vals.last().unwrap_or(&0);
+            if min_val >= 0 && (1..=6).contains(&max_val) {
+                let levels: Vec<String> = (0..=max_val).map(|v| v.to_string()).collect();
+                let instructions =
+                    format!("Rate {} on ordinal rubric", target_col.replace('_', " "));
+                let q = Question::new_score(instructions, levels);
+                let est_tokens = q
+                    .render_options()
+                    .iter()
+                    .map(|o| estimate_tokens(o) + 1)
+                    .sum();
+                return (q, est_tokens);
+            }
         }
 
         // 3. Multi-class Categorical -> Choice with synthesized criteria
@@ -230,7 +235,7 @@ impl SchemaSynthesizer {
             let est_tokens: usize = question
                 .render_options()
                 .iter()
-                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+                .map(|o| estimate_tokens(o) + 1)
                 .sum();
 
             if est_tokens <= head_budget {
@@ -243,7 +248,7 @@ impl SchemaSynthesizer {
                 let mut max_words = 0;
                 for (k, v) in map.iter() {
                     if let Some(s) = v.as_str() {
-                        let cnt = s.split_whitespace().count();
+                        let cnt = estimate_tokens(s);
                         if cnt > max_words && cnt > 1 {
                             max_words = cnt;
                             longest_key = Some(k.clone());
@@ -271,7 +276,7 @@ impl SchemaSynthesizer {
         let final_tokens = question
             .render_options()
             .iter()
-            .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
+            .map(|o| estimate_tokens(o) + 1)
             .sum();
 
         (question, final_tokens)
@@ -280,41 +285,127 @@ impl SchemaSynthesizer {
     fn read_csv_rows(&self, path: &Path) -> Result<Vec<BTreeMap<String, String>>> {
         let file = File::open(path)?;
         let mut rdr = csv::Reader::from_reader(file);
-        let headers = rdr.headers()?.clone();
+        let headers: Vec<String> = rdr
+            .headers()?
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                if i == 0 {
+                    h.trim_start_matches('\u{feff}').trim().to_string()
+                } else {
+                    h.trim().to_string()
+                }
+            })
+            .collect();
 
         let mut rows = Vec::new();
         for res in rdr.records() {
             let record = res?;
             let mut map = BTreeMap::new();
             for (h, val) in headers.iter().zip(record.iter()) {
-                map.insert(h.trim().to_string(), val.trim().to_string());
+                map.insert(h.clone(), val.trim().to_string());
             }
             rows.push(map);
         }
         Ok(rows)
     }
 
+    fn flatten_json_object(
+        mut map: serde_json::Map<String, serde_json::Value>,
+    ) -> BTreeMap<String, String> {
+        let mut row = BTreeMap::new();
+        let val_to_string = |v: serde_json::Value| match v {
+            serde_json::Value::String(text) => text,
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+
+        // Unwrap canonical DataItem envelopes (`state` + `ground_truth`) if present
+        let has_envelope = map.contains_key("state") || map.contains_key("ground_truth");
+        if has_envelope {
+            if let Some(id_val) = map.remove("id") {
+                row.insert("id".to_string(), val_to_string(id_val));
+            }
+            if let Some(st) = map.remove("state") {
+                match st {
+                    serde_json::Value::String(s) => {
+                        row.insert("text".to_string(), s);
+                    }
+                    serde_json::Value::Object(st_map) => {
+                        for (k, v) in st_map {
+                            row.insert(k, val_to_string(v));
+                        }
+                    }
+                    other => {
+                        row.insert("text".to_string(), val_to_string(other));
+                    }
+                }
+            }
+            if let Some(serde_json::Value::Object(gt_map)) = map.remove("ground_truth") {
+                for (k, v) in gt_map {
+                    row.insert(k, val_to_string(v));
+                }
+            }
+            map.remove("source_uri");
+            map.remove("metadata");
+        }
+
+        for (k, v) in map {
+            row.entry(k).or_insert_with(|| val_to_string(v));
+        }
+        row
+    }
+
     fn read_json_rows(&self, path: &Path) -> Result<Vec<BTreeMap<String, String>>> {
+        let content = std::fs::read_to_string(path)?;
+        let trimmed_full = content.trim();
+        if trimmed_full.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // First try standard JSON array or single JSON object (for `.json` files or pretty JSON)
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed_full) {
+            match parsed {
+                serde_json::Value::Array(arr) => {
+                    let mut rows = Vec::with_capacity(arr.len());
+                    for item in arr {
+                        if let serde_json::Value::Object(map) = item {
+                            rows.push(Self::flatten_json_object(map));
+                        }
+                    }
+                    return Ok(rows);
+                }
+                serde_json::Value::Object(map) => {
+                    return Ok(vec![Self::flatten_json_object(map)]);
+                }
+                _ => {}
+            }
+        }
+
+        // Otherwise parse as line-delimited JSONL
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut rows = Vec::new();
 
-        for line_res in reader.lines() {
+        for (idx, line_res) in reader.lines().enumerate() {
             let line = line_res?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(trimmed) {
-                let mut row = BTreeMap::new();
-                for (k, v) in map {
-                    let s = match v {
-                        serde_json::Value::String(text) => text,
-                        other => other.to_string(),
-                    };
-                    row.insert(k, s);
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(serde_json::Value::Object(map)) => {
+                    rows.push(Self::flatten_json_object(map));
                 }
-                rows.push(row);
+                Ok(_) => {}
+                Err(err) => {
+                    bail!(
+                        "Invalid JSON on line {} of {}: {}",
+                        idx + 1,
+                        path.display(),
+                        err
+                    );
+                }
             }
         }
         Ok(rows)
@@ -437,10 +528,7 @@ impl SchemaKnapsackOptimizer {
 
         for (qid, q) in &mut optimized_schema {
             let options = q.render_options();
-            let est_tokens: usize = options
-                .iter()
-                .map(|o| o.split_whitespace().count() * 4 / 3 + 1)
-                .sum();
+            let est_tokens: usize = options.iter().map(|o| estimate_tokens(o) + 1).sum();
             total_original += est_tokens;
 
             if est_tokens <= head_budget {
@@ -483,10 +571,7 @@ impl SchemaKnapsackOptimizer {
     ) -> (Option<serde_json::Value>, usize, usize) {
         let k = map.len().max(1);
         // Reserve token budget for label names and delimiters
-        let label_overhead: usize = map
-            .keys()
-            .map(|k| k.split_whitespace().count() * 4 / 3 + 2)
-            .sum();
+        let label_overhead: usize = map.keys().map(|k| estimate_tokens(k) + 2).sum();
         let avail_budget = budget.saturating_sub(label_overhead + 8).max(k * 2);
 
         // Target token budget per option
@@ -513,7 +598,7 @@ impl SchemaKnapsackOptimizer {
                 let mut scored_clauses: Vec<(&str, usize, usize)> = Vec::new();
                 for clause in &clauses {
                     let words = extract_keywords(clause);
-                    let weight = clause.split_whitespace().count() * 4 / 3 + 1;
+                    let weight = estimate_tokens(clause) + 1;
                     let score = words.len();
                     scored_clauses.push((clause, weight, score));
                 }
@@ -568,7 +653,7 @@ impl SchemaKnapsackOptimizer {
             .iter()
             .map(|(k, v)| {
                 let d = v.as_str().unwrap_or("");
-                format!("{k}: {d}").split_whitespace().count() * 4 / 3 + 1
+                estimate_tokens(&format!("{k}: {d}")) + 1
             })
             .sum();
 

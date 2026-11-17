@@ -21,6 +21,7 @@ pub struct ScrapeOptions {
     pub user_agent: String,
     pub timeout_secs: u64,
     pub max_chars: usize,
+    pub offline: bool,
 }
 
 impl Default for ScrapeOptions {
@@ -29,7 +30,17 @@ impl Default for ScrapeOptions {
             user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 (compatible; LemmataBot/0.1; +https://github.com/arvarik/lemmata)".to_string(),
             timeout_secs: 15,
             max_chars: 4000,
+            offline: std::env::var("LEMMATA_OFFLINE")
+                .map(|v| v == "1")
+                .unwrap_or(false),
         }
+    }
+}
+
+impl ScrapeOptions {
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
     }
 }
 
@@ -388,12 +399,19 @@ pub(crate) fn curl_fetch(url: &str, headers: &[(&str, &str)], timeout_secs: u64)
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 0..=RETRIES {
         let mut cmd = Command::new("curl");
-        cmd.args(["-sSL", "--max-time", &timeout_secs.to_string()]);
+        cmd.args([
+            "-sSL",
+            "--proto-redir",
+            "=http,https",
+            "--max-time",
+            &timeout_secs.to_string(),
+        ]);
         // Append the status code on its own last line.
         cmd.args(["-w", "\n%{http_code}"]);
         for (k, v) in headers {
             cmd.args(["-H", &format!("{}: {}", k, v)]);
         }
+        cmd.arg("--");
         cmd.arg(url);
 
         let output = cmd
@@ -440,34 +458,41 @@ impl WebScraper {
     }
 
     pub fn scrape(&self, url: &str) -> Result<ExtractedDocument> {
-        // If offline mode is enabled via environment, check fixture
-        if std::env::var("LEMMATA_OFFLINE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        // If offline mode is enabled via options or environment, check fixture
+        let is_offline = self.options.offline
+            || std::env::var("LEMMATA_OFFLINE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        let raw_html = if is_offline {
             let fixture_path = std::path::Path::new("tests/fixtures/sample_article.html");
             if fixture_path.exists() {
-                let html = std::fs::read_to_string(fixture_path)?;
-                return Ok(HtmlExtractor::extract(&html, url));
+                std::fs::read_to_string(fixture_path)?
+            } else {
+                bail!(
+                    "Offline web mode enabled, but fixture {:?} does not exist",
+                    fixture_path
+                );
             }
-        }
+        } else {
+            // Fetch raw HTML via system curl (zero dependencies)
+            let headers = [
+                ("User-Agent", self.options.user_agent.as_str()),
+                (
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+                ("Accept-Language", "en-US,en;q=0.9"),
+            ];
+            curl_fetch(url, &headers, self.options.timeout_secs)?
+        };
 
-        // Fetch raw HTML via system curl (zero dependencies)
-        let headers = [
-            ("User-Agent", self.options.user_agent.as_str()),
-            (
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            ),
-            ("Accept-Language", "en-US,en;q=0.9"),
-        ];
-        let raw_html = curl_fetch(url, &headers, self.options.timeout_secs)?;
         let mut doc = HtmlExtractor::extract(&raw_html, url);
 
-        // Truncate safely on unicode character boundary
+        // Truncate safely on unicode character boundary and keep word_count in sync
         let char_count = doc.markdown.chars().count();
         if char_count > self.options.max_chars {
             doc.markdown = doc.markdown.chars().take(self.options.max_chars).collect();
+            doc.word_count = doc.markdown.split_whitespace().count();
         }
 
         Ok(doc)
@@ -497,6 +522,18 @@ impl DataSource for WebSource {
     fn read_items(&self) -> Result<Vec<DataItem>> {
         use rayon::prelude::*;
 
+        if self.urls.len() == 1 {
+            let url = &self.urls[0];
+            let doc = self.scraper.scrape(url)?;
+            let state = serde_json::json!({
+                "title": doc.title,
+                "text": doc.markdown,
+                "url": doc.url,
+                "words": doc.word_count,
+            });
+            return Ok(vec![DataItem::new(url.clone(), state, url.clone())]);
+        }
+
         let items: Vec<DataItem> = self
             .urls
             .par_iter()
@@ -516,6 +553,10 @@ impl DataSource for WebSource {
                 }
             })
             .collect();
+
+        if !self.urls.is_empty() && items.is_empty() {
+            bail!("Failed to scrape all {} provided URLs", self.urls.len());
+        }
 
         Ok(items)
     }

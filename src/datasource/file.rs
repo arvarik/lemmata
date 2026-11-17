@@ -120,10 +120,33 @@ impl FileSource {
         Ok(items)
     }
 
+    fn strip_gt_prefix(raw_key: &str) -> Option<&str> {
+        for prefix in ["gt_", "gt:", "label_", "label:", "target_", "target:"] {
+            if raw_key.len() > prefix.len()
+                && raw_key.is_char_boundary(prefix.len())
+                && raw_key[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                return Some(&raw_key[prefix.len()..]);
+            }
+        }
+        None
+    }
+
     fn parse_csv(path: &Path) -> Result<Vec<DataItem>> {
         let file = File::open(path)?;
         let mut rdr = csv::Reader::from_reader(file);
-        let headers = rdr.headers()?.clone();
+        let raw_headers = rdr.headers()?.clone();
+        let headers: Vec<String> = raw_headers
+            .iter()
+            .enumerate()
+            .map(|(idx, h)| {
+                if idx == 0 {
+                    h.trim_start_matches('\u{feff}').trim().to_string()
+                } else {
+                    h.trim().to_string()
+                }
+            })
+            .collect();
         let path_str = path.display().to_string();
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("item");
 
@@ -135,7 +158,7 @@ impl FileSource {
             let mut id = format!("{stem}:{idx}");
 
             for (header, val) in headers.iter().zip(record.iter()) {
-                let header_lower = header.to_lowercase();
+                let header_lower = header.to_ascii_lowercase();
                 if header_lower == "id" || header_lower == "item_id" {
                     id = val.to_string();
                 } else if header_lower == "target"
@@ -146,20 +169,10 @@ impl FileSource {
                         "default".to_string(),
                         serde_json::Value::String(val.to_string()),
                     );
-                } else if let Some(key) = header_lower
-                    .strip_prefix("gt_")
-                    .or_else(|| header_lower.strip_prefix("gt:"))
-                    .or_else(|| header_lower.strip_prefix("label_"))
-                    .or_else(|| header_lower.strip_prefix("label:"))
-                    .or_else(|| header_lower.strip_prefix("target_"))
-                    .or_else(|| header_lower.strip_prefix("target:"))
-                {
+                } else if let Some(key) = Self::strip_gt_prefix(header) {
                     gt.insert(key.to_string(), serde_json::Value::String(val.to_string()));
                 } else {
-                    map.insert(
-                        header.to_string(),
-                        serde_json::Value::String(val.to_string()),
-                    );
+                    map.insert(header.clone(), serde_json::Value::String(val.to_string()));
                 }
             }
 
@@ -198,59 +211,76 @@ impl FileSource {
             serde_json::Value::Object(mut map) => {
                 let id = map
                     .remove("id")
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
                     .unwrap_or(default_id);
 
                 let gt = map
                     .remove("ground_truth")
                     .or_else(|| map.remove("target"))
                     .or_else(|| map.remove("label"))
-                    .and_then(|v| {
-                        if let serde_json::Value::Object(obj) = v {
+                    .and_then(|v| match v {
+                        serde_json::Value::Object(obj) => {
                             Some(obj.into_iter().collect::<BTreeMap<_, _>>())
-                        } else if let serde_json::Value::String(s) = v {
-                            let mut m = BTreeMap::new();
-                            m.insert("default".to_string(), serde_json::Value::String(s));
-                            Some(m)
-                        } else if let serde_json::Value::Number(_) | serde_json::Value::Bool(_) = v
-                        {
+                        }
+                        serde_json::Value::String(_)
+                        | serde_json::Value::Number(_)
+                        | serde_json::Value::Bool(_)
+                        | serde_json::Value::Array(_) => {
                             let mut m = BTreeMap::new();
                             m.insert("default".to_string(), v);
                             Some(m)
-                        } else {
-                            None
                         }
+                        serde_json::Value::Null => None,
                     });
 
                 let mut prefixed_gt = BTreeMap::new();
                 for key in map.keys().cloned().collect::<Vec<_>>() {
-                    let key_lower = key.to_ascii_lowercase();
-                    if let Some(qid) = key_lower
-                        .strip_prefix("gt_")
-                        .or_else(|| key_lower.strip_prefix("gt:"))
-                        .or_else(|| key_lower.strip_prefix("label_"))
-                        .or_else(|| key_lower.strip_prefix("label:"))
-                        .or_else(|| key_lower.strip_prefix("target_"))
-                        .or_else(|| key_lower.strip_prefix("target:"))
-                        && let Some(val) = map.remove(&key)
-                    {
-                        prefixed_gt.insert(qid.to_string(), val);
+                    if let Some(qid) = Self::strip_gt_prefix(&key) {
+                        let qid_owned = qid.to_string();
+                        if let Some(val) = map.remove(&key) {
+                            prefixed_gt.insert(qid_owned, val);
+                        }
                     }
                 }
 
                 let mut final_gt = gt.unwrap_or_default();
                 final_gt.extend(prefixed_gt);
 
-                // If "state" is explicitly provided as a field, use that; otherwise use the whole object
-                let state = if let Some(st) = map.remove("state") {
-                    st
+                // If "state" is explicitly provided, treat this object as a canonical DataItem envelope
+                // and preserve any sibling "metadata" / "source_uri" fields cleanly.
+                let (state, metadata, resolved_source) = if let Some(st) = map.remove("state") {
+                    let meta = map
+                        .remove("metadata")
+                        .and_then(|v| match v {
+                            serde_json::Value::Object(obj) => {
+                                Some(obj.into_iter().collect::<BTreeMap<_, _>>())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let src = map
+                        .remove("source_uri")
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_else(|| source_uri.to_string());
+                    (st, meta, src)
                 } else {
-                    serde_json::Value::Object(map)
+                    (
+                        serde_json::Value::Object(map),
+                        BTreeMap::new(),
+                        source_uri.to_string(),
+                    )
                 };
 
-                let mut item = DataItem::new(id, state, source_uri);
+                let mut item = DataItem::new(id, state, resolved_source);
                 if !final_gt.is_empty() {
                     item = item.with_ground_truth(final_gt);
+                }
+                if !metadata.is_empty() {
+                    item = item.with_metadata(metadata);
                 }
                 item
             }
@@ -332,16 +362,43 @@ mod tests {
                 .unwrap()
         );
 
-        // Multi-task prefixed labels
+        // Multi-task prefixed labels (including mixed-case keys, numeric IDs, array labels, and DataItem metadata)
         let val_multi = serde_json::json!({
             "id": "item4",
             "text": "multi query",
             "gt_dept": "support",
-            "label_urgency": 4
+            "label_urgency": 4,
+            "GT_ticketType": "incident"
         });
         let item_multi = FileSource::json_value_to_item("default".into(), val_multi, "test");
-        let gt = item_multi.ground_truth.unwrap();
+        let gt = item_multi.ground_truth.as_ref().unwrap();
         assert_eq!(gt.get("dept").unwrap().as_str().unwrap(), "support");
         assert_eq!(gt.get("urgency").unwrap().as_u64().unwrap(), 4);
+        assert_eq!(gt.get("ticketType").unwrap().as_str().unwrap(), "incident");
+        assert_eq!(item_multi.state_text(), "multi query");
+
+        // Numeric ID + multi-label array ground truth
+        let val_arr = serde_json::json!({
+            "id": 42,
+            "text": "refund and urgent outage",
+            "label": ["billing", "urgent"]
+        });
+        let item_arr = FileSource::json_value_to_item("default".into(), val_arr, "test");
+        assert_eq!(item_arr.id, "42");
+        assert_eq!(
+            item_arr.ground_truth.unwrap()["default"],
+            serde_json::json!(["billing", "urgent"])
+        );
+
+        // Canonical DataItem envelope round-trip preserves metadata without leaking into state
+        let mut meta = BTreeMap::new();
+        meta.insert("tenant".to_string(), serde_json::json!("acme"));
+        let orig = DataItem::new("id_meta", serde_json::json!("clean text"), "src.jsonl")
+            .with_metadata(meta);
+        let serialized = serde_json::to_value(&orig).unwrap();
+        let restored = FileSource::json_value_to_item("fallback".into(), serialized, "other");
+        assert_eq!(restored.id, "id_meta");
+        assert_eq!(restored.state_text(), "clean text");
+        assert_eq!(restored.metadata["tenant"], serde_json::json!("acme"));
     }
 }

@@ -60,6 +60,9 @@ impl BenchmarkRunner {
         if questions.is_empty() {
             bail!("No questions provided for benchmark");
         }
+        if iterations == 0 {
+            bail!("Benchmark iterations must be at least 1");
+        }
 
         if !self.silent {
             println!(
@@ -71,10 +74,18 @@ impl BenchmarkRunner {
             );
         }
 
-        // Warmup runs
+        // Preload native weights outside the timed loop even when warmup_runs == 0, and surface
+        // any classification configuration/weight error immediately.
+        let ckpt = self.classifier.config().checkpoint;
+        if ckpt != crate::model::Checkpoint::AutoRoute {
+            let dir = ckpt.local_dir();
+            if crate::model::native::uses_native(ckpt, &dir) {
+                crate::model::native::shared(ckpt, &dir)?;
+            }
+        }
         for _ in 0..self.warmup_runs {
             for item in items.iter().take(5) {
-                let _ = self.classifier.classify(&item.state, questions);
+                self.classifier.classify(&item.state, questions)?;
             }
         }
 

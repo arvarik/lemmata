@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{Question, QuestionType};
+use crate::model::{DecisionAnswer, Question, QuestionType};
 
 /// Comprehensive statistical metrics for evaluating Laya System 1 decision models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +102,104 @@ pub fn calculate_brier_score(probabilities: &[Vec<f64>], targets: &[usize]) -> f
     sum_squared_errors / probabilities.len() as f64
 }
 
+/// Winning predicted probability for top-label calibration (ECE).
+///
+/// Uses the predicted option probability (`p_win` for `Choice`, accounting for `cost_weights`;
+/// `max(p, 1 - p)` for `Noul`; and the probability of the rounded ordinal level for `Score`)
+/// rather than heuristic negentropy/chance-adjusted confidence.
+pub fn winning_probability(answer: &DecisionAnswer) -> f64 {
+    match answer.qtype {
+        QuestionType::Choice => {
+            if let Some(choice) = answer.choice.as_deref()
+                && let Some(p) = answer.probabilities.get(choice).copied().or_else(|| {
+                    answer
+                        .probabilities
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(choice))
+                        .map(|(_, &v)| v)
+                })
+            {
+                return p.clamp(0.0, 1.0);
+            }
+            answer
+                .probabilities
+                .values()
+                .copied()
+                .fold(0.0, f64::max)
+                .clamp(0.0, 1.0)
+        }
+        QuestionType::Noul => {
+            let p = answer.noul.unwrap_or(0.5);
+            p.max(1.0 - p).clamp(0.0, 1.0)
+        }
+        QuestionType::Score => {
+            if let Some(s) = answer.score {
+                let rounded_key = format!("{}", s.round() as i64);
+                if let Some(&p) = answer.probabilities.get(&rounded_key) {
+                    return p.clamp(0.0, 1.0);
+                }
+            }
+            answer
+                .probabilities
+                .values()
+                .copied()
+                .fold(0.0, f64::max)
+                .clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Parse boolean / numeric / string ground-truth values for `Noul` questions consistently.
+pub fn parse_noul_ground_truth(val: &serde_json::Value) -> Option<bool> {
+    if let Some(b) = val.as_bool() {
+        return Some(b);
+    }
+    if let Some(s) = val.as_str() {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("true")
+            || trimmed.eq_ignore_ascii_case("yes")
+            || trimmed.eq_ignore_ascii_case("t")
+            || trimmed == "1"
+        {
+            return Some(true);
+        }
+        if trimmed.eq_ignore_ascii_case("false")
+            || trimmed.eq_ignore_ascii_case("no")
+            || trimmed.eq_ignore_ascii_case("f")
+            || trimmed == "0"
+        {
+            return Some(false);
+        }
+    }
+    if let Some(n) = val.as_i64() {
+        return Some(n != 0);
+    }
+    if let Some(n) = val.as_u64() {
+        return Some(n != 0);
+    }
+    if let Some(n) = val.as_f64() {
+        return Some(n != 0.0);
+    }
+    None
+}
+
+/// Extract normalized, sorted, deduplicated lowercase label strings when `val` is a JSON array.
+pub fn extract_multi_label_targets(val: &serde_json::Value) -> Option<Vec<String>> {
+    let arr = val.as_array()?;
+    let mut out: Vec<String> = arr
+        .iter()
+        .filter_map(|v| match v {
+            serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_lowercase()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
 /// Resolves the ground-truth value for a specific question from the item's ground-truth map.
 /// If an exact key exists (e.g. "department"), it is returned.
 /// If only a "default" key exists (e.g. from a single-column CSV "target"):
@@ -124,19 +222,22 @@ pub fn resolve_ground_truth_for_question<'a>(
     }
     match question.qtype {
         QuestionType::Choice => {
-            let target_str = match default_val {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => return None,
-            };
             let options = question.render_options();
-            let matches_option = options.iter().any(|opt| {
-                let opt_key = opt.split(':').next().unwrap_or(opt).trim();
-                opt_key.eq_ignore_ascii_case(target_str) || opt.eq_ignore_ascii_case(target_str)
-            });
-            if matches_option {
-                Some(default_val)
-            } else {
-                None
+            let option_matches = |target_str: &str| {
+                options.iter().any(|opt| {
+                    let opt_key = opt.split(':').next().unwrap_or(opt).trim();
+                    opt_key.eq_ignore_ascii_case(target_str) || opt.eq_ignore_ascii_case(target_str)
+                })
+            };
+            match default_val {
+                serde_json::Value::String(s) if option_matches(s) => Some(default_val),
+                serde_json::Value::Array(arr)
+                    if !arr.is_empty()
+                        && arr.iter().all(|v| v.as_str().is_some_and(option_matches)) =>
+                {
+                    Some(default_val)
+                }
+                _ => None,
             }
         }
         QuestionType::Score => {
@@ -152,23 +253,7 @@ pub fn resolve_ground_truth_for_question<'a>(
                 None
             }
         }
-        QuestionType::Noul => {
-            if default_val.is_boolean() {
-                Some(default_val)
-            } else if let Some(s) = default_val.as_str() {
-                if s.eq_ignore_ascii_case("true")
-                    || s.eq_ignore_ascii_case("false")
-                    || s == "1"
-                    || s == "0"
-                {
-                    Some(default_val)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
+        QuestionType::Noul => parse_noul_ground_truth(default_val).map(|_| default_val),
     }
 }
 

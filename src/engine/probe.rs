@@ -66,7 +66,62 @@ impl Probe {
                 probe.kind
             );
         }
+        probe.validate_dimensions(path)?;
         Ok(probe)
+    }
+
+    fn validate_dimensions(&self, path: &Path) -> Result<()> {
+        let p = path.display();
+        if self.labels.is_empty() {
+            bail!("Probe {p} has no labels");
+        }
+        if self.mean.is_empty() || self.mean.len() != self.std.len() {
+            bail!(
+                "Probe {p} has mismatched standardization vectors (mean={}, std={})",
+                self.mean.len(),
+                self.std.len()
+            );
+        }
+        if self.bias.len() != self.labels.len() {
+            bail!(
+                "Probe {p} bias length ({}) does not match label count ({})",
+                self.bias.len(),
+                self.labels.len()
+            );
+        }
+        let expected_weights = self
+            .labels
+            .len()
+            .checked_mul(self.mean.len())
+            .ok_or_else(|| anyhow::anyhow!("Probe {p} weight matrix dimensions overflow"))?;
+        if self.weights.len() != expected_weights {
+            bail!(
+                "Probe {p} weight count ({}) does not match labels * dim ({} * {} = {})",
+                self.weights.len(),
+                self.labels.len(),
+                self.mean.len(),
+                expected_weights
+            );
+        }
+        if self.residual && self.stacked {
+            bail!("Probe {p} cannot be both residual and stacked simultaneously");
+        }
+        if self.stacked && self.mean.len() <= self.labels.len() {
+            bail!(
+                "Stacked probe {p} feature dimension ({}) must exceed label count ({})",
+                self.mean.len(),
+                self.labels.len()
+            );
+        }
+        if self.std.iter().any(|s| !s.is_finite() || *s <= 0.0)
+            || self.mean.iter().any(|v| !v.is_finite())
+            || self.weights.iter().any(|v| !v.is_finite())
+            || self.bias.iter().any(|v| !v.is_finite())
+            || !self.l2.is_finite()
+        {
+            bail!("Probe {p} contains non-finite or non-positive parameters");
+        }
+        Ok(())
     }
 
     /// Whether scoring needs the checkpoint's zero-shot logits.
@@ -149,9 +204,7 @@ pub fn fit_probe(
     let model = crate::model::native::shared(ckpt, &ckpt.local_dir())?;
     let questions = BTreeMap::from([(qid.to_string(), q.clone())]);
 
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    let mut kept = Vec::new();
+    let mut matched: Vec<(&DataItem, usize)> = Vec::new();
     for item in items {
         let truth = crate::engine::metrics::resolve_ground_truth_for_question(
             item.ground_truth.as_ref(),
@@ -161,33 +214,37 @@ pub fn fit_probe(
         )
         .and_then(|v| v.as_str().map(str::to_lowercase))
         .and_then(|t| index.get(&t).copied());
-        let Some(y) = truth else { continue };
-        let text = match &item.state {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string(other)?,
-        };
-        xs.push(model.embed(&text, strategy)?);
-        ys.push(y);
-        kept.push(item);
+        if let Some(y) = truth {
+            matched.push((item, y));
+        }
     }
-    if xs.len() < 10 {
+    if matched.len() < 10 {
         bail!(
             "'{qid}' has {} labelled items that match its labels. A probe needs at least 10.",
-            xs.len()
+            matched.len()
         );
     }
+
+    let ys: Vec<usize> = matched.iter().map(|&(_, y)| y).collect();
+    let kept_items: Vec<DataItem> = matched.iter().map(|&(it, _)| it.clone()).collect();
+    let xs: Vec<Vec<f32>> = crate::model::native::map_items(&kept_items, |item| {
+        let text = item.state_text();
+        model.embed(&text, strategy)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
     // Zero-shot logits for every item: the residual probe's base, and the baseline to beat.
     let zero_shot =
         crate::engine::LayaClassifier::with_checkpoint(ckpt).with_chunk_strategy(strategy);
-    let mut zs_logits = Vec::with_capacity(kept.len());
-    let mut zs_hit = Vec::with_capacity(kept.len());
-    for (item, &y) in kept.iter().zip(&ys) {
-        let ans = zero_shot
-            .classify(&item.state, &questions)?
+    let zs_batch = zero_shot.classify_batch(&kept_items, &questions)?;
+    let mut zs_logits = Vec::with_capacity(kept_items.len());
+    let mut zs_hit = Vec::with_capacity(kept_items.len());
+    for ((_, mut res), &y) in zs_batch.into_iter().zip(&ys) {
+        let ans = res
             .answers
-            .remove(qid);
-        let ans = ans.ok_or_else(|| anyhow::anyhow!("no zero-shot answer for '{qid}'"))?;
+            .remove(qid)
+            .ok_or_else(|| anyhow::anyhow!("no zero-shot answer for '{qid}'"))?;
         zs_hit.push(ans.choice.as_deref().map(str::to_lowercase) == Some(labels[y].to_lowercase()));
         zs_logits.push(
             ans.logits
@@ -225,7 +282,7 @@ pub fn fit_probe(
     .expect("three candidates");
 
     let n = ys.len();
-    let valid: Vec<usize> = (0..n).filter(|i| i % 5 == 4).collect();
+    let (_, valid) = stratified_train_valid_split(&ys, k);
     let zs_correct = valid.iter().filter(|&&i| zs_hit[i]).count();
     Ok(Probe {
         kind: PROBE_KIND.to_string(),
@@ -254,7 +311,81 @@ struct FeatureFit {
     validation_accuracy: f64,
 }
 
-/// Standardize `xs`, choose L2 on every fifth item, then refit on all items with that L2.
+/// Deterministic per-class stratified 80/20 split so class-sorted or round-robin datasets
+/// never starve `train` or `valid` of an entire class.
+fn stratified_train_valid_split(ys: &[usize], k: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut by_class: Vec<Vec<usize>> = vec![Vec::new(); k.max(1)];
+    for (idx, &y) in ys.iter().enumerate() {
+        if let Some(bucket) = by_class.get_mut(y) {
+            bucket.push(idx);
+        }
+    }
+    let mut is_valid = vec![false; ys.len()];
+    for indices in &by_class {
+        let m = indices.len();
+        if m >= 5 {
+            for (pos, &idx) in indices.iter().enumerate() {
+                if pos % 5 == 4 {
+                    is_valid[idx] = true;
+                }
+            }
+        } else if m >= 2 {
+            is_valid[indices[m - 1]] = true;
+        }
+    }
+    // Fallback if every class was a singleton (e.g. extreme K with 1 example per class).
+    if !is_valid.iter().any(|&v| v) && ys.len() >= 5 {
+        for (i, flag) in is_valid.iter_mut().enumerate() {
+            if i % 5 == 4 {
+                *flag = true;
+            }
+        }
+    }
+    let mut train = Vec::new();
+    let mut valid = Vec::new();
+    for (i, &v) in is_valid.iter().enumerate() {
+        if v {
+            valid.push(i);
+        } else {
+            train.push(i);
+        }
+    }
+    (train, valid)
+}
+
+fn compute_standardization(xs: &[Vec<f32>], subset: &[usize]) -> (Vec<f32>, Vec<f32>) {
+    let d = xs[0].len();
+    let denom = subset.len().max(1) as f32;
+    let mut mean = vec![0f32; d];
+    for &idx in subset {
+        for (m, v) in mean.iter_mut().zip(&xs[idx]) {
+            *m += v / denom;
+        }
+    }
+    let mut var = vec![0f32; d];
+    for &idx in subset {
+        for ((s, v), m) in var.iter_mut().zip(&xs[idx]).zip(&mean) {
+            *s += (v - m).powi(2) / denom;
+        }
+    }
+    let std: Vec<f32> = var.into_iter().map(|v| v.sqrt() + 1e-6).collect();
+    (mean, std)
+}
+
+fn standardize_rows(xs: &[Vec<f32>], mean: &[f32], std: &[f32]) -> Vec<Vec<f32>> {
+    xs.iter()
+        .map(|x| {
+            x.iter()
+                .zip(mean)
+                .zip(std)
+                .map(|((v, m), s)| (v - m) / s)
+                .collect()
+        })
+        .collect()
+}
+
+/// Standardize `xs` on `train` only when selecting L2 on the stratified held-out fifth, then
+/// recompute standardization and refit on all items with that L2.
 /// `base` holds per-item logits that the model's output is added to (a residual probe).
 fn fit_features(
     xs: &[Vec<f32>],
@@ -264,34 +395,13 @@ fn fit_features(
 ) -> Result<FeatureFit> {
     let d = xs[0].len();
     let n = xs.len();
-    let mut mean = vec![0f32; d];
-    for x in xs {
-        for (m, v) in mean.iter_mut().zip(x) {
-            *m += v / n as f32;
-        }
-    }
-    let mut std = vec![0f32; d];
-    for x in xs {
-        for ((s, v), m) in std.iter_mut().zip(x).zip(&mean) {
-            *s += (v - m).powi(2) / n as f32;
-        }
-    }
-    let std: Vec<f32> = std.into_iter().map(|v| v.sqrt() + 1e-6).collect();
-    let rows: Vec<Vec<f32>> = xs
-        .iter()
-        .map(|x| {
-            x.iter()
-                .zip(&mean)
-                .zip(&std)
-                .map(|((v, m), s)| (v - m) / s)
-                .collect()
-        })
-        .collect();
+    let (train, valid) = stratified_train_valid_split(ys, k);
+    let (cv_mean, cv_std) = compute_standardization(xs, &train);
+    let cv_rows = standardize_rows(xs, &cv_mean, &cv_std);
 
-    let (train, valid): (Vec<usize>, Vec<usize>) = (0..n).partition(|i| i % 5 != 4);
     let mut best = (f64::NEG_INFINITY, L2_GRID[0]);
     let score = |w: &[f32], b: &[f32], i: usize| -> Vec<f32> {
-        let mut z = linear(w, b, &rows[i], d);
+        let mut z = linear(w, b, &cv_rows[i], d);
         if let Some(base) = base {
             for (zj, bj) in z.iter_mut().zip(&base[i]) {
                 *zj += bj;
@@ -300,7 +410,7 @@ fn fit_features(
         z
     };
     for l2 in L2_GRID {
-        let (w, b) = softmax_regression(&rows, ys, &train, k, l2, base)?;
+        let (w, b) = softmax_regression(&cv_rows, ys, &train, k, l2, base)?;
         let correct = valid
             .iter()
             .filter(|&&i| argmax(&score(&w, &b, i)) == ys[i])
@@ -312,7 +422,9 @@ fn fit_features(
         }
     }
     let all: Vec<usize> = (0..n).collect();
-    let (weights, bias) = softmax_regression(&rows, ys, &all, k, best.1, base)?;
+    let (mean, std) = compute_standardization(xs, &all);
+    let full_rows = standardize_rows(xs, &mean, &std);
+    let (weights, bias) = softmax_regression(&full_rows, ys, &all, k, best.1, base)?;
     Ok(FeatureFit {
         mean,
         std,
@@ -464,5 +576,49 @@ mod tests {
             .collect();
         let fit = fit_features(&xs, &ys, 3, Some(&base)).unwrap();
         assert_eq!(fit.validation_accuracy, 1.0);
+    }
+
+    #[test]
+    fn stratified_split_handles_five_class_round_robin_and_sorted_labels() {
+        // Previously `i % 5 == 4` put 100% of class 4 into valid and 0% into train!
+        let ys_rr: Vec<usize> = (0..50).map(|i| i % 5).collect();
+        let xs_rr: Vec<Vec<f32>> = ys_rr
+            .iter()
+            .map(|&y| (0..5).map(|j| if j == y { 3.0 } else { 0.0 }).collect())
+            .collect();
+        let fit_rr = fit_features(&xs_rr, &ys_rr, 5, None).unwrap();
+        assert_eq!(fit_rr.validation_accuracy, 1.0);
+
+        let ys_sorted: Vec<usize> = (0..50).map(|i| i / 10).collect();
+        let xs_sorted: Vec<Vec<f32>> = ys_sorted
+            .iter()
+            .map(|&y| (0..5).map(|j| if j == y { 3.0 } else { 0.0 }).collect())
+            .collect();
+        let fit_sorted = fit_features(&xs_sorted, &ys_sorted, 5, None).unwrap();
+        assert_eq!(fit_sorted.validation_accuracy, 1.0);
+    }
+
+    #[test]
+    fn probe_load_rejects_malformed_dimensions() {
+        let path = std::env::temp_dir().join(format!("bad_probe_{}.json", std::process::id()));
+        let bad = Probe {
+            kind: PROBE_KIND.to_string(),
+            checkpoint: Checkpoint::English,
+            question_id: "q".to_string(),
+            labels: vec!["a".into(), "b".into(), "c".into()],
+            mean: vec![0.0; 2],
+            std: vec![1.0; 2],
+            weights: vec![0.0; 6],
+            bias: vec![0.0; 3],
+            l2: 0.1,
+            train_samples: 10,
+            validation_accuracy: 0.5,
+            zero_shot_validation_accuracy: 0.5,
+            residual: false,
+            stacked: true, // invalid: mean.len() == 2 <= labels.len() == 3
+        };
+        std::fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();
+        assert!(Probe::load(&path).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }

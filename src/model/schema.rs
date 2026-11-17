@@ -333,17 +333,26 @@ impl HierarchicalSchema {
         let coarse_warnings = self.coarse.validate("coarse_root", head_budget)?;
         warnings.extend(coarse_warnings);
 
-        let root_tokens: usize = self
-            .coarse
-            .render_options()
-            .iter()
-            .map(|o| estimate_tokens(o))
-            .sum();
+        let coarse_options = self.coarse.render_options();
+        let root_tokens: usize = coarse_options.iter().map(|o| estimate_tokens(o)).sum();
 
         let mut max_branch_tokens = 0;
 
-        // 2. Validate all branch questions
+        // 2. Validate all branch questions and ensure every branch key maps to a coarse option
         for (branch_key, node) in &self.branches {
+            let bk_clean = branch_key.trim().to_lowercase();
+            let bk_prefix = bk_clean.split(':').next().unwrap_or(&bk_clean).trim();
+            let matches_coarse = coarse_options.iter().any(|opt| {
+                let opt_clean = opt.trim().to_lowercase();
+                let opt_prefix = opt_clean.split(':').next().unwrap_or(&opt_clean).trim();
+                opt_clean == bk_clean || opt_prefix == bk_prefix
+            });
+            if !matches_coarse {
+                return Err(format!(
+                    "Hierarchical schema branch key '{}' does not match any coarse option",
+                    branch_key
+                ));
+            }
             match node {
                 HierarchicalNode::Leaf(q) => {
                     let branch_warnings =
@@ -381,20 +390,29 @@ impl HierarchicalSchema {
         })
     }
 
-    /// Render visual ASCII tree diagram of the hierarchy
-    pub fn render_ascii_tree(&self, head_budget: usize) -> String {
-        let mut out = String::new();
+    fn max_stage_tokens(&self) -> usize {
+        let root_tokens: usize = self
+            .coarse
+            .render_options()
+            .iter()
+            .map(|o| estimate_tokens(o))
+            .sum();
+        let branch_max = self
+            .branches
+            .values()
+            .map(|n| match n {
+                HierarchicalNode::Leaf(q) => {
+                    q.render_options().iter().map(|o| estimate_tokens(o)).sum()
+                }
+                HierarchicalNode::Subtree(sub) => sub.max_stage_tokens(),
+            })
+            .max()
+            .unwrap_or(0);
+        root_tokens.max(branch_max)
+    }
+
+    fn render_branches_into(&self, out: &mut String, base_indent: &str) {
         let coarse_options = self.coarse.render_options();
-        let root_tokens: usize = coarse_options.iter().map(|o| estimate_tokens(o)).sum();
-
-        out.push_str(&format!(
-            "Root: {} ({} options, ~{} tokens / budget {})\n",
-            self.coarse.instructions,
-            coarse_options.len(),
-            root_tokens,
-            head_budget
-        ));
-
         let total_coarse = coarse_options.len();
         for (i, opt) in coarse_options.iter().enumerate() {
             let is_last_coarse = i + 1 == total_coarse;
@@ -403,16 +421,30 @@ impl HierarchicalSchema {
             } else {
                 "├── "
             };
-            let child_indent = if is_last_coarse { "    " } else { "│   " };
+            let child_indent = format!(
+                "{}{}",
+                base_indent,
+                if is_last_coarse { "    " } else { "│   " }
+            );
 
             let key = opt.split(':').next().unwrap_or(opt).trim();
-            if let Some(node) = self.branches.get(key) {
+            let matched = self.branches.get(key).or_else(|| {
+                let key_low = key.to_lowercase();
+                self.branches.iter().find_map(|(bk, node)| {
+                    let bk_low = bk.trim().to_lowercase();
+                    let bk_pref = bk_low.split(':').next().unwrap_or(&bk_low).trim();
+                    (bk_low == key_low || bk_pref == key_low).then_some(node)
+                })
+            });
+
+            if let Some(node) = matched {
                 match node {
                     HierarchicalNode::Leaf(q) => {
                         let sub_opts = q.render_options();
                         let sub_tokens: usize = sub_opts.iter().map(|o| estimate_tokens(o)).sum();
                         out.push_str(&format!(
-                            "{}{}: {} ({} sub-options, ~{} tokens)\n",
+                            "{}{}{}: {} ({} sub-options, ~{} tokens)\n",
+                            base_indent,
                             prefix,
                             key,
                             q.instructions,
@@ -431,30 +463,47 @@ impl HierarchicalSchema {
                         }
                     }
                     HierarchicalNode::Subtree(sub) => {
+                        let sub_opts = sub.coarse.render_options();
+                        let sub_tokens: usize = sub_opts.iter().map(|o| estimate_tokens(o)).sum();
                         out.push_str(&format!(
-                            "{}{}: [Subtree: {}]\n",
-                            prefix, key, sub.coarse.instructions
+                            "{}{}{}: [Subtree: {} ({} options, ~{} tokens)]\n",
+                            base_indent,
+                            prefix,
+                            key,
+                            sub.coarse.instructions,
+                            sub_opts.len(),
+                            sub_tokens
                         ));
+                        sub.render_branches_into(out, &child_indent);
                     }
                 }
             } else {
-                out.push_str(&format!("{}{}: (Leaf at root level)\n", prefix, opt));
+                out.push_str(&format!(
+                    "{}{}{}: (Leaf at root level)\n",
+                    base_indent, prefix, opt
+                ));
             }
         }
+    }
+
+    /// Render visual ASCII tree diagram of the hierarchy
+    pub fn render_ascii_tree(&self, head_budget: usize) -> String {
+        let mut out = String::new();
+        let coarse_options = self.coarse.render_options();
+        let root_tokens: usize = coarse_options.iter().map(|o| estimate_tokens(o)).sum();
+
+        out.push_str(&format!(
+            "Root: {} ({} options, ~{} tokens / budget {})\n",
+            self.coarse.instructions,
+            coarse_options.len(),
+            root_tokens,
+            head_budget
+        ));
+
+        self.render_branches_into(&mut out, "");
 
         let leaves = self.total_leaf_count();
-        let max_b = self
-            .branches
-            .values()
-            .map(|n| match n {
-                HierarchicalNode::Leaf(q) => {
-                    q.render_options().iter().map(|o| estimate_tokens(o)).sum()
-                }
-                HierarchicalNode::Subtree(s) => s.total_leaf_count() * 10,
-            })
-            .max()
-            .unwrap_or(0);
-        let max_stage = root_tokens.max(max_b);
+        let max_stage = self.max_stage_tokens();
         out.push_str("\nSummary:\n");
         out.push_str(&format!("- Total Leaf Classes: {}\n", leaves));
         out.push_str(&format!("- Coarse Branches: {}\n", self.branches.len()));

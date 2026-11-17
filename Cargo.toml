@@ -21,18 +21,18 @@ csv = "1.4.0"
 rayon = "1.12.0"
 anyhow = "1.0.104"
 comfy-table = "8.0.1"
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
-candle-transformers = "0.11.0"
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 sha2 = "0.11.1"
 hmac = "0.13.0"
 
 # On macOS, Accelerate runs candle's CPU matrix multiplies, and Metal runs models on the GPU.
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.11.0", features = ["accelerate", "metal"] }
-candle-nn = { version = "0.11.0", features = ["accelerate", "metal"] }
-candle-transformers = { version = "0.11.0", features = ["accelerate", "metal"] }
+candle-core = { version = "0.11.1", features = ["accelerate", "metal"] }
+candle-nn = { version = "0.11.1", features = ["accelerate", "metal"] }
+candle-transformers = { version = "0.11.1", features = ["accelerate", "metal"] }
 
 [lib]
 name = "lemmata"

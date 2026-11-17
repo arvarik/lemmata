@@ -138,7 +138,40 @@ impl CascadeRouter {
             .values()
             .map(top_probability)
             .fold(1.0, f64::min);
-        (1.0 - least_certain).clamp(0.0, 1.0)
+        let raw = (1.0 - least_certain).clamp(0.0, 1.0);
+        // Round to 1e-6 so IEEE-754 representation drift (`1.0 - 0.85 = 0.15000000000000002`)
+        // matches `RISK_GRID` thresholds identically in both `fit_samples` and `route`.
+        (raw * 1_000_000.0).round() / 1_000_000.0
+    }
+
+    /// Build a keep-or-defer decision from an already-computed `DecisionResult`.
+    pub fn route_with_result(&self, item: &DataItem, res: DecisionResult) -> CascadeDecision {
+        let risk = Self::risk(&res);
+        let tier = if risk <= self.config.risk_threshold {
+            SystemTier::System1Fast
+        } else {
+            SystemTier::System2Deliberative
+        };
+        let (cost_usd, prompt_seed) = match tier {
+            SystemTier::System1Fast => (0.0, None),
+            SystemTier::System2Deliberative => {
+                let state = item.state_text();
+                let prompt = format!(
+                    "Input context:\n{state}\n\nSystem 1 probabilities:\n{}\nSystem 1 risk: {:.1}%\n\nPlease deliberate and provide the final structured classification.",
+                    format_priors(&res),
+                    risk * 100.0
+                );
+                (self.config.system2_cost_per_call, Some(prompt))
+            }
+        };
+        CascadeDecision {
+            item_id: item.id.clone(),
+            tier,
+            risk: (risk * 10000.0).round() / 10000.0,
+            system1_result: res,
+            cost_usd,
+            prompt_seed,
+        }
     }
 
     /// Classify one item and keep it or defer it.
@@ -149,35 +182,7 @@ impl CascadeRouter {
         classifier: &LayaClassifier,
     ) -> Result<CascadeDecision> {
         let res = classifier.classify(&item.state, questions)?;
-        let risk = Self::risk(&res);
-        let tier = if risk <= self.config.risk_threshold {
-            SystemTier::System1Fast
-        } else {
-            SystemTier::System2Deliberative
-        };
-        let (cost_usd, prompt_seed) = match tier {
-            SystemTier::System1Fast => (0.0, None),
-            SystemTier::System2Deliberative => {
-                let state = match &item.state {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other)?,
-                };
-                let prompt = format!(
-                    "Input context:\n{state}\n\nSystem 1 probabilities:\n{}\nSystem 1 risk: {:.1}%\n\nPlease deliberate and provide the final structured classification.",
-                    format_priors(&res),
-                    risk * 100.0
-                );
-                (self.config.system2_cost_per_call, Some(prompt))
-            }
-        };
-        Ok(CascadeDecision {
-            item_id: item.id.clone(),
-            tier,
-            risk: (risk * 10000.0).round() / 10000.0,
-            system1_result: res,
-            cost_usd,
-            prompt_seed,
-        })
+        Ok(self.route_with_result(item, res))
     }
 
     /// Test every threshold in `RISK_GRID` on labelled items, and choose the loosest one whose
@@ -190,8 +195,10 @@ impl CascadeRouter {
         confidence: f64,
         system2_cost: f64,
     ) -> Result<DeferFit> {
-        if !(0.0..1.0).contains(&target_accuracy) || !(0.0..1.0).contains(&confidence) {
-            bail!("--target-accuracy and --confidence must be between 0 and 1");
+        if !(target_accuracy > 0.0 && target_accuracy < 1.0)
+            || !(confidence > 0.0 && confidence < 1.0)
+        {
+            bail!("--target-accuracy and --confidence must be strictly between 0 and 1");
         }
         let samples = collect_samples(items, questions, classifier)?;
         Ok(fit_samples(
@@ -214,7 +221,8 @@ pub fn fit_samples(
 ) -> DeferFit {
     {
         let n = samples.len();
-        let alpha = (1.0 - confidence) / RISK_GRID.len() as f64;
+        let alpha = ((1.0 - confidence) / RISK_GRID.len() as f64).clamp(1e-15, 1.0);
+        let safe_target = target_accuracy.clamp(1e-9, 1.0 - 1e-9);
 
         let points: Vec<DeferPoint> = RISK_GRID
             .iter()
@@ -226,7 +234,11 @@ pub fn fit_samples(
                     .collect();
                 let kept_correct = kept.iter().filter(|&&c| c).count();
                 let lower_bound = binomial_lower_bound(kept_correct, kept.len(), alpha);
-                let coverage = kept.len() as f64 / n as f64;
+                let coverage = if n == 0 {
+                    0.0
+                } else {
+                    kept.len() as f64 / n as f64
+                };
                 DeferPoint {
                     threshold,
                     kept: kept.len(),
@@ -266,7 +278,7 @@ pub fn fit_samples(
             alpha,
             points,
             policy,
-            min_items_needed: (alpha.ln() / target_accuracy.ln()).ceil() as usize,
+            min_items_needed: (alpha.ln() / safe_target.ln()).ceil().max(1.0) as usize,
         }
     }
 }
