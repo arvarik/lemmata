@@ -26,6 +26,12 @@ pub struct ClassifierConfig {
     pub multi_label_threshold: f64,
     pub local_weights_path: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_path: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id_override: Option<String>,
+    #[serde(default)]
+    pub is_custom_model: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qats_profile: Option<crate::engine::calibrate::QatsProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cost_weights: BTreeMap<String, f64>,
@@ -84,6 +90,9 @@ impl ClassifierConfig {
             multi_label: false,
             multi_label_threshold: 0.40,
             local_weights_path,
+            adapter_path: None,
+            model_id_override: None,
+            is_custom_model: false,
             qats_profile: None,
             cost_weights: BTreeMap::new(),
             hypothesis_template: None,
@@ -96,6 +105,82 @@ impl ClassifierConfig {
             crate::engine::model_calibration::apply_persisted_calibration(&mut cfg, &cal);
         }
         cfg
+    }
+
+    /// Construct a `ClassifierConfig` from a unified `ModelSpec` (supporting custom local
+    /// checkpoint directories and/or PEFT adapters, resetting stale zero-shot temperatures).
+    pub fn with_model_spec(spec: &crate::model::ModelSpec) -> Self {
+        if !spec.is_custom_or_adapted() {
+            return Self::with_checkpoint(spec.family);
+        }
+
+        let mut temp_map = BTreeMap::new();
+        let active_dir = spec.active_config_dir();
+        let rl_cfg_path = active_dir.join("rl_agent_config.json");
+        // Only read `temperature_by_options` from `rl_agent_config.json` in the active custom/adapter
+        // directory (never from the un-finetuned base checkpoint).
+        if let Ok(content) = std::fs::read_to_string(&rl_cfg_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = val
+                .get("temperature_by_options")
+                .and_then(|v| v.as_object())
+        {
+            for (k, v) in obj {
+                if let Some(t) = v.as_f64() {
+                    temp_map.insert(k.clone(), t);
+                }
+            }
+        }
+
+        let base_st = spec.base_weights_dir().join("model.safetensors");
+        let local_weights_path = Some(base_st);
+
+        let mut cfg = Self {
+            checkpoint: spec.family,
+            temperature: 1.0,
+            temperature_by_options: temp_map,
+            escalate_threshold: 0.5,
+            multi_label: false,
+            multi_label_threshold: 0.40,
+            local_weights_path,
+            adapter_path: spec.adapter_dir.clone(),
+            model_id_override: Some(spec.display_model_id()),
+            is_custom_model: true,
+            qats_profile: None,
+            cost_weights: BTreeMap::new(),
+            hypothesis_template: None,
+            chunk_strategy: crate::model::ChunkStrategy::default(),
+            shortlist_k: 0,
+            probe: None,
+        };
+
+        if let Some(cal) =
+            crate::engine::model_calibration::load_checkpoint_calibration_from(&active_dir)
+        {
+            crate::engine::model_calibration::apply_persisted_calibration(&mut cfg, &cal);
+        }
+        cfg
+    }
+
+    /// Reconstruct the `ModelSpec` corresponding to this configuration.
+    pub fn model_spec(&self) -> crate::model::ModelSpec {
+        let model_dir = if self.is_custom_model {
+            self.local_weights_path
+                .as_ref()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .filter(|d| *d != self.checkpoint.local_dir())
+        } else {
+            None
+        };
+        crate::model::ModelSpec {
+            family: self.checkpoint,
+            model_dir,
+            adapter_dir: self.adapter_path.clone(),
+        }
+    }
+
+    pub fn is_custom_or_adapted(&self) -> bool {
+        self.is_custom_model || self.adapter_path.is_some()
     }
 
     pub fn with_temperature(mut self, temp: f64) -> Self {
@@ -138,6 +223,10 @@ impl LayaClassifier {
 
     pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
         Self::new(ClassifierConfig::with_checkpoint(checkpoint))
+    }
+
+    pub fn with_model_spec(spec: &crate::model::ModelSpec) -> Self {
+        Self::new(ClassifierConfig::with_model_spec(spec))
     }
 
     pub fn with_auto_best() -> Self {
@@ -284,6 +373,14 @@ impl LayaClassifier {
         }
     }
 
+    /// Active PEFT adapter directory for `ckpt`, if configured.
+    fn adapter_dir(&self, ckpt: Checkpoint) -> Option<&std::path::Path> {
+        self.config
+            .adapter_path
+            .as_deref()
+            .filter(|_| ckpt == self.config.checkpoint)
+    }
+
     /// Perform inference for a single question on state text.
     pub fn classify_single(&self, state_text: &str, question: &Question) -> Result<DecisionAnswer> {
         let mut map = BTreeMap::new();
@@ -327,9 +424,10 @@ impl LayaClassifier {
         let (active_ckpt, _) = self.resolve_checkpoint_for_questions(&state_text, questions);
         // Load the weights before the clock starts, so latency_ms measures inference only.
         let dir = self.weights_dir(active_ckpt);
+        let adir = self.adapter_dir(active_ckpt);
         let native = crate::model::native::uses_native(active_ckpt, &dir);
         if native {
-            crate::model::native::shared(active_ckpt, &dir)?;
+            crate::model::native::shared_with_adapter(active_ckpt, &dir, adir)?;
         }
         let start = Instant::now();
 
@@ -390,7 +488,8 @@ impl LayaClassifier {
                     multi_label: self.config.multi_label,
                 })
                 .collect();
-            let scores = crate::model::native::shared(active_ckpt, &dir)?.score_batch(&reqs)?;
+            let scores = crate::model::native::shared_with_adapter(active_ckpt, &dir, adir)?
+                .score_batch(&reqs)?;
             for (&i, scored) in batch_index.iter().zip(scores) {
                 batched[i] = Some(scored);
             }
@@ -462,7 +561,7 @@ impl LayaClassifier {
                 QuestionType::Noul => 2,
             };
             let has_explicit_temp = (self.config.temperature - 1.0).abs() > 1e-6;
-            let fallback_temp = if has_explicit_temp {
+            let fallback_temp = if has_explicit_temp || self.config.is_custom_or_adapted() {
                 self.config.temperature
             } else {
                 active_ckpt.default_temperatures()[qtype_idx]
@@ -710,10 +809,16 @@ impl LayaClassifier {
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
 
         // Label simulated results so they cannot pass for model output in logs or audit receipts.
+        let base_label = self
+            .config
+            .model_id_override
+            .as_deref()
+            .filter(|_| active_ckpt == self.config.checkpoint)
+            .unwrap_or_else(|| active_ckpt.repo_id());
         let model = if native {
-            active_ckpt.repo_id().to_string()
+            base_label.to_string()
         } else {
-            format!("mock:{}", active_ckpt.repo_id())
+            format!("mock:{base_label}")
         };
         Ok(DecisionResult {
             model,
@@ -765,8 +870,20 @@ impl LayaClassifier {
                 probe.labels
             );
         }
-        let embedding = crate::model::native::shared(ckpt, dir)?
-            .embed(state_text, self.config.chunk_strategy)?;
+        if let Some(expected_fp) = &probe.model_fingerprint
+            && let Ok(actual_fp) = self.config.model_spec().portable_fingerprint()
+            && expected_fp != &actual_fp
+        {
+            bail!(
+                "The probe for '{}' was fitted on weights/adapter fingerprint {}, which differs from the active model ({}). Refit the probe with `lemmata probe fit`.",
+                probe.question_id,
+                &expected_fp[..expected_fp.len().min(12)],
+                &actual_fp[..actual_fp.len().min(12)]
+            );
+        }
+        let embedding =
+            crate::model::native::shared_with_adapter(ckpt, dir, self.adapter_dir(ckpt))?
+                .embed(state_text, self.config.chunk_strategy)?;
         if embedding.len() != probe.embedding_dim() {
             bail!(
                 "The probe expects {}-dimensional embeddings, and {ckpt} produced {}. Refit the probe.",
@@ -848,8 +965,9 @@ impl LayaClassifier {
             crate::model::ChunkStrategy::TruncatePrefix
         };
         let dir = self.weights_dir(ckpt);
+        let adir = self.adapter_dir(ckpt);
         if native::uses_native(ckpt, &dir) {
-            return native::shared(ckpt, &dir)?.score(&native::ScoreRequest {
+            return native::shared_with_adapter(ckpt, &dir, adir)?.score(&native::ScoreRequest {
                 state: state_text,
                 question: q,
                 options,

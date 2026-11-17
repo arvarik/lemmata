@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::classifier::LayaClassifier;
 use super::evaluator::Evaluator;
 use crate::datasource::DataItem;
-use crate::model::{Checkpoint, Question};
+use crate::model::{Checkpoint, ModelSpec, Question};
 
 pub struct ExperimentRunner;
 
@@ -82,10 +82,43 @@ impl ExperimentRunner {
         ModelArenaReport,
         Option<(Vec<String>, Vec<super::slicing::ArenaSliceRow>)>,
     )> {
+        let specs: Vec<ModelSpec> = checkpoints
+            .iter()
+            .copied()
+            .map(ModelSpec::from_checkpoint)
+            .collect();
+        Self::run_arena_specs_with_slices(
+            items,
+            questions,
+            &specs,
+            top_disagreements,
+            chunk_strategy,
+            hypothesis_template,
+            shortlist_k,
+            slice_by,
+        )
+    }
+
+    /// Single-pass Head-to-Head Model Arena over arbitrary [`ModelSpec`] targets (canonical slugs,
+    /// standalone local checkpoint directories, and `base+adapter` PEFT specs).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn run_arena_specs_with_slices(
+        items: &[DataItem],
+        questions: &BTreeMap<String, Question>,
+        specs: &[ModelSpec],
+        top_disagreements: usize,
+        chunk_strategy: crate::model::ChunkStrategy,
+        hypothesis_template: Option<&str>,
+        shortlist_k: usize,
+        slice_by: Option<&super::slicing::SliceBy>,
+    ) -> Result<(
+        ModelArenaReport,
+        Option<(Vec<String>, Vec<super::slicing::ArenaSliceRow>)>,
+    )> {
         if items.is_empty() {
             bail!("No items provided for Model Arena comparison");
         }
-        if checkpoints.is_empty() {
+        if specs.is_empty() {
             bail!("At least one checkpoint is required for Model Arena");
         }
 
@@ -102,8 +135,10 @@ impl ExperimentRunner {
         }
         let mut slice_rows = Vec::new();
 
-        for &ckpt in checkpoints {
-            let mut cls = LayaClassifier::with_checkpoint(ckpt)
+        for spec in specs {
+            let ckpt = spec.family;
+            let model_label = spec.display_model_id();
+            let mut cls = LayaClassifier::with_model_spec(spec)
                 .with_chunk_strategy(chunk_strategy)
                 .with_shortlist_k(shortlist_k);
             if let Some(tpl) = hypothesis_template {
@@ -125,7 +160,7 @@ impl ExperimentRunner {
                     }
                 }
                 slice_rows.push(super::slicing::ArenaSliceRow {
-                    checkpoint: ckpt.repo_id().to_string(),
+                    checkpoint: model_label.clone(),
                     slice_accuracies,
                     overall_accuracy: eval_metrics.as_ref().map(|m| m.accuracy).unwrap_or(0.0),
                 });
@@ -209,14 +244,14 @@ impl ExperimentRunner {
                 }
             }
             model_preds.push(preds);
-            raw_entries.push((ckpt, eval_metrics, avg_lat));
+            raw_entries.push((ckpt, model_label, eval_metrics, avg_lat));
         }
 
         let ref_preds = &model_preds[0];
-        let ref_lat = raw_entries[0].2.max(1e-6);
-        let mut entries = Vec::with_capacity(checkpoints.len());
+        let ref_lat = raw_entries[0].3.max(1e-6);
+        let mut entries = Vec::with_capacity(specs.len());
 
-        for (idx, (ckpt, metrics, avg_lat)) in raw_entries.into_iter().enumerate() {
+        for (idx, (ckpt, model_label, metrics, avg_lat)) in raw_entries.into_iter().enumerate() {
             let cur_preds = &model_preds[idx];
             let n = ref_preds.len().min(cur_preds.len()).max(1);
             let mut agree = 0usize;
@@ -261,7 +296,7 @@ impl ExperimentRunner {
             };
 
             entries.push(ModelArenaEntry {
-                checkpoint: ckpt.repo_id().to_string(),
+                checkpoint: model_label,
                 backbone: ckpt.backbone().to_string(),
                 params: ckpt.param_count().to_string(),
                 accuracy: metrics.as_ref().map(|m| m.accuracy),
@@ -284,7 +319,7 @@ impl ExperimentRunner {
                 let mut min_conf = ref_p.3;
                 let mut max_conf = ref_p.3;
                 let mut by_model = BTreeMap::new();
-                for (m_idx, &ckpt) in checkpoints.iter().enumerate() {
+                for (m_idx, spec) in specs.iter().enumerate() {
                     if let Some((_, p, _, conf)) = model_preds[m_idx].get(i) {
                         if p != first_pred {
                             distinct = true;
@@ -292,7 +327,7 @@ impl ExperimentRunner {
                         min_conf = min_conf.min(*conf);
                         max_conf = max_conf.max(*conf);
                         by_model.insert(
-                            ckpt.repo_id().to_string(),
+                            spec.display_model_id(),
                             format!("{p} ({:.0}%)", conf * 100.0),
                         );
                     }
@@ -317,7 +352,7 @@ impl ExperimentRunner {
 
         Ok((
             ModelArenaReport {
-                reference_model: checkpoints[0].repo_id().to_string(),
+                reference_model: specs[0].display_model_id(),
                 sample_count: items.len(),
                 models: entries,
                 top_disagreements: disagreements,

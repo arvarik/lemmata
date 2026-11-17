@@ -479,6 +479,75 @@ lemmata report --file data/customer_support.jsonl --schema schema/questions.json
 lemmata report --file data/customer_support.jsonl --schema schema/questions.json --format md --output report.md
 ```
 
+### 21. Dataset Lifecycle & Leakage-Safe Splitting (`lemmata dataset`)
+Canonicalizes raw tabular or Hugging Face datasets into `DataItem` JSONL (`import`), partitions them into deterministic `train` / `val` / `cal` / `test` splits with template-masked and 128-permutation MinHash LSH near-duplicate clustering (`split`), and runs a 5-stage preflight check covering label bijection, empirical Bayes noise ceilings, calibration/conformal sample floors, and tokenizer truncation collisions (`verify`):
+
+```bash
+# 1. Import raw CSV/TSV/JSONL/Parquet or Hugging Face Hub datasets, keeping slice metadata out of encoder state
+lemmata dataset import \
+  --file data/feedback_dataset.csv \
+  --schema schema/questions.json \
+  --text-col text \
+  --meta-cols region,channel \
+  --drop-empty \
+  --output data/canonical.jsonl
+
+# 2. Create deterministic 70/10/10/10 splits + cryptographic dataset_manifest.json
+lemmata dataset split \
+  --file data/canonical.jsonl \
+  --schema schema/questions.json \
+  --out-dir splits \
+  --seed 42
+
+# 3. Verify label bijection, MinHash cross-split isolation, and head/context token budgets
+lemmata dataset verify --split-dir splits --schema schema/questions.json -c english
+```
+
+### 22. External-GPU Fine-Tuning & Native PEFT Adapters (`lemmata finetune`)
+Generates a self-bootstrapping PEP 723 `uv run` bundle (`train.py` + `bundle_manifest.json` + `train`/`val`/`cal` splits, strictly excluding `test.jsonl`) for external CUDA GPUs (`L4`, `A10G`, `L40S`, `A100`, `H100`), supporting all three native architectures (Laya joint decision head, ModernBERT/DeBERTa-v3 NLI cross-encoders, and EuroBERT/NeoBERT MLM verbalizers) with **rsLoRA**, **DoRA**, or full fine-tuning, NEFTune, AWS Spot `SIGTERM`/IMDSv2 checkpoint resume, and post-training temperature calibration.
+
+Pulled PEFT adapters (`adapter_config.json` + `adapter_model.safetensors`, typically 5–20 MB) fold directly into `candle` weights in `F32` at load time via `--adapter <DIR>` across `classify`, `test`, `report`, `calibrate`, `conformal`, `defer`, `explain`, and `bench` with zero runtime latency overhead, or merge permanently via `lemmata finetune merge`:
+
+```bash
+# 1. Prepare a lightweight GPU bundle locally (test.jsonl is never copied into bundle/)
+lemmata finetune prepare \
+  --split-dir splits \
+  --schema schema/questions.json \
+  -c english \
+  --method dora \
+  --rank 16 \
+  --alpha 32 \
+  --out runs/ft_v1
+
+# 2. Sync bundle to an SSH GPU box or S3 URI (run `uv run train.py` on the GPU host), then pull artifacts back
+lemmata finetune push --run runs/ft_v1 --remote ubuntu@gpu-host:~/ft/ft_v1 --dry-run
+lemmata finetune pull --run runs/ft_v1 --remote ubuntu@gpu-host:~/ft/ft_v1 --dry-run
+
+# 3. Run 5-layer tamper, base-header, schema, and <1 ms binary-filter zero-leakage verification
+lemmata finetune verify --artifact runs/ft_v1/artifacts --split-dir splits --schema schema/questions.json
+
+# 4. Run zero-overhead native PEFT inference directly, or merge into a standalone local checkpoint
+lemmata classify -c english --adapter runs/ft_v1/artifacts "Charged twice on invoice #4411" --schema schema/questions.json
+lemmata finetune merge --adapter runs/ft_v1/artifacts --output models/laya-ft-v1
+```
+
+### 23. Paired Base-vs-Candidate Experimentation (`lemmata experiment`)
+Evaluates a base checkpoint head-to-head against one or more fine-tuned candidates on a locked `test` split, enforcing 5-layer provenance and `trained_inputs.sha256.bin` zero-leakage checks before scoring. When a disjoint `cal` split is provided (`--cal-file` or `--split-dir`), `experiment` compares both raw and fairly post-hoc-calibrated regimes (`PROMOTE`, `PROMOTE_WITH_CALIBRATION`, `INCONCLUSIVE`, `REGRESSED`) with Lancaster mid-p McNemar tests, Holm-Bonferroni per-question multiplicity adjustment, group-aware paired BCa bootstrap 95% CIs, Phipson-Smyth sign-flip permutation p-values, log-softmax NLL, top-label ECE & equal-mass ACE, Excess-AURC, conformal singleton rates, deferral coverage deltas, and ABBA interleaved latency timing:
+
+```bash
+# Paired statistical evaluation (auto-resolves test.jsonl, cal.jsonl, and dataset_manifest.json from --split-dir)
+lemmata experiment \
+  --base english \
+  --candidate runs/ft_v1/artifacts \
+  --split-dir splits \
+  --schema schema/questions.json \
+  --fail-on-regression \
+  --output runs/ft_v1/experiment_report.md
+
+# Multi-checkpoint arena also accepts inline `base+adapter` and custom local checkpoint directories
+lemmata compare -c english,english+runs/ft_v1/artifacts --file splits/test.jsonl --schema schema/questions.json
+```
+
 ## 📄 License
 
 Apache License 2.0.

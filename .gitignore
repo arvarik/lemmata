@@ -40,8 +40,12 @@ models/
 # ==============================================================================
 /output/
 output/
+/runs/
+runs/
 /logs/
 logs/
+__pycache__/
+*.py[cod]
 *.log
 review_queue*.jsonl
 rlcd_dataset*.jsonl

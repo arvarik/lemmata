@@ -3,6 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+/// Convert a `DataItem` state payload into model-visible text, unwrapping single-key `{"text": s}`
+/// objects cleanly while serializing multi-field structured JSON payloads deterministically.
+pub fn state_to_text(state: &serde_json::Value) -> Cow<'_, str> {
+    match state {
+        serde_json::Value::String(s) => Cow::Borrowed(s.as_str()),
+        serde_json::Value::Object(map) if map.len() == 1 => match map.get("text") {
+            Some(serde_json::Value::String(s)) => Cow::Borrowed(s.as_str()),
+            _ => Cow::Owned(serde_json::to_string(state).unwrap_or_default()),
+        },
+        other => Cow::Owned(serde_json::to_string(other).unwrap_or_default()),
+    }
+}
+
 /// A standardized item ingested from any data source for Laya classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataItem {
@@ -50,27 +63,13 @@ impl DataItem {
     }
 
     /// Canonical model-visible text representation of a `state` JSON value.
-    ///
-    /// Unwraps single-key `{"text": "..."}` wrappers emitted by plain-text, CSV, and JSONL
-    /// ingestion so encoders and routers see raw text instead of JSON punctuation, while
-    /// serializing genuine multi-field structured objects as JSON.
     pub fn state_to_text(state: &serde_json::Value) -> Cow<'_, str> {
-        match state {
-            serde_json::Value::String(text) => Cow::Borrowed(text.as_str()),
-            serde_json::Value::Object(map) if map.len() == 1 => {
-                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                    Cow::Borrowed(text)
-                } else {
-                    Cow::Owned(serde_json::to_string(state).unwrap_or_default())
-                }
-            }
-            other => Cow::Owned(serde_json::to_string(other).unwrap_or_default()),
-        }
+        state_to_text(state)
     }
 
     /// Return the canonical model-visible text representation of `self.state`.
     pub fn state_text(&self) -> Cow<'_, str> {
-        Self::state_to_text(&self.state)
+        state_to_text(&self.state)
     }
 
     /// Helper to convert state to a readable string for logging or preview.

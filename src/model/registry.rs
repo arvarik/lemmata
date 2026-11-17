@@ -232,8 +232,24 @@ pub fn inspect_model_directory(dir: &Path) -> Result<DynamicModelSpec> {
         .as_ref()
         .is_some_and(|s| s.total_parameters > 0 && s.file_size_bytes > 0);
 
+    let train_manifest = read_json_opt(&dir.join("training_manifest.json")).unwrap_or(Value::Null);
+    let ft_model_id = train_manifest
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|run_id| {
+            let base = train_manifest
+                .get("base_model")
+                .and_then(|b| b.get("repo_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("custom");
+            format!("{base}+ft:{run_id}")
+        });
+
     let model_id = canonical_model_id(dir)
         .map(String::from)
+        .or(ft_model_id)
         .or_else(|| get_str("model_id"))
         .or_else(|| get_str("_name_or_path"))
         .or_else(|| get_str("model_name"))
@@ -294,7 +310,12 @@ pub fn scan_registered_models() -> Vec<DynamicModelSpec> {
         let mut extra_paths: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_dir() && p.join("config.json").exists())
+            .filter(|p| {
+                p.is_dir()
+                    && (p.join("config.json").exists()
+                        || p.join("encoder/config.json").exists()
+                        || p.join("rl_agent_config.json").exists())
+            })
             .collect();
         extra_paths.sort();
 

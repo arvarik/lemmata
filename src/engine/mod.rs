@@ -5,6 +5,7 @@ pub mod cascade;
 pub mod classifier;
 pub mod conformal;
 pub mod consensus;
+pub mod dataset;
 pub mod evaluator;
 pub mod experiment;
 pub mod explain;
@@ -16,6 +17,7 @@ pub mod learn_visuals;
 pub mod metrics;
 pub mod model_calibration;
 pub mod ood;
+pub mod paired_eval;
 pub mod probe;
 pub mod shortlist;
 pub mod slicing;
@@ -24,7 +26,7 @@ pub mod synthesis;
 
 pub use attest::{
     AttestationEngine, AttestationVerificationReport, DecisionReceipt, RECEIPT_VERSION,
-    schema_digest,
+    model_provenance_id, schema_digest,
 };
 pub use cache::{
     CacheFileSummary, CacheStats, DecisionCache, cache_dir, cache_summary, clear_cache,
@@ -42,6 +44,16 @@ pub use cascade::{
 pub use classifier::{ClassifierConfig, LayaClassifier};
 pub use conformal::{ConformalEngine, ConformalReport};
 pub use consensus::{ConsensusEngine, ConsensusResult, ConsensusStatus};
+pub use dataset::{
+    CheckSeverity, DATASET_MANIFEST_VERSION, DatasetImporter, DatasetManifest, DatasetSplitter,
+    DatasetVerifier, DatasetVerifyConfig, DatasetVerifyReport, DedupAction, DedupSummary,
+    DeterministicRng, ImportConfig, ImportReport, ImportSource, LeakageOverlapReport, MinHashIndex,
+    PreflightFinding, QuestionPreflightStats, SplitConfig, SplitFileMeta, SplitMix64, SplitOutput,
+    SplitRatios, TRAINED_FILTER_MAGIC, TokenizerAuditStats, TrainedInputsFilter,
+    compute_item_digest, compute_item_set_digest, compute_state_merkle_sha256, file_sha256_hex,
+    normalize_state_for_leakage, normalize_template_for_grouping, parse_key_val_pairs,
+    parse_value_map_specs, read_dataset_items, sha256_hex, sha256_u64_prefix, write_dataset_jsonl,
+};
 pub use evaluator::{BaselineComparison, Evaluator};
 pub use experiment::{ArenaDisagreement, ExperimentRunner, ModelArenaEntry, ModelArenaReport};
 pub use explain::AttributionEngine;
@@ -72,7 +84,16 @@ pub use model_calibration::{
     save_checkpoint_calibration, save_checkpoint_calibration_at,
 };
 pub use ood::{OodDetector, OodEvaluation, OodProfile, compute_free_energy};
-pub use probe::{PROBE_KIND, Probe, choice_labels, fit_probe};
+pub use paired_eval::{
+    CalibrationMode, ExperimentParticipant, ExperimentVerdict, FlipKind, FlipTransition,
+    LabelDeltaRow, McNemarStats, MetricDeltaCi, PairedComparisonSummary, PairedExperimentConfig,
+    PairedExperimentReport, PairedExperimentRunner, PairedLatencyStats, PairedSliceRow,
+    PrecomputedCalBundle, ProvenanceAuditReport, QuestionPairedReport, RegressionCase,
+    SelectiveRiskSummary, holm_bonferroni, infer_base_checkpoint_from_artifact, inv_normal_cdf,
+    mcnemar_test, normal_cdf, verify_experiment_provenance,
+    verify_experiment_provenance_with_base_dir,
+};
+pub use probe::{PROBE_KIND, Probe, choice_labels, fit_probe, fit_probe_with_spec};
 pub use shortlist::{ShortlistResult, expand_shortlisted_logits, shortlist_options};
 pub use slicing::{
     ArenaSliceRow, SliceBy, SliceMetricEntry, compute_arena_slice_matrix, evaluate_slices,

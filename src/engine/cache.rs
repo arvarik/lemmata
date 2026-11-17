@@ -145,9 +145,10 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// A SHA-256 over everything that changes a decision: the lemmata version, the backend, the
-/// device, the model settings (saved calibration included), the probe, and the weights files.
+/// device, the model settings (saved calibration included), the probe, the base Safetensors
+/// header fingerprint, and any active PEFT adapter config + weights SHA-256.
 pub fn fingerprint(classifier: &LayaClassifier) -> Result<String> {
-    use crate::model::native;
+    use crate::model::{native, safetensors_header_sha256, sha256_file};
     let cfg = classifier.config();
     let mut h = Sha256::new();
     h.update(env!("CARGO_PKG_VERSION"));
@@ -165,12 +166,15 @@ pub fn fingerprint(classifier: &LayaClassifier) -> Result<String> {
         c => vec![c],
     };
     for ckpt in checkpoints {
+        if ckpt == Checkpoint::AutoRoute {
+            continue;
+        }
         let file = match &cfg.local_weights_path {
             Some(path) if ckpt == cfg.checkpoint => path.clone(),
             _ => ckpt.local_dir().join("model.safetensors"),
         };
-        if let Ok(hdr_sha) = crate::model::safetensors_header_sha256(&file) {
-            h.update(format!("{}|hdr={}", file.display(), hdr_sha));
+        if let Ok(hdr_sha) = safetensors_header_sha256(&file) {
+            h.update(format!("{}|hdr={hdr_sha}", file.display()));
         } else if let Ok(meta) = std::fs::metadata(&file) {
             h.update(format!(
                 "{}|{}|{:?}",
@@ -185,6 +189,20 @@ pub fn fingerprint(classifier: &LayaClassifier) -> Result<String> {
             if let Ok(cal_bytes) = std::fs::read(&cal_file) {
                 h.update(&cal_bytes);
             }
+        }
+    }
+    if let Some(adir) = &cfg.adapter_path {
+        if let Ok(cfg_bytes) = std::fs::read(adir.join("adapter_config.json")) {
+            h.update(b"|adapter_cfg:");
+            h.update(&cfg_bytes);
+        }
+        if let Ok(st_sha) = sha256_file(&adir.join("adapter_model.safetensors")) {
+            h.update(format!("|adapter_st:{st_sha}"));
+        }
+        let cal_file = adir.join(crate::engine::model_calibration::MODEL_CALIBRATION_FILENAME);
+        if let Ok(cal_bytes) = std::fs::read(&cal_file) {
+            h.update(b"|adapter_cal:");
+            h.update(&cal_bytes);
         }
     }
     Ok(to_hex(&h.finalize()))

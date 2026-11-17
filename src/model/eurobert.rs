@@ -119,6 +119,20 @@ pub struct EuroBertMlm {
 impl EuroBertMlm {
     /// Load `dir` (config.json + model.safetensors), F32 on CPU.
     pub fn load(dir: &Path) -> Result<Self> {
+        let device = crate::model::native::device()?;
+        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[dir.join("model.safetensors")],
+                DType::F32,
+                &device,
+            )?
+        };
+        Self::load_with_vb(dir, vb, device)
+    }
+
+    /// Load `EuroBertMlm` from `dir/config.json` using a caller-supplied `VarBuilder` (e.g. `PeftBackend`).
+    pub fn load_with_vb(dir: &Path, vb: VarBuilder<'_>, device: Device) -> Result<Self> {
         let path = dir.join("config.json");
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -142,15 +156,6 @@ impl EuroBertMlm {
             );
         }
 
-        let device = crate::model::native::device()?;
-        // SAFETY: the file is memory-mapped read-only and is not modified while lemmata runs.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[dir.join("model.safetensors")],
-                DType::F32,
-                &device,
-            )?
-        };
         let model = vb.pp("model");
         let layers = (0..cfg.num_hidden_layers)
             .map(|i| Layer::load(model.pp(format!("layers.{i}")), &cfg, n_kv_heads, head_dim))
